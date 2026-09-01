@@ -1,0 +1,16 @@
+{
+  "name": "omarchy-bot",
+  "private": true,
+  "type": "module",
+  "workspaces": ["packages/*", "workers/*", "apps/*", "tests/*"],
+  "scripts": {
+    "dev": "bun run --filter='*' dev",
+    "build": "bun run --filter='*' build",
+    "test": "bun test",
+    "typecheck": "tsc -b"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "@types/bun": "latest"
+  }
+}
