@@ -9,6 +9,19 @@
         "typescript": "^5.7.0",
       },
     },
+    "apps/daemon": {
+      "name": "@omarchy-bot/daemon",
+      "version": "0.1.0",
+      "bin": {
+        "omarchy-bot-daemon": "./src/bootstrap/main.ts",
+      },
+      "dependencies": {
+        "@omarchy-bot/agent-contract": "workspace:*",
+        "@omarchy-bot/domain": "workspace:*",
+        "@omarchy-bot/protocol": "workspace:*",
+        "zod": "^3.24.0",
+      },
+    },
     "packages/agent-contract": {
       "name": "@omarchy-bot/agent-contract",
       "version": "0.1.0",
@@ -48,6 +61,8 @@
     "@omarchy-bot/agent-contract": ["@omarchy-bot/agent-contract@workspace:packages/agent-contract"],
 
     "@omarchy-bot/api-client": ["@omarchy-bot/api-client@workspace:packages/api-client"],
+
+    "@omarchy-bot/daemon": ["@omarchy-bot/daemon@workspace:apps/daemon"],
 
     "@omarchy-bot/domain": ["@omarchy-bot/domain@workspace:packages/domain"],
 

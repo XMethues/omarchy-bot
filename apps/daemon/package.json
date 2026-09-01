@@ -1,0 +1,14 @@
+{
+  "name": "@omarchy-bot/daemon",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "bin": { "omarchy-bot-daemon": "./src/bootstrap/main.ts" },
+  "scripts": { "dev": "bun --watch src/bootstrap/main.ts", "start": "bun src/bootstrap/main.ts" },
+  "dependencies": {
+    "@omarchy-bot/agent-contract": "workspace:*",
+    "@omarchy-bot/domain": "workspace:*",
+    "@omarchy-bot/protocol": "workspace:*",
+    "zod": "^3.24.0"
+  }
+}
