@@ -56,6 +56,14 @@
         "@omarchy-bot/domain": "workspace:*",
       },
     },
+    "workers/computer": {
+      "name": "@omarchy-bot/worker-computer",
+      "version": "0.1.0",
+      "dependencies": {
+        "@omarchy-bot/agent-contract": "workspace:*",
+        "@omarchy-bot/domain": "workspace:*",
+      },
+    },
     "workers/pi": {
       "name": "@omarchy-bot/worker-pi",
       "version": "0.1.0",
@@ -169,6 +177,8 @@
     "@omarchy-bot/protocol": ["@omarchy-bot/protocol@workspace:packages/protocol"],
 
     "@omarchy-bot/testkit": ["@omarchy-bot/testkit@workspace:packages/testkit"],
+
+    "@omarchy-bot/worker-computer": ["@omarchy-bot/worker-computer@workspace:workers/computer"],
 
     "@omarchy-bot/worker-pi": ["@omarchy-bot/worker-pi@workspace:workers/pi"],
 
