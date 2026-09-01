@@ -1,0 +1,10 @@
+{
+  "name": "@omarchy-bot/protocol",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "dependencies": {
+    "@omarchy-bot/domain": "workspace:*",
+    "zod": "^3.24.0"
+  }
+}

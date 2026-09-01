@@ -16,15 +16,34 @@
         "@omarchy-bot/domain": "workspace:*",
       },
     },
+    "packages/api-client": {
+      "name": "@omarchy-bot/api-client",
+      "version": "0.1.0",
+      "dependencies": {
+        "@omarchy-bot/protocol": "workspace:*",
+      },
+    },
     "packages/domain": {
       "name": "@omarchy-bot/domain",
       "version": "0.1.0",
+    },
+    "packages/protocol": {
+      "name": "@omarchy-bot/protocol",
+      "version": "0.1.0",
+      "dependencies": {
+        "@omarchy-bot/domain": "workspace:*",
+        "zod": "^3.24.0",
+      },
     },
   },
   "packages": {
     "@omarchy-bot/agent-contract": ["@omarchy-bot/agent-contract@workspace:packages/agent-contract"],
 
+    "@omarchy-bot/api-client": ["@omarchy-bot/api-client@workspace:packages/api-client"],
+
     "@omarchy-bot/domain": ["@omarchy-bot/domain@workspace:packages/domain"],
+
+    "@omarchy-bot/protocol": ["@omarchy-bot/protocol@workspace:packages/protocol"],
 
     "@types/bun": ["@types/bun@1.4.0", "", { "dependencies": { "bun-types": "1.4.0" } }, "sha512-K+lZULY23vRgK/CfTjFIV+tyifaNdSMlPh9j+6mQ/cLfpOznLyAuzgV/JQysyECpkBQLVMSyvjlr2fBUSA9wFQ=="],
 
@@ -35,5 +54,7 @@
     "typescript": ["typescript@5.9.3", "", { "bin": { "tsc": "bin/tsc", "tsserver": "bin/tsserver" } }, "sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw=="],
 
     "undici-types": ["undici-types@8.3.0", "", {}, "sha512-j375ScV60dom+YkPFIfTLcOiPxkN/buHz5GobjLhixFuANaNs3C9l4GmrWqejgXWJ7BbJcFYpTEUkS1Ge8bpZQ=="],
+
+    "zod": ["zod@3.25.76", "", {}, "sha512-gzUt/qt81nXsFGKIFcC3YnfEAx5NkunCfnDlvuBSSFS02bcXu4Lmea0AFIUwbLWxWPx3d9p8S5QoaujKcNQxcQ=="],
   }
 }
