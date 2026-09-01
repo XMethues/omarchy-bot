@@ -33,7 +33,7 @@ describe("computer actions", () => {
     expect(isSensitiveAction("click")).toBeFalse();
   });
   test("lease expiry", () => {
-    const lease = { holder: "human", acquiredAt: "2026-01-01T00:00:00Z", expiresAt: "2026-01-01T00:01:00Z" };
+    const lease = { holder: "human" as const, acquiredAt: "2026-01-01T00:00:00Z", expiresAt: "2026-01-01T00:01:00Z" };
     expect(leaseExpired(lease, new Date("2026-01-01T00:02:00Z"))).toBeTrue();
     expect(leaseExpired(lease, new Date("2026-01-01T00:00:30Z"))).toBeFalse();
   });

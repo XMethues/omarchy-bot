@@ -1,0 +1,7 @@
+{
+  "name": "@omarchy-bot/agent-contract",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "dependencies": { "@omarchy-bot/domain": "workspace:*" }
+}
