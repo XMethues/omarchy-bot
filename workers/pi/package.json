@@ -1,0 +1,12 @@
+{
+  "name": "@omarchy-bot/worker-pi",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": { "dev": "bun src/worker.ts" },
+  "dependencies": {
+    "@omarchy-bot/agent-contract": "workspace:*",
+    "@omarchy-bot/domain": "workspace:*",
+    "@earendil-works/pi-coding-agent": "0.84.4",
+    "@earendil-works/pi-ai": "latest"
+  }
+}
