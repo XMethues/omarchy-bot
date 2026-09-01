@@ -35,6 +35,14 @@
         "zod": "^3.24.0",
       },
     },
+    "packages/testkit": {
+      "name": "@omarchy-bot/testkit",
+      "version": "0.1.0",
+      "dependencies": {
+        "@omarchy-bot/agent-contract": "workspace:*",
+        "@omarchy-bot/domain": "workspace:*",
+      },
+    },
   },
   "packages": {
     "@omarchy-bot/agent-contract": ["@omarchy-bot/agent-contract@workspace:packages/agent-contract"],
@@ -44,6 +52,8 @@
     "@omarchy-bot/domain": ["@omarchy-bot/domain@workspace:packages/domain"],
 
     "@omarchy-bot/protocol": ["@omarchy-bot/protocol@workspace:packages/protocol"],
+
+    "@omarchy-bot/testkit": ["@omarchy-bot/testkit@workspace:packages/testkit"],
 
     "@types/bun": ["@types/bun@1.4.0", "", { "dependencies": { "bun-types": "1.4.0" } }, "sha512-K+lZULY23vRgK/CfTjFIV+tyifaNdSMlPh9j+6mQ/cLfpOznLyAuzgV/JQysyECpkBQLVMSyvjlr2fBUSA9wFQ=="],
 

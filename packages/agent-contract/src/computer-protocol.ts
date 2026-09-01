@@ -12,11 +12,20 @@ export type ComputerCommand =
     }
   | { type: "shutdown"; requestId: string };
 
+export interface ComputerProbePayload {
+  agentId: string;
+  installed: boolean;
+  agentVersion: string;
+  sdkOk: boolean;
+  reason?: string;
+}
+
 export type ComputerResult =
-  | { requestId: string; ok: true; payload: ComputerActPayload }
+  | { requestId: string; ok: true; payload: ComputerActPayload | ComputerProbePayload }
   | { requestId: string; ok: false; error: string };
 
 export interface ComputerActPayload {
+  done?: boolean;
   /** Textual observation result (accessibility tree excerpt etc). */
   text?: string;
   /** Screenshot as PNG/JPEG bytes — daemon persists to artifacts and returns a ref. */
