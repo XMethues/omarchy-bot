@@ -224,7 +224,8 @@ describe("pi conformance (10 steps, real model)", () => {
         imageResult = "provider-unsupported";
         imageNote = `vision-declared models returned unusable replies: ${visionModels.join(", ")}`;
       }
-      expect(imageResult).not.toBe("untested");
+      // With zero vision-declared models the image leg is legitimately untested.
+      if (visionModels.length > 0) expect(imageResult).not.toBe("untested");
       const textAttachRecent = attachReply.includes("CONFORM-TEXT-42")
         ? null
         : await (async () => {
