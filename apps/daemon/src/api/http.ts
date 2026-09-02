@@ -19,6 +19,8 @@ export interface DaemonServices {
   runner: TaskRunner;
   permissions: PermissionsService;
   computer: ComputerBroker;
+  /** Exposed for the conformance suite and advanced embedders; not used by HTTP handlers. */
+  supervisor: import("../supervision/supervisor.ts").Supervisor;
 }
 
 const JSON_HEADERS = { "content-type": "application/json" };

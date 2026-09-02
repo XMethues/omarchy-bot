@@ -28,7 +28,7 @@ function writeStatusAtomic(statusPath: string, data: unknown): void {
   renameSync(tmp, statusPath);
 }
 
-export async function main(): Promise<{ stop: () => Promise<void>; port: number }> {
+export async function main(): Promise<{ stop: () => Promise<void>; port: number; svc: DaemonServices }> {
   const cfg = loadConfig();
   const db = openDb(cfg);
   recoverOnStartup(db); // leases never survive a restart as bot-held
@@ -57,7 +57,7 @@ export async function main(): Promise<{ stop: () => Promise<void>; port: number 
     void bots.recheck(b.id).catch(() => {});
   }
 
-  const svc: DaemonServices = { cfg, db, events, bots, threads, runner, permissions, computer };
+  const svc: DaemonServices = { cfg, db, events, bots, threads, runner, permissions, computer, supervisor };
   const http = startHttp(svc);
 
   // Periodic status file for the future bar widget (decoupled pattern from research.md §3).
@@ -94,7 +94,7 @@ export async function main(): Promise<{ stop: () => Promise<void>; port: number 
   process.on("SIGINT", () => void stop());
   process.on("SIGTERM", () => void stop());
 
-  return { stop, port: http.port };
+  return { stop, port: http.port, svc };
 }
 
 if (import.meta.main) {

@@ -110,11 +110,21 @@ async function openSession(
   });
   await loader.reload();
 
+  // Model resolution: "provider/model" or a bare model id searched across providers.
+  const rt = await getModelRuntime();
+  let model: ReturnType<typeof rt.getModel> | undefined;
+  if (options.model !== undefined) {
+    const [provider, id] = options.model.includes("/") ? [options.model.slice(0, options.model.indexOf("/")), options.model.slice(options.model.indexOf("/") + 1)] : [undefined, options.model];
+    model = provider ? rt.getModel(provider, id) : rt.getModels().find((m) => m.id === id);
+    if (!model) throw new Error(`model not found: ${options.model}`);
+  }
+
   const { session } = await createAgentSession({
     cwd: options.cwd,
     agentDir: getAgentDir(),
     sessionManager: existing ? SessionManager.open(existing.nativeSessionId) : SessionManager.create(options.cwd),
-    modelRuntime: await getModelRuntime(),
+    modelRuntime: rt,
+    ...(model !== undefined ? { model } : {}),
     resourceLoader: loader,
   });
 
@@ -187,11 +197,20 @@ async function handleMessage(cmd: AgentCommand): Promise<void> {
                   })),
               )
             : undefined;
+        // Text attachments are inlined into the prompt (bounded).
+        let promptText = cmd.message.text;
+        for (const a of cmd.message.attachments ?? []) {
+          if (!a.mediaType.startsWith("text/") && a.mediaType !== "application/json") continue;
+          const stat = await Bun.file(a.path).stat();
+          if (stat.size > 64 * 1024) throw new Error(`attachment ${a.name} too large for inline text (${stat.size} bytes)`);
+          const content = await Bun.file(a.path).text();
+          promptText += `\n\n[attachment ${a.name}]\n${content}\n[/attachment ${a.name}]`;
+        }
         entry.running = true;
         entry.finished = false;
         entry.aborted = false;
         void entry.session
-          .prompt(cmd.message.text, images && images.length > 0 ? { images } : undefined)
+          .prompt(promptText, images && images.length > 0 ? { images } : undefined)
           .catch((err: unknown) => {
             entry.running = false;
             entry.finished = true;

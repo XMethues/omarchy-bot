@@ -156,7 +156,7 @@ async function performAction(action: { name: string; args: Record<string, unknow
       result = await mcp.callTool("type_text", { text: args.text ?? "", ...args });
       break;
     case "key":
-      result = await mcp.callTool("press_key", { keys: args.keys ?? [], ...args });
+      result = await mcp.callTool("press_key", { key: args.key ?? "", ...args });
       break;
     case "scroll":
       result = await mcp.callTool("scroll", { ...args });

@@ -35,7 +35,8 @@ export class ComputerBroker {
   ) {}
 
   #lease(): LeaseRow | undefined {
-    return this.db.query(`SELECT * FROM computer_leases WHERE id = 1`).get() as LeaseRow | undefined;
+    // bun:sqlite .get() returns null (not undefined) for no rows.
+    return (this.db.query(`SELECT * FROM computer_leases WHERE id = 1`).get() ?? undefined) as LeaseRow | undefined;
   }
 
   #writeLease(l: LeaseRow | undefined): void {
