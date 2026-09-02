@@ -84,6 +84,9 @@ export class ApiClient {
   emergencyStop(): Promise<ComputerStateDto> {
     return this.req("/api/computer/emergency-stop", { method: "POST" });
   }
+  resume(): Promise<ComputerStateDto> {
+    return this.req("/api/computer/resume", { method: "POST" });
+  }
   computerImageUrl(): string {
     return `${this.base}/api/computer/snapshot?t=${Date.now()}`;
   }
