@@ -21,6 +21,8 @@ interface TurnContext {
   assistantBuf: string;
   openAssistantMsgId?: string;
   turnTimeout: ReturnType<typeof setTimeout>;
+  /** daemon approval id -> worker-side permission id (p_…) */
+  permissionWorkerIds: Map<string, string>;
 }
 
 /**
@@ -109,7 +111,7 @@ export class TaskRunner {
     }, this.cfg.turnTimeoutMs);
     turnTimeout.unref?.();
 
-    const ctx: TurnContext = { threadId, taskId, runId, botId: actor.botId, roleId: actor.roleId, workerSessionId: opened.sessionId, assistantBuf: "", turnTimeout };
+    const ctx: TurnContext = { threadId, taskId, runId, botId: actor.botId, roleId: actor.roleId, workerSessionId: opened.sessionId, assistantBuf: "", turnTimeout, permissionWorkerIds: new Map() };
     this.#turns.set(opened.sessionId, ctx);
     this.#activeByTask.set(taskId, opened.sessionId);
 
@@ -168,12 +170,15 @@ export class TaskRunner {
           timeoutMs: this.cfg.turnTimeoutMs,
           threadId: ctx.threadId,
         });
+        ctx.permissionWorkerIds.set(approval.id, event.id);
         this.threads.appendMessage(ctx.threadId, {
           author: { kind: "system" },
           kind: "approval",
           payload: { permissionId: approval.id, tool: event.tool, details: event.details },
         });
-        void this.#awaitPermission(ctx, approval.id);
+        void this.#awaitPermission(ctx, approval.id).catch((err: unknown) => {
+          this.#emitSystemNote(ctx.threadId, `permission forward failed: ${String(err)}`);
+        });
         break;
       }
       case "turn.completed": {
@@ -199,8 +204,10 @@ export class TaskRunner {
     const allowed = await new Promise<boolean>((resolve) => this.permissions.registerWaiter(permissionId, resolve));
     const t = this.#taskRow(ctx.taskId);
     if (t && t.status === "waiting_for_approval") this.#setTaskStatus(ctx.taskId, "working");
+    const workerPermissionId = ctx.permissionWorkerIds.get(permissionId);
+    if (!workerPermissionId) throw new Error(`no worker permission id recorded for approval ${permissionId}`);
     const w = await this.supervisor.agentWorker(ctx.botId);
-    await w.request({ type: "permission.respond", sessionId: ctx.workerSessionId, permissionId, decision: { allow: allowed } }, 30_000);
+    await w.request({ type: "permission.respond", sessionId: ctx.workerSessionId, permissionId: workerPermissionId, decision: { allow: allowed } }, 30_000);
   }
 
   #finishTurn(ctx: TurnContext, outcome: "completed" | "cancelled" | "failed", reason?: string): void {

@@ -62,11 +62,11 @@ export class WorkerClient {
     this.#proc = proc;
 
     void readJsonl(
-      proc.stdout.getReader() as unknown as ReadableStream<Uint8Array>,
+      proc.stdout as unknown as ReadableStream<Uint8Array>,
       (msg) => this.#onMessage(msg),
       () => {},
     );
-    void this.#drainStderr(proc.stderr.getReader() as unknown as ReadableStream<Uint8Array>);
+    void this.#drainStderr(proc.stderr as unknown as ReadableStream<Uint8Array>);
 
     // Handshake: first frame must be hello.
     await new Promise<void>((resolve, reject) => {

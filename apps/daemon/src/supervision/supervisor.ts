@@ -29,7 +29,7 @@ export class Supervisor {
     if (w) await this.#killQuietly(w);
     w = new WorkerClient({
       name: `agent:${botId}`,
-      script: path.join(this.workerDirs.agents, botId, "worker.ts"),
+      script: path.join(this.workerDirs.agents, botId, "src", "worker.ts"),
       env: sanitizedEnv(),
       onEvent: (e) => this.hooks.onAgentEvent(botId, e),
       onExit: () => {
@@ -53,7 +53,7 @@ export class Supervisor {
     if (w?.alive) return w;
     w = new WorkerClient({
       name: "computer",
-      script: path.join(this.workerDirs.computer, "worker.ts"),
+      script: path.join(this.workerDirs.computer, "src", "worker.ts"),
       env: { ...sanitizedEnv(), WAYLAND_DISPLAY: process.env.WAYLAND_DISPLAY ?? "wayland-1", XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR ?? `/run/user/${process.getuid?.() ?? 1000}` },
       onEvent: () => {},
     });

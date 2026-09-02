@@ -42,8 +42,8 @@ export async function main(): Promise<{ stop: () => Promise<void> }> {
       onWorkerCrash: (botId, err) => events.append("bot", botId, "bot.worker_crash", { message: err.message }),
     },
     {
-      agents: path.resolve(import.meta.dir, "../../../workers"),
-      computer: path.resolve(import.meta.dir, "../../../workers/computer"),
+      agents: path.resolve(import.meta.dir, "../../../../workers"),
+      computer: path.resolve(import.meta.dir, "../../../../workers/computer"),
     },
   );
   const bots = new BotRegistry(db, events, cfg, supervisor, readDefaultAgent());
