@@ -212,9 +212,12 @@ async function handleMessage(cmd: AgentCommand): Promise<void> {
         return;
       }
       case "message.steer": {
-        // Native pi steering: delivered at pi's safe boundary between tool calls.
+        // Native pi steering queues the redirect for pi's safe boundary between
+        // atomic tool calls. It never opens, prompts, or aborts a session.
         const entry = sessionEntry(cmd.sessionId);
-        if (!entry.session.isStreaming) throw new Error("cannot steer: session is not streaming");
+        if (!entry.running || entry.finished || !entry.session.isStreaming) {
+          throw new Error("cannot steer: session is not streaming");
+        }
         await entry.session.steer(cmd.text);
         reply({ requestId: cmd.requestId, ok: true, payload: { steered: true } });
         return;

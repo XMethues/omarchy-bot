@@ -7,6 +7,7 @@ import { AgentsRegistry } from "../modules/agents/registry.ts";
 import { BotsService } from "../modules/bots/bots.ts";
 import { TurnService } from "../modules/turns/turns.ts";
 import { ComputerBroker } from "../modules/computer/broker.ts";
+import { AvatarService } from "../modules/avatars/avatarService.ts";
 import { Supervisor } from "../supervision/supervisor.ts";
 import { startHttp, type DaemonServices } from "../api/http.ts";
 import { writeFileSync, renameSync } from "node:fs";
@@ -30,7 +31,9 @@ export async function main(): Promise<{ stop: () => Promise<void>; port: number;
   const agentsDir = path.resolve(workersDir);
   const supervisor = new Supervisor(
     {
-      onAgentEvent: (agentId, event) => turns.onAgentEvent(agentId, event),
+      onAgentEvent: (agentId, event) => {
+        if (!avatars.onAgentEvent(agentId, event)) turns.onAgentEvent(agentId, event);
+      },
       onWorkerCrash: (agentId, err) => events.append("bot", agentId, "agent.worker_crash", { agentId, message: err.message }),
     },
     {
@@ -40,6 +43,7 @@ export async function main(): Promise<{ stop: () => Promise<void>; port: number;
   );
   const agents = new AgentsRegistry(db, events, { conformanceDir: cfg.conformanceDir, workersAgentsDir: agentsDir }, supervisor);
   const bots = new BotsService(db, events, agents, threads);
+  const avatars = new AvatarService(bots, supervisor, cfg.avatarsDir);
   const turns = new TurnService(db, events, threads, approvals, agents, bots, supervisor, { turnTimeoutMs: cfg.turnTimeoutMs });
   const computer = new ComputerBroker(db, events, turns, supervisor, cfg);
 
@@ -50,7 +54,7 @@ export async function main(): Promise<{ stop: () => Promise<void>; port: number;
     void agents.recheck(a.id).catch(() => {});
   }
 
-  const svc: DaemonServices = { cfg, db, events, agents, bots, threads, turns, approvals, computer, supervisor };
+  const svc: DaemonServices = { cfg, db, events, agents, bots, threads, turns, approvals, avatars, computer, supervisor };
   const http = startHttp(svc);
 
   // Periodic status file for the future bar widget (decoupled pattern from research.md §3).

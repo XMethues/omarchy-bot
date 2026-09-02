@@ -12,6 +12,7 @@ import { Button } from "@astryxdesign/core/Button";
 import type { BotViewDto, MessageDto, ThreadDto } from "@omarchy-bot/protocol";
 import { getDelta, subscribeDeltas } from "../lib/live.ts";
 import { api, apiErrorMessage, trimSendText } from "../lib/api.ts";
+import { loadDraft, saveDraft, type ConversationDraft } from "../lib/drafts.ts";
 import { AvatarView } from "./AvatarView.tsx";
 import styles from "../lib/styles.ts";
 
@@ -62,43 +63,29 @@ function groupMessages(messages: MessageDto[]): Row[] {
   return out;
 }
 
-/** Window-scoped drafts: unsent text belongs to one bot+thread per window. */
-function draftKey(botId: string, threadId?: string): string {
-  return `draft:v1:${botId}:${threadId ?? "blank"}`;
-}
+const EMPTY_DRAFT: ConversationDraft = { text: "", cursor: 0, stagedIds: [] };
 
 export function ChatPanel({ bot, thread, messages, pendingApprovalIds, onRespondApproval, onMessageSent, isAgentReady }: ChatPanelProps): JSX.Element {
-  const [draft, setDraft] = useState("");
+  const [draft, setDraft] = useState<ConversationDraft>(EMPTY_DRAFT);
   const [submitError, setSubmitError] = useState<string | undefined>(undefined);
-  const key = bot !== undefined ? draftKey(bot.id, thread?.id) : undefined;
+  const draftBotId = bot?.id;
+  const draftThreadId = thread?.id;
 
   // Restore the window-local draft for this bot+thread; hide (not move) others.
   useEffect(() => {
     setSubmitError(undefined);
-    if (key === undefined) {
-      setDraft("");
-      return;
-    }
-    try {
-      setDraft(sessionStorage.getItem(key) ?? "");
-    } catch {
-      setDraft("");
-    }
-  }, [key]);
+    setDraft(draftBotId === undefined ? EMPTY_DRAFT : loadDraft(draftBotId, draftThreadId));
+  }, [draftBotId, draftThreadId]);
 
   const onDraftChange = useCallback(
     (value: string) => {
-      setDraft(value);
-      if (key !== undefined) {
-        try {
-          if (value !== "") sessionStorage.setItem(key, value);
-          else sessionStorage.removeItem(key);
-        } catch {
-          /* storage unavailable — draft lives in memory only */
-        }
-      }
+      setDraft((current) => {
+        const next: ConversationDraft = { ...current, text: value, cursor: value.length };
+        if (draftBotId !== undefined) saveDraft(draftBotId, draftThreadId, next);
+        return next;
+      });
     },
-    [key],
+    [draftBotId, draftThreadId],
   );
 
   const delta = useSyncExternalStore(
@@ -106,7 +93,7 @@ export function ChatPanel({ bot, thread, messages, pendingApprovalIds, onRespond
     () => (thread !== undefined ? getDelta(thread.id) : ""),
     () => "",
   );
-  const isStreaming = thread !== undefined && delta.length > 0;
+  const isStreaming = bot?.status === "working" || (thread !== undefined && delta.length > 0);
 
   const grouped = useMemo(() => groupMessages(messages), [messages]);
 
@@ -195,7 +182,11 @@ export function ChatPanel({ bot, thread, messages, pendingApprovalIds, onRespond
         <ChatMessage
           key={m.id}
           sender={sender}
-          avatar={sender === "assistant" && bot !== undefined ? <AvatarView avatar={bot.avatar} name={bot.name} size="sm" /> : undefined}
+          avatar={
+            sender === "assistant" && bot !== undefined ? (
+              <AvatarView avatar={bot.avatar} name={bot.name} size="sm" activity={bot.status === "working" ? "working" : "selected"} />
+            ) : undefined
+          }
           data-testid={sender === "assistant" ? "assistant-message" : "user-message"}
         >
           <ChatMessageBubble variant="filled">{m.text ?? ""}</ChatMessageBubble>
@@ -214,7 +205,7 @@ export function ChatPanel({ bot, thread, messages, pendingApprovalIds, onRespond
   const composer = (
     <div xstyle={styles.composerWrap}>
       <ChatComposer
-        value={draft}
+        value={draft.text}
         onChange={onDraftChange}
         onSubmit={(value) => void send(value)}
         placeholder={bot === undefined ? "Select or create a bot" : isAgentReady ? "Message…" : "The bot's agent is not ready"}
@@ -231,7 +222,11 @@ export function ChatPanel({ bot, thread, messages, pendingApprovalIds, onRespond
         <ChatMessageList isStreaming={isStreaming} data-testid="transcript">
           {rows}
           {isStreaming && bot !== undefined ? (
-            <ChatMessage sender="assistant" avatar={<AvatarView avatar={bot.avatar} name={bot.name} size="sm" />} data-testid="streaming-message">
+            <ChatMessage
+              sender="assistant"
+              avatar={<AvatarView avatar={bot.avatar} name={bot.name} size="sm" activity="streaming" />}
+              data-testid="streaming-message"
+            >
               <ChatMessageBubble variant="filled">{delta}</ChatMessageBubble>
             </ChatMessage>
           ) : null}

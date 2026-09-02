@@ -1,10 +1,11 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { Database } from "bun:sqlite";
 import type { AgentId } from "@omarchy-bot/domain";
-import type { AvatarDto, BotDto, BotViewDto } from "@omarchy-bot/protocol";
+import type { AvatarDto, AvatarRecipeDto, BotDto, BotViewDto } from "@omarchy-bot/protocol";
 import type { EventLog } from "../events/eventLog.ts";
 import type { AgentsRegistry } from "../agents/registry.ts";
 import type { ThreadsService } from "../threads/threads.ts";
+import { AVATAR_RENDERER_VERSION } from "../avatars/recipes.ts";
 
 interface BotRow {
   id: string; name: string; instructions: string; agent_id: string;
@@ -19,7 +20,7 @@ interface BotStateRow {
 
 /** A new Bot ships with a deterministic generated avatar recipe. */
 export function defaultAvatarRecipe(botId: string): string {
-  return JSON.stringify({ rendererVersion: "9.4.3", style: "shapes", seed: botId, options: {} });
+  return JSON.stringify({ rendererVersion: AVATAR_RENDERER_VERSION, style: "shapes", seed: botId, options: {} });
 }
 
 export class HttpError extends Error {
@@ -144,12 +145,61 @@ export class BotsService {
   patch(id: string, body: { name?: string | undefined; instructions?: string | undefined; agentId?: unknown }): BotDto {
     const r = this.#row(id);
     if (!r) throw new HttpError(404, `unknown bot ${id}`);
-    if (body.agentId !== undefined) throw new HttpError(400, "a bot's agent cannot change; create another bot instead");
+    if (body.agentId !== undefined) throw new HttpError(400, "agent cannot change");
     const name = body.name ?? r.name;
     const instructions = body.instructions ?? r.instructions;
     this.db.query(`UPDATE bots SET name = ?, instructions = ?, updated_at = ? WHERE id = ?`).run(name, instructions, new Date().toISOString(), id);
     this.events.append("bot", id, "bot.updated", { name, instructions });
     return this.getDto(id);
+  }
+  agentId(id: string): AgentId {
+    const r = this.#row(id);
+    if (!r) throw new HttpError(404, `unknown bot ${id}`);
+    return r.agent_id as AgentId;
+  }
+
+  avatarFile(id: string): string | undefined {
+    const r = this.#row(id);
+    if (!r) throw new HttpError(404, `unknown bot ${id}`);
+    return r.avatar_kind === "upload" ? r.avatar_file ?? undefined : undefined;
+  }
+
+  generateAvatarVariation(id: string): BotDto {
+    this.getDto(id);
+    const generated = this.db
+      .query(`SELECT COUNT(*) AS count FROM events WHERE aggregate_type = 'bot' AND aggregate_id = ? AND type = 'bot.avatar_generated'`)
+      .get(id) as { count: number };
+    const variation = generated.count + 1;
+    const recipe: AvatarRecipeDto = {
+      rendererVersion: AVATAR_RENDERER_VERSION,
+      style: "shapes",
+      seed: createHash("sha256").update(`${id}:${variation}`).digest("hex"),
+      options: {},
+    };
+    this.#setAvatar(id, "generated", recipe, null);
+    this.events.append("bot", id, "bot.avatar_generated", { avatar: this.getDto(id).avatar, variation });
+    return this.getDto(id);
+  }
+
+  setRecipeAvatar(id: string, recipe: AvatarRecipeDto): BotDto {
+    this.#setAvatar(id, "recipe", recipe, null);
+    this.events.append("bot", id, "bot.avatar_recipe_updated", { avatar: this.getDto(id).avatar });
+    return this.getDto(id);
+  }
+
+  setUploadedAvatar(id: string, relativeFile: string): BotDto {
+    if (relativeFile !== `${id}.png`) throw new HttpError(400, "invalid local avatar file");
+    this.#setAvatar(id, "upload", undefined, relativeFile);
+    this.events.append("bot", id, "bot.avatar_uploaded", { avatar: this.getDto(id).avatar });
+    return this.getDto(id);
+  }
+
+  #setAvatar(id: string, kind: "generated" | "recipe" | "upload", recipe: AvatarRecipeDto | undefined, avatarFile: string | null): void {
+    if (!this.#row(id)) throw new HttpError(404, `unknown bot ${id}`);
+    const now = new Date().toISOString();
+    this.db
+      .query(`UPDATE bots SET avatar_kind = ?, avatar_recipe = ?, avatar_file = ?, updated_at = ? WHERE id = ?`)
+      .run(kind, recipe === undefined ? "" : JSON.stringify(recipe), avatarFile, now, id);
   }
 
   recordActivity(botId: string, threadId: string, previewText: string, assistantMessage: boolean): void {

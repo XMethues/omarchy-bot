@@ -8,13 +8,15 @@ import type { ThreadsService } from "../modules/threads/threads.ts";
 import type { TurnService } from "../modules/turns/turns.ts";
 import type { ApprovalsService } from "../modules/approvals/approvals.ts";
 import type { ComputerBroker } from "../modules/computer/broker.ts";
+import type { AvatarService } from "../modules/avatars/avatarService.ts";
+import { handleAvatarRequest } from "./avatarRoutes.ts";
+import { handleThreadFeatureRequest } from "./threadRoutes.ts";
 import type { Supervisor } from "../supervision/supervisor.ts";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import {
   CreateBotBody,
   PatchBotBody,
-  PatchThreadBody,
   RespondApprovalBody,
   SendMessageBody,
   type ComputerViewDto,
@@ -30,6 +32,7 @@ export interface DaemonServices {
   threads: ThreadsService;
   turns: TurnService;
   approvals: ApprovalsService;
+  avatars: AvatarService;
   computer: ComputerBroker;
   /** Exposed for the conformance suite and advanced embedders; not used by HTTP handlers. */
   supervisor: Supervisor;
@@ -109,17 +112,17 @@ export function startHttp(svc: DaemonServices): { stop: () => Promise<void>; por
       const raw = (await req.json().catch(() => {
         throw new HttpError(400, "invalid JSON body");
       })) as Record<string, unknown>;
-      if (raw.agentId !== undefined) throw new HttpError(400, "a bot's agent cannot change; create another bot instead");
+      if ("agentId" in raw && raw.agentId !== undefined) return json({ error: "agent cannot change" }, 400);
       const body = PatchBotBody.safeParse(raw);
       if (!body.success) throw new HttpError(400, body.error.issues[0]?.message ?? "invalid body");
       return json(svc.bots.patch(botGet[1]!, body.data));
     }
+    const avatarResponse = await handleAvatarRequest(req, svc.avatars, pathname);
+    if (avatarResponse) return avatarResponse;
 
-    const botThreads = m(/^\/api\/bots\/([\w-]+)\/threads$/);
-    if (botThreads && req.method === "GET") {
-      const q = url.searchParams.get("q");
-      return json(svc.threads.listThreadsForBot(botThreads[1]!, q ?? undefined));
-    }
+    const threadFeatureResponse = await handleThreadFeatureRequest(req, svc.threads, pathname);
+    if (threadFeatureResponse) return threadFeatureResponse;
+
 
     const botMessages = m(/^\/api\/bots\/([\w-]+)\/messages$/);
     if (botMessages && req.method === "POST") {
@@ -133,14 +136,6 @@ export function startHttp(svc: DaemonServices): { stop: () => Promise<void>; por
     if (threadGet && req.method === "GET") {
       const t = svc.threads.getThread(threadGet[1]!);
       return t ? json(t) : notFound(`unknown thread ${threadGet[1]}`);
-    }
-    if (threadGet && req.method === "PATCH") {
-      await parseBody(req, PatchThreadBody);
-      const thread = svc.threads.getThread(threadGet[1]!);
-      if (!thread) return notFound(`unknown thread ${threadGet[1]}`);
-      // pi has no native rename in its capability inventory; unsupported ops
-      // are never simulated (agents-integration.md).
-      return json({ error: `rename not supported by ${svc.bots.getDto(thread.botId).agentId}` }, 409);
     }
 
     const threadMsgs = m(/^\/api\/threads\/([\w-]+)\/messages$/);

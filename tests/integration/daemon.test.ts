@@ -201,7 +201,7 @@ describe("integration: chat through a bot", () => {
     await api(h, "POST", `/api/turns/${sent.turnId}/abort`);
     await waitThreadIdle(h, sent.threadId);
     const msgs = await messages(sent.threadId);
-    expect(msgs.some((m) => m.author.kind === "system" && (m.text ?? "").includes("steering failed"))).toBeTrue();
+    expect(msgs.some((m) => m.author.kind === "system" && (m.text ?? "").includes("steer unavailable"))).toBeTrue();
     expect(msgs.some((m) => m.author.kind === "system" && m.kind === "event" && (m.text ?? "").includes("cancel"))).toBeTrue();
   });
 

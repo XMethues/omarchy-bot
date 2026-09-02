@@ -69,7 +69,14 @@ export function Sidebar({ bots, selectedBotId, onSelectBot, onCreateBot, onOpenS
               key={bot.id}
               onClick={() => onSelectBot(bot.id)}
               isSelected={bot.id === selectedBotId}
-              startContent={<AvatarView avatar={bot.avatar} name={bot.name} size="sm" />}
+              startContent={
+                <AvatarView
+                  avatar={bot.avatar}
+                  name={bot.name}
+                  size="sm"
+                  activity={bot.status === "working" ? "working" : bot.id === selectedBotId ? "selected" : "idle"}
+                />
+              }
               label={bot.name}
               description={bot.previewText ?? "No messages yet"}
               descriptionLines={1}

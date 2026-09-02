@@ -8,7 +8,7 @@
  *   2. streamed fixed text           7. close → resume → history
  *   3. read-only tool lifecycle      8. worker exit leaves no orphans
  *   4. write tool deny + allow       9. capability inventory / event mapping
- *   5. mid-turn cancel              10. Computer fixture via the real broker
+ *   5. mid-turn cancel + steer      10. Computer fixture via the real broker
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, writeFileSync, existsSync, rmSync } from "node:fs";
@@ -176,6 +176,42 @@ describe("pi conformance (10 steps, real model)", () => {
         .filter((e) => e.type === "tool.started" || (e.type === "message.delta" && events.indexOf(e) > events.findIndex((x) => x === cancelled)));
       expect(lateWrites).toEqual([]);
       console.log("conformance: step 5 ok — cancelled mid-turn, no late writes");
+
+      // ---- Step 5b: native steer keeps the active session and completes ----
+      const steerSession = (await pi.request({
+        type: "session.open",
+        requestId: crypto.randomUUID(),
+        botId: "bot_conformance",
+        threadId: "thread_conformance_steer",
+        options: { cwd, instructions: "" },
+      }, 30_000)) as { sessionId: string; nativeSessionId: string };
+      const steerBefore = events.length;
+      await pi.request({
+        type: "message.send",
+        requestId: crypto.randomUUID(),
+        sessionId: steerSession.sessionId,
+        turnId: crypto.randomUUID(),
+        message: { text: "Count from 1 to 1000, one number per line, no commentary." },
+      }, 15_000);
+      await waitForEvent(
+        steerBefore,
+        (event) => event.type === "message.delta" && event.event.sessionId === steerSession.sessionId,
+        60_000,
+      );
+      const steerResult = await pi.request({
+        type: "message.steer",
+        requestId: crypto.randomUUID(),
+        sessionId: steerSession.sessionId,
+        text: "Change course now. Stop counting and reply exactly STEER-NATIVE-OK.",
+      }, 30_000) as { steered: boolean };
+      expect(steerResult.steered).toBeTrue();
+      const steeredRecent = (await awaitTerminal(steerBefore, 120_000))
+        .filter((event) => event.event.sessionId === steerSession.sessionId);
+      expect(steeredRecent.some((event) => event.type === "turn.completed")).toBeTrue();
+      expect(steeredRecent.some((event) => event.type === "turn.cancelled")).toBeFalse();
+      expect(steeredRecent.every((event) => event.event.sessionId === steerSession.sessionId)).toBeTrue();
+      expect(assistantText(steeredRecent)).toContain("STEER-NATIVE-OK");
+      console.log(`conformance: step 5b ok — native steer completed in session ${steerSession.nativeSessionId}`);
 
       // ---- Step 6: attachments (text file + 1×1 PNG) ----
       const textPath = path.join(cwd, "secret.txt");

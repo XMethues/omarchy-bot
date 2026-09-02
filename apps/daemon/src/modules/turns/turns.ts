@@ -21,12 +21,18 @@ interface TurnContext {
   turnTimeout: ReturnType<typeof setTimeout>;
   /** daemon approval id -> worker-side permission id (p_…) */
   approvalWorkerIds: Map<string, string>;
+  /** Present only when cancellation came from the explicit abort path. */
+  abortReason?: string;
 }
 
 /** Local title from the first user message — no extra Agent call. */
 export function deriveTitle(text: string): string {
   const firstLine = text.trim().split("\n")[0]?.trim() ?? "";
   return firstLine.length <= 60 ? firstLine || "New conversation" : `${firstLine.slice(0, 57).trimEnd()}…`;
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 /**
@@ -37,6 +43,7 @@ export function deriveTitle(text: string): string {
  */
 export class TurnService {
   #turns = new Map<string, TurnContext>(); // workerSessionId -> ctx
+  #turnStarts = new Map<string, Promise<TurnContext>>();
 
   constructor(
     private readonly db: Database,
@@ -113,11 +120,23 @@ export class TurnService {
     this.events.append("thread", result.threadId, "message.appended", userMsgDto);
     this.events.append("turn", turnId, "turn.created", { turnId, threadId: result.threadId, botId });
     this.bots.recordActivity(botId, result.threadId, text, false);
-    void this.#startTurn(turnId, result.threadId, botId, agentId, text);
+    const start = this.#startTurn(turnId, result.threadId, botId, agentId, text);
+    this.#turnStarts.set(turnId, start);
+    void start
+      .catch((err: unknown) => {
+        const row = this.threads.turnRow(turnId);
+        if (!row || isTerminalTurn(row.status as TurnStatus)) return;
+        const reason = errorMessage(err);
+        this.#emitSystemNote(result.threadId, `turn failed to start: ${reason}`);
+        this.#setTurnStatus(turnId, "failed", reason);
+      })
+      .finally(() => {
+        if (this.#turnStarts.get(turnId) === start) this.#turnStarts.delete(turnId);
+      });
     return { threadId: result.threadId, messageId: result.messageId, turnId, action: "sent" };
   }
 
-  async #startTurn(turnId: string, threadId: string, botId: string, agentId: AgentId, text: string): Promise<void> {
+  async #startTurn(turnId: string, threadId: string, botId: string, agentId: AgentId, text: string): Promise<TurnContext> {
     const botRow = this.db.query(`SELECT instructions FROM bots WHERE id = ?`).get(botId) as { instructions: string } | undefined;
     const thread = this.threads.getThread(threadId)!;
     const worker = await this.supervisor.agentWorker(agentId);
@@ -144,25 +163,53 @@ export class TurnService {
     this.#turns.set(opened.sessionId, ctx);
     this.#setTurnStatus(turnId, "working");
 
-    await worker.request({ type: "message.send", sessionId: opened.sessionId, turnId, message: { text } }, 60_000);
+    // Dispatch without awaiting turn completion. A worker acknowledges send
+    // independently, while this resolved start promise makes immediate steering
+    // wait only for the worker session to become drivable.
+    void worker.request({ type: "message.send", sessionId: opened.sessionId, turnId, message: { text } }, 60_000).catch((err: unknown) => {
+      if (this.#turns.get(opened.sessionId) !== ctx) return;
+      this.#routeTurnEvent(ctx, {
+        type: "error",
+        sessionId: opened.sessionId,
+        message: errorMessage(err),
+        retryable: false,
+      });
+    });
+    return ctx;
   }
 
   async #steer(turn: TurnDto, text: string): Promise<SendResultDto> {
-    const ctx = [...this.#turns.values()].find((t) => t.turnId === turn.id);
+    // Persist and publish first so the user's redirect appears immediately,
+    // even while the initial worker session is still opening.
     const userMsg = this.threads.appendMessage(turn.threadId, {
       author: { kind: "user" }, kind: "text", text, payload: { turnId: turn.id },
     });
     this.bots.recordActivity(turn.botId, turn.threadId, text, false);
-    if (!ctx) throw new HttpError(409, "turn is not drivable; try again");
     try {
+      let ctx = [...this.#turns.values()].find((candidate) => candidate.turnId === turn.id);
+      if (!ctx) {
+        const starting = this.#turnStarts.get(turn.id);
+        if (!starting) throw new Error("active turn has no worker session");
+        ctx = await starting;
+      }
+      const current = this.threads.turnRow(turn.id);
+      if (!current || isTerminalTurn(current.status as TurnStatus) || this.#turns.get(ctx.workerSessionId) !== ctx) {
+        throw new Error("turn is no longer active");
+      }
       const worker = await this.supervisor.agentWorker(ctx.agentId);
       await worker.request({ type: "message.steer", sessionId: ctx.workerSessionId, text }, 30_000);
       this.db.query(`UPDATE turns SET steer_count = steer_count + 1 WHERE id = ?`).run(turn.id);
-      this.events.append("turn", turn.id, "turn.steered", { turnId: turn.id, threadId: turn.threadId });
+      this.events.append("turn", turn.id, "turn.steered", {
+        turnId: turn.id,
+        threadId: turn.threadId,
+        messageId: userMsg.id,
+      });
     } catch (err) {
-      // Steering failed: leave a transcript note, keep the original turn untouched.
-      this.#emitSystemNote(turn.threadId, `steering failed: ${String((err as Error).message)}`);
-      throw new HttpError(409, `steering failed: ${String((err as Error).message)}`);
+      // A rejected native steer is transcript-visible but never changes,
+      // aborts, or replaces the original turn.
+      const reason = errorMessage(err);
+      this.#emitSystemNote(turn.threadId, `steer unavailable: ${reason}`);
+      throw new HttpError(409, `steer unavailable: ${reason}`);
     }
     return { threadId: turn.threadId, messageId: userMsg.id, turnId: turn.id, action: "steered" };
   }
@@ -237,7 +284,7 @@ export class TurnService {
         break;
       }
       case "turn.cancelled": {
-        this.#finishTurn(ctx, "cancelled");
+        this.#finishTurn(ctx, "cancelled", ctx.abortReason);
         break;
       }
       case "error": {
@@ -304,8 +351,13 @@ export class TurnService {
   async abortTurn(turnId: string, reason: string): Promise<void> {
     const t = this.threads.turnRow(turnId);
     if (!t || isTerminalTurn(t.status as TurnStatus)) return;
-    const ctx = [...this.#turns.values()].find((c) => c.turnId === turnId);
+    let ctx = [...this.#turns.values()].find((candidate) => candidate.turnId === turnId);
+    if (!ctx) {
+      const starting = this.#turnStarts.get(turnId);
+      if (starting) ctx = await starting.catch(() => undefined);
+    }
     if (ctx) {
+      ctx.abortReason = reason;
       const worker = await this.supervisor.agentWorker(ctx.agentId).catch(() => undefined);
       await worker?.request({ type: "turn.abort", sessionId: ctx.workerSessionId }, 30_000).catch(() => {});
       return;

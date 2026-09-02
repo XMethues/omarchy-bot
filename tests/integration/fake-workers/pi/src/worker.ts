@@ -10,8 +10,8 @@
  *   tool             tool.started + tool.completed (no approval)
  *   hang             streams a delta then waits for turn.abort; steering
  *                    during hang returns an error (failure path is testable)
- *   steer-echo       long turn; on message.steer emits a delta containing the
- *                    steered text, then completes
+ *   steer-echo       long atomic tool action; message.steer is acknowledged
+ *                    immediately, applied after tool.completed, then completes
  *
  * Stays alive until stdin closes (daemon lifecycle contract).
  */
@@ -29,9 +29,9 @@ let sessionCounter = 0;
 interface FakeSession {
   aborted: boolean;
   streaming: boolean;
-  directive?: string;
-  steerReply?: (text: string) => void;
-  permissionReply?: (allowed: boolean) => void;
+  directive?: string | undefined;
+  steerReply?: ((text: string) => void) | undefined;
+  permissionReply?: ((allowed: boolean) => void) | undefined;
 }
 const sessions = new Map<string, FakeSession>();
 
@@ -66,6 +66,9 @@ readJsonl(Bun.stdin.stream(), (raw) => {
       const { sessionId, message } = msg as unknown as { sessionId: string; turnId: string; message: { text: string } };
       const text = message.text;
       const s = sessions.get(sessionId)!;
+      s.aborted = false;
+      s.directive = undefined;
+      s.steerReply = undefined;
       void (async () => {
         if (text.startsWith("say:")) {
           const said = text.slice(4).trim();
@@ -136,14 +139,39 @@ readJsonl(Bun.stdin.stream(), (raw) => {
         if (text === "steer-echo") {
           s.streaming = true;
           s.directive = "steer-echo";
-          write({ type: "event", event: { type: "message.delta", sessionId, text: "working… " } });
-          // Long turn: wait for a steer, then echo it and complete.
-          const steered = await new Promise<string>((resolve) => {
-            s.steerReply = (t) => resolve(t);
+          write({
+            type: "event",
+            event: {
+              type: "tool.started",
+              sessionId,
+              id: "steer-boundary",
+              name: "fake-atomic-action",
+              input: { boundary: "after-steer-queued" },
+            },
           });
+          // The worker can receive a steer while this atomic action is active.
+          // Resolving is queued as a microtask, so message.steer is acknowledged
+          // before the action completes at its safe boundary.
+          const steered = await new Promise<string>((resolve) => {
+            s.steerReply = resolve;
+          });
+          if (s.aborted) return;
+          write({
+            type: "event",
+            event: {
+              type: "tool.completed",
+              sessionId,
+              id: "steer-boundary",
+              output: "safe boundary reached",
+              isError: false,
+            },
+          });
+          if (s.aborted) return;
           write({ type: "event", event: { type: "message.delta", sessionId, text: `steered: ${steered}` } });
           write({ type: "event", event: { type: "turn.completed", sessionId } });
           s.streaming = false;
+          s.directive = undefined;
+          s.steerReply = undefined;
           respond(msg.requestId!, { accepted: true });
           return;
         }
@@ -163,7 +191,11 @@ readJsonl(Bun.stdin.stream(), (raw) => {
         respondError(msg.requestId!, "fake hang is not steerable");
         break;
       }
-      s.steerReply?.(text);
+      if (s.directive !== "steer-echo" || !s.steerReply) {
+        respondError(msg.requestId!, "fake session has no steering boundary");
+        break;
+      }
+      s.steerReply(text);
       respond(msg.requestId!, { steered: true });
       break;
     }
@@ -177,11 +209,15 @@ readJsonl(Bun.stdin.stream(), (raw) => {
     case "turn.abort": {
       const { sessionId } = msg as unknown as { sessionId: string };
       const s = sessions.get(sessionId);
-      if (s) {
+      if (s?.streaming) {
+        s.aborted = true;
         s.streaming = false;
+        s.steerReply?.("");
+        s.steerReply = undefined;
+        s.directive = undefined;
         write({ type: "event", event: { type: "turn.cancelled", sessionId } });
       }
-      respond(msg.requestId!, {});
+      respond(msg.requestId!, { aborted: true });
       break;
     }
     case "session.history":

@@ -13,11 +13,42 @@ interface TurnRow {
   id: string; thread_id: string; bot_id: string; status: string; worker_session_id: string | null; native_session_id: string; steer_count: number; started_at: string; finished_at: string | null; outcome_reason: string | null;
 }
 
+export interface NativeThreadTitleUpdater {
+  renameThread(input: {
+    agentId: string;
+    threadId: string;
+    title: string;
+    nativeSessionId?: string;
+  }): Promise<void>;
+}
+
+/**
+ * Descriptive adapter inventory. An absent entry means the Agent has no
+ * truthful native rename operation; local display metadata is never used as a
+ * substitute.
+ */
+export type ThreadTitleCapabilityInventory = Readonly<
+  Record<string, NativeThreadTitleUpdater | undefined>
+>;
+
+const NO_NATIVE_THREAD_RENAME: ThreadTitleCapabilityInventory = Object.freeze({});
+
+export class ThreadTitleConflict extends Error {
+  readonly status = 409;
+  readonly code = "THREAD_TITLE_RENAME_UNSUPPORTED";
+
+  constructor(readonly agentId: string) {
+    super(`rename not supported by ${agentId}`);
+    this.name = "ThreadTitleConflict";
+  }
+}
+
 /** Threads are created lazily on first send; the message index is the source of truth. */
 export class ThreadsService {
   constructor(
     private readonly db: Database,
     private readonly events: EventLog,
+    private readonly titleCapabilities: ThreadTitleCapabilityInventory = NO_NATIVE_THREAD_RENAME,
   ) {}
 
   /** Insert without events — used inside multi-row transactions. */
@@ -50,8 +81,8 @@ export class ThreadsService {
   listThreads(botId?: string): ThreadDto[] {
     const rows = (
       botId !== undefined
-        ? this.db.query(`SELECT * FROM threads WHERE bot_id = ? ORDER BY updated_at DESC`).all(botId)
-        : this.db.query(`SELECT * FROM threads ORDER BY updated_at DESC`).all()
+        ? this.db.query(`SELECT * FROM threads WHERE bot_id = ? ORDER BY updated_at DESC, created_at DESC, id DESC`).all(botId)
+        : this.db.query(`SELECT * FROM threads ORDER BY updated_at DESC, created_at DESC, id DESC`).all()
     ) as ThreadRow[];
     return rows.map((r) => {
       const active = this.activeTurn(r.id);
@@ -66,9 +97,46 @@ export class ThreadsService {
 
   listThreadsForBot(botId: string, q?: string): ThreadDto[] {
     const all = this.listThreads(botId);
-    if (!q) return all;
-    const needle = q.toLowerCase();
-    return all.filter((t) => t.title.toLowerCase().includes(needle));
+    const needle = q?.trim().toLowerCase() ?? "";
+    if (needle === "") return all;
+    return all.filter((thread) => thread.title.toLowerCase().includes(needle));
+  }
+
+  /**
+   * Rename only through an Agent operation declared by the adapter inventory.
+   * The local title changes after the native operation succeeds, never before.
+   */
+  async updateTitle(id: string, title: string): Promise<ThreadDto | undefined> {
+    const normalizedTitle = title.trim();
+    if (normalizedTitle.length === 0 || normalizedTitle.length > 120) {
+      throw new RangeError("title must contain 1 to 120 characters");
+    }
+
+    const identity = this.db
+      .query(`
+        SELECT bots.agent_id, thread_sessions.native_session_id
+        FROM threads
+        JOIN bots ON bots.id = threads.bot_id
+        LEFT JOIN thread_sessions ON thread_sessions.thread_id = threads.id
+        WHERE threads.id = ?
+      `)
+      .get(id) as { agent_id: string; native_session_id: string | null } | undefined;
+    if (identity === undefined) return undefined;
+
+    const updater = this.titleCapabilities[identity.agent_id];
+    if (updater === undefined) throw new ThreadTitleConflict(identity.agent_id);
+
+    await updater.renameThread({
+      agentId: identity.agent_id,
+      threadId: id,
+      title: normalizedTitle,
+      ...(identity.native_session_id !== null ? { nativeSessionId: identity.native_session_id } : {}),
+    });
+
+    const now = new Date().toISOString();
+    this.db.query(`UPDATE threads SET title = ?, updated_at = ? WHERE id = ?`).run(normalizedTitle, now, id);
+    this.events.append("thread", id, "thread.updated", { title: normalizedTitle });
+    return this.getThread(id);
   }
 
   touch(id: string): void {

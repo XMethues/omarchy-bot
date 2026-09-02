@@ -9,6 +9,8 @@ import { Sidebar } from "../components/Sidebar.tsx";
 import { ConversationHeader } from "../components/ConversationHeader.tsx";
 import { ChatPanel } from "../components/ChatPanel.tsx";
 import { CreateBotDialog } from "../components/CreateBotDialog.tsx";
+import { HistoryDialog } from "../components/HistoryDialog.tsx";
+import { ProfileDialog } from "../components/ProfileDialog.tsx";
 import styles from "../lib/styles.ts";
 
 export const Route = createFileRoute("/")({
@@ -36,6 +38,8 @@ function HomeScreen(): JSX.Element {
   const navigate = useNavigate();
   const { bot: selectedBotId, thread: selectedThreadId } = Route.useSearch();
   const [createOpen, setCreateOpen] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [profileOpen, setProfileOpen] = useState(false);
 
   const invalidate = useCallback(
     (tag: QueryTag, threadId?: string) => {
@@ -153,7 +157,12 @@ function HomeScreen(): JSX.Element {
       }
     >
       <div xstyle={styles.fillColumn}>
-        <ConversationHeader bot={bot} thread={thread} />
+        <ConversationHeader
+          bot={bot}
+          thread={thread}
+          onOpenHistory={() => setHistoryOpen(true)}
+          onOpenProfile={() => setProfileOpen(true)}
+        />
         <ChatPanel
           bot={bot}
           thread={thread}
@@ -172,6 +181,23 @@ function HomeScreen(): JSX.Element {
           void navigate({ search: { bot: botId, thread: "blank" } });
         }}
       />
+      {bot !== undefined ? (
+        <>
+          <HistoryDialog
+            botId={bot.id}
+            open={historyOpen}
+            onClose={() => setHistoryOpen(false)}
+            onSelectThread={(threadId) => void navigate({ search: { bot: bot.id, thread: threadId } })}
+            onNewConversation={() => void navigate({ search: { bot: bot.id, thread: "blank" } })}
+          />
+          <ProfileDialog
+            bot={bot}
+            open={profileOpen}
+            onClose={() => setProfileOpen(false)}
+            onUpdated={() => invalidate("bots")}
+          />
+        </>
+      ) : null}
     </AppShell>
   );
 }
