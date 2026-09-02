@@ -1,6 +1,12 @@
-import type { JSX } from "react";
-import { Button } from "@astryxdesign/core/Button";
+import type { JSX, ReactNode } from "react";
 import { AppShell } from "@astryxdesign/core/AppShell";
+import { Banner } from "@astryxdesign/core/Banner";
+import { Button } from "@astryxdesign/core/Button";
+import { EmptyState } from "@astryxdesign/core/EmptyState";
+import { Icon } from "@astryxdesign/core/Icon";
+import { Layout, LayoutContent } from "@astryxdesign/core/Layout";
+import { Skeleton } from "@astryxdesign/core/Skeleton";
+import { VStack } from "@astryxdesign/core/VStack";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
@@ -18,7 +24,6 @@ import { ComputerSheet } from "../components/ComputerSheet.tsx";
 import { EmergencyComputerControl } from "../components/EmergencyComputerControl.tsx";
 import { VoiceSettingsControl, useVoiceAutoSendSetting } from "../components/VoiceSettingsControl.tsx";
 import { TranscriptAttention } from "../components/TranscriptAttention.tsx";
-import styles from "../lib/styles.ts";
 
 export const Route = createFileRoute("/")({
   component: HomeScreen,
@@ -51,6 +56,7 @@ function HomeScreen(): JSX.Element {
   const [computerError, setComputerError] = useState<string | undefined>(undefined);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [autoSendVoice, setAutoSendVoice] = useVoiceAutoSendSetting();
+  const [isOnline, setIsOnline] = useState(() => typeof navigator === "undefined" || navigator.onLine);
   const selectedBotRef = useRef<string | undefined>(selectedBotId);
   const botNamesRef = useRef<Record<string, string>>({});
   selectedBotRef.current = selectedBotId;
@@ -71,6 +77,17 @@ function HomeScreen(): JSX.Element {
       };
     });
   }, [qc, invalidate]);
+
+  useEffect(() => {
+    const markOnline = (): void => setIsOnline(true);
+    const markOffline = (): void => setIsOnline(false);
+    window.addEventListener("online", markOnline);
+    window.addEventListener("offline", markOffline);
+    return () => {
+      window.removeEventListener("online", markOnline);
+      window.removeEventListener("offline", markOffline);
+    };
+  }, []);
 
   const agents = useQuery({ queryKey: ["agents"], queryFn: () => api.listAgents(), refetchInterval: 30_000 });
   const bots = useQuery({ queryKey: ["bots"], queryFn: () => api.listBots(), refetchInterval: 30_000 });
@@ -190,20 +207,191 @@ function HomeScreen(): JSX.Element {
     [bot, selectedThreadId, navigate, invalidate],
   );
 
-  const isAgentReady = useMemo(() => {
-    if (bot === undefined) return false;
-    return (agents.data ?? []).find((a) => a.id === bot.agentId)?.status === "ready";
-  }, [agents.data, bot]);
+  const selectedAgent = useMemo(
+    () => (bot === undefined ? undefined : agents.data?.find((candidate) => candidate.id === bot.agentId)),
+    [agents.data, bot],
+  );
+  const isAgentReady = selectedAgent?.status === "ready";
+
+  const workspaceBanner: ReactNode =
+    !isOnline ? (
+      <Banner
+        status="warning"
+        title="You’re offline"
+        description="Drafts remain available. Reconnect to send messages or refresh workspace data."
+        container="section"
+      />
+    ) : bots.error !== null && bots.data !== undefined ? (
+      <Banner
+        status="error"
+        title="Workspace refresh failed"
+        description={apiErrorMessage(bots.error, "Your bots could not be refreshed.")}
+        container="section"
+        endContent={
+          <Button label="Retry" variant="secondary" size="sm" onClick={() => void bots.refetch()} />
+        }
+      />
+    ) : undefined;
+
+  const conversationNotice: ReactNode =
+    bot !== undefined && threads.error !== null ? (
+      <Banner
+        status="error"
+        title="Conversations could not be loaded"
+        description={apiErrorMessage(threads.error, "Try loading this bot’s conversations again.")}
+        container="section"
+        endContent={
+          <Button label="Retry" variant="secondary" size="sm" onClick={() => void threads.refetch()} />
+        }
+      />
+    ) : bot !== undefined && threads.isPending ? (
+      <Banner
+        status="info"
+        title="Loading conversations"
+        description="Your composer will be ready while recent conversation history loads."
+        container="section"
+      />
+    ) : bot !== undefined && agents.error !== null ? (
+      <Banner
+        status="error"
+        title="Agent status could not be loaded"
+        description={apiErrorMessage(agents.error, "The selected bot’s agent status is unknown.")}
+        container="section"
+        endContent={
+          <Button label="Retry" variant="secondary" size="sm" onClick={() => void agents.refetch()} />
+        }
+      />
+    ) : bot !== undefined && agents.isPending ? (
+      <Banner
+        status="info"
+        title="Checking agent availability"
+        description="You can review this conversation while the agent connection is checked."
+        container="section"
+      />
+    ) : bot !== undefined && !isAgentReady ? (
+      <Banner
+        status="warning"
+        title="Agent unavailable"
+        description="This bot’s conversation is still available, but new messages cannot be sent until its agent is ready."
+        container="section"
+      />
+    ) : undefined;
+
+  let workspaceContent: ReactNode;
+  if (bots.isPending && bots.data === undefined) {
+    workspaceContent = (
+      <VStack
+        gap={3}
+        padding={6}
+        role="status"
+        aria-label="Loading workspace"
+        data-testid="workspace-loading"
+      >
+        <Skeleton width="100%" height="var(--spacing-4)" radius={3} />
+        <Skeleton width="100%" height="var(--spacing-10)" radius={3} index={1} />
+        <Skeleton width="100%" height="var(--spacing-4)" radius={3} index={2} />
+      </VStack>
+    );
+  } else if (bots.error !== null && bots.data === undefined) {
+    workspaceContent = (
+      <VStack padding={6}>
+        <Banner
+          status="error"
+          title="Workspace could not be loaded"
+          description={apiErrorMessage(bots.error, "Check your connection and try again.")}
+          endContent={
+            <Button label="Retry" variant="secondary" onClick={() => void bots.refetch()} />
+          }
+        />
+      </VStack>
+    );
+  } else if ((bots.data?.length ?? 0) === 0) {
+    workspaceContent = (
+      <VStack height="100%" padding={6} vAlign="center">
+        <EmptyState
+          headingLevel={2}
+          title="Create your first bot"
+          description="Give a teammate a name, a job, and an available agent to start a conversation."
+          icon={<Icon icon="info" size="lg" />}
+          actions={
+            <Button
+              label="New bot"
+              variant="primary"
+              onClick={() => setCreateOpen(true)}
+              data-testid="empty-create-bot"
+            />
+          }
+        />
+      </VStack>
+    );
+  } else if (bot === undefined) {
+    workspaceContent = (
+      <VStack
+        gap={3}
+        padding={6}
+        role="status"
+        aria-label="Opening bot"
+        data-testid="bot-selection-loading"
+      >
+        <Skeleton width="100%" height="var(--spacing-4)" radius={3} />
+        <Skeleton width="100%" height="var(--spacing-10)" radius={3} index={1} />
+      </VStack>
+    );
+  } else {
+    workspaceContent = (
+      <VStack height="100%" gap={0}>
+        {conversationNotice}
+          <TranscriptAttention
+            botId={bot.id}
+            {...(thread !== undefined ? { threadId: thread.id } : {})}
+            unreadCount={bot.unreadCount}
+            {...(bot.unreadThreadId !== undefined ? { unreadThreadId: bot.unreadThreadId } : {})}
+            {...(messages.data?.at(-1)?.id !== undefined ? { latestMessageId: messages.data.at(-1)!.id } : {})}
+            onRead={async (botId, threadId) => {
+              await api.markBotRead(botId, threadId);
+              invalidate("bots");
+            }}
+          >
+            <ChatPanel
+              bot={bot}
+              {...(thread !== undefined ? { thread } : {})}
+              messages={messages.data ?? []}
+              {...(thread !== undefined && messages.isPending ? { messagesLoading: true } : {})}
+              {...(messages.error !== null
+                ? { messagesError: apiErrorMessage(messages.error, "Messages could not be loaded.") }
+                : {})}
+              {...(thread !== undefined ? { onRetryMessages: () => void messages.refetch() } : {})}
+              dictation={dictationController}
+              autoSendVoice={autoSendVoice}
+              onVoiceAutoSend={async (target, text) => {
+                const response =
+                  target.threadId !== undefined
+                    ? await api.sendMessage(target.threadId, { text, clientTag: crypto.randomUUID() })
+                    : await api.sendBotMessage(target.botId, { text, clientTag: crypto.randomUUID() });
+                invalidate("threads");
+                invalidate("bots");
+                invalidate("messages", target.threadId);
+                if (target.threadId === undefined && bot.id === target.botId && thread === undefined) onMessageSent(response.threadId);
+              }}
+              onMessageSent={onMessageSent}
+              isAgentReady={isAgentReady}
+            />
+          </TranscriptAttention>
+      </VStack>
+    );
+  }
 
   return (
     <AppShell
       height="fill"
       contentPadding={0}
       variant="section"
+      mobileNav={{ breakpoint: "md", hasToggle: false }}
+      {...(workspaceBanner !== undefined ? { banner: workspaceBanner } : {})}
       sideNav={
         <Sidebar
           bots={bots.data ?? []}
-          selectedBotId={selectedBotId}
+          {...(selectedBotId !== undefined ? { selectedBotId } : {})}
           onSelectBot={selectBot}
           onCreateBot={() => setCreateOpen(true)}
           onOpenSettings={() => setSettingsOpen(true)}
@@ -217,50 +405,62 @@ function HomeScreen(): JSX.Element {
             invalidate("bots");
             if (selectedBotId === botId) void navigate({ search: {}, replace: true });
           }}
+          safetyControl={
+            <EmergencyComputerControl
+              view={computer.data ?? { state: "unavailable" }}
+              busy={computerAction.isPending}
+              onEmergencyStop={() => computerAction.mutate("stop")}
+              onResume={() => computerAction.mutate("resume")}
+            />
+          }
         />
       }
     >
-      <div xstyle={styles.fillColumn}>
-        <ConversationHeader
-          bot={bot}
-          thread={thread}
-          onOpenHistory={() => setHistoryOpen(true)}
-          onOpenProfile={() => setProfileOpen(true)}
-          computerState={computer.data?.state ?? "unavailable"}
-          onOpenComputer={() => setComputerOpen(true)}
-        />
-        <TranscriptAttention
-          {...(bot !== undefined ? { botId: bot.id } : {})}
-          {...(thread !== undefined ? { threadId: thread.id } : {})}
-          unreadCount={bot?.unreadCount ?? 0}
-          {...(bot?.unreadThreadId !== undefined ? { unreadThreadId: bot.unreadThreadId } : {})}
-          {...(messages.data?.at(-1)?.id !== undefined ? { latestMessageId: messages.data.at(-1)!.id } : {})}
-          onRead={async (botId, threadId) => {
-            await api.markBotRead(botId, threadId);
-            invalidate("bots");
-          }}
-        >
-        <ChatPanel
-          bot={bot}
-          thread={thread}
-          messages={messages.data ?? []}
-          dictation={dictationController}
-          autoSendVoice={autoSendVoice}
-          onVoiceAutoSend={async (target, text) => {
-            const response =
-              target.threadId !== undefined
-                ? await api.sendMessage(target.threadId, { text, clientTag: crypto.randomUUID() })
-                : await api.sendBotMessage(target.botId, { text, clientTag: crypto.randomUUID() });
-            invalidate("threads");
-            invalidate("bots");
-            invalidate("messages", target.threadId);
-            if (target.threadId === undefined && bot?.id === target.botId && thread === undefined) onMessageSent(response.threadId);
-          }}
-          onMessageSent={onMessageSent}
-          isAgentReady={isAgentReady}
-        />
-        </TranscriptAttention>
-      </div>
+      <Layout
+        height="fill"
+        padding={0}
+        header={
+          <ConversationHeader
+            {...(bot !== undefined ? { bot } : {})}
+            {...(thread !== undefined ? { thread } : {})}
+            onOpenHistory={() => setHistoryOpen(true)}
+            onOpenProfile={() => setProfileOpen(true)}
+            computerState={computer.data?.state ?? "unavailable"}
+            onOpenComputer={() => setComputerOpen(true)}
+          />
+        }
+        content={
+          <LayoutContent padding={0} isScrollable={false} label="Conversation workspace">
+            {workspaceContent}
+          </LayoutContent>
+        }
+        end={
+          bot !== undefined ? (
+            <ComputerSheet
+              bot={bot}
+              view={
+                computer.data
+                  ?? {
+                    state: "unavailable",
+                    activity:
+                      computer.error !== null
+                        ? apiErrorMessage(computer.error, "Computer status could not be loaded.")
+                        : "Computer state is loading.",
+                  }
+              }
+              snapshotUrl={api.computerImageUrl()}
+              open={computerOpen}
+              busy={computerAction.isPending}
+              {...(computer.isPending ? { loading: true } : {})}
+              {...(computer.error !== null ? { onRetry: () => void computer.refetch() } : {})}
+              {...(computerError !== undefined ? { error: computerError } : {})}
+              onClose={() => setComputerOpen(false)}
+              onTakeControl={() => computerAction.mutate("take")}
+              onReturnToBot={() => computerAction.mutate("return")}
+            />
+          ) : undefined
+        }
+      />
       <CreateBotDialog
         isOpen={createOpen}
         onClose={() => setCreateOpen(false)}
@@ -291,6 +491,11 @@ function HomeScreen(): JSX.Element {
         open={settingsOpen}
         onClose={() => setSettingsOpen(false)}
         archivedBots={allBots.data ?? []}
+        {...(allBots.isPending ? { archivedBotsLoading: true } : {})}
+        {...(allBots.error !== null
+          ? { archivedBotsError: apiErrorMessage(allBots.error, "Archived bots could not be loaded.") }
+          : {})}
+        {...(allBots.error !== null ? { onRetryArchivedBots: () => void allBots.refetch() } : {})}
         onRestoreBot={(botId) => api.restoreBot(botId)}
         onBotRestored={() => invalidate("bots")}
         onDeleteBot={async (botId, confirmName) => {
@@ -318,25 +523,6 @@ function HomeScreen(): JSX.Element {
           />
         </>
       </SettingsDialog>
-      {bot !== undefined ? (
-        <ComputerSheet
-          bot={bot}
-          view={computer.data ?? { state: "unavailable", activity: "Computer state is loading." }}
-          snapshotUrl={api.computerImageUrl()}
-          open={computerOpen}
-          busy={computerAction.isPending}
-          {...(computerError !== undefined ? { error: computerError } : {})}
-          onClose={() => setComputerOpen(false)}
-          onTakeControl={() => computerAction.mutate("take")}
-          onReturnToBot={() => computerAction.mutate("return")}
-        />
-      ) : null}
-      <EmergencyComputerControl
-        view={computer.data ?? { state: "unavailable" }}
-        busy={computerAction.isPending}
-        onEmergencyStop={() => computerAction.mutate("stop")}
-        onResume={() => computerAction.mutate("resume")}
-      />
     </AppShell>
   );
 }

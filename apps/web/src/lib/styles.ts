@@ -1,83 +1,74 @@
 import * as stylex from "@stylexjs/stylex";
 
+const workingPulse = stylex.keyframes({
+  "0%, 100%": { opacity: 0.62 },
+  "50%": { opacity: 1 },
+});
+
 const styles = stylex.create({
-  fillColumn: { flexGrow: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column" },
-  header: {
+  fillColumn: {
+    flexGrow: 1,
+    minWidth: 0,
+    minHeight: 0,
     display: "flex",
-    alignItems: "center",
-    gap: 8,
-    paddingInline: 24,
-    paddingBlock: 12,
-    borderBottomWidth: 1,
-    borderBottomStyle: "solid",
-    borderBottomColor: "var(--color-border-secondary)",
-    flexShrink: 0,
+    flexDirection: "column",
   },
-  headerGrow: { flexGrow: 1, minWidth: 0 },
-  headerTitle: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
   composerWrap: {
-    flexShrink: 0,
-    paddingInline: 24,
-    paddingBlock: 16,
-    maxWidth: 860,
     width: "100%",
+    maxWidth: 860,
     marginInline: "auto",
     boxSizing: "border-box",
   },
   composerDropZone: {
     display: "flex",
     flexDirection: "column",
-    gap: 8,
+    gap: "var(--spacing-2)",
   },
-  composerActions: {
-    display: "flex",
-    alignItems: "center",
-    gap: 4,
+  hiddenFileInput: {
+    display: "none",
   },
-  hiddenFileInput: { display: "none" },
-  stagedAttachments: {
-    display: "flex",
-    gap: 8,
-    overflowX: "auto",
-    paddingBlock: 2,
-  },
-  stagedAttachment: {
-    display: "flex",
-    alignItems: "center",
-    gap: 8,
-    flexShrink: 0,
-    padding: 6,
+  attachmentPreview: {
+    width: "100%",
+    overflow: "hidden",
     borderWidth: 1,
     borderStyle: "solid",
-    borderColor: "var(--color-border-secondary)",
-    borderRadius: "var(--radius-md)",
-    backgroundColor: "var(--color-background-surface)",
+    borderColor: "var(--color-border)",
+    borderRadius: "var(--radius-container)",
+    backgroundColor: "var(--color-background-muted)",
+  },
+  attachmentThumbnail: {
+    width: "var(--spacing-12)",
+    minWidth: "var(--spacing-12)",
+    overflow: "hidden",
+    borderRadius: "var(--radius-element)",
+    backgroundColor: "var(--color-background-muted)",
   },
   attachmentImage: {
     display: "block",
-    width: 112,
-    height: 84,
-    maxWidth: "100%",
+    width: "100%",
+    height: "100%",
     objectFit: "cover",
-    borderRadius: "var(--radius-md)",
-  },
-  attachmentFile: {
-    display: "flex",
-    flexDirection: "column",
-    gap: 2,
-    minWidth: 120,
-    maxWidth: 260,
-    color: "inherit",
-    textDecoration: "none",
-    overflow: "hidden",
   },
   messageContent: {
     display: "flex",
     flexDirection: "column",
-    gap: 8,
+    gap: "var(--spacing-2)",
     whiteSpace: "pre-wrap",
+    minWidth: 0,
   },
-  activityWrap: { paddingInline: 8 },
+  activityWrap: {
+    paddingInline: "var(--spacing-2)",
+  },
+  workingIndicator: {
+    color: "var(--color-text-secondary)",
+    animationName: {
+      default: workingPulse,
+      "@media (prefers-reduced-motion: reduce)": "none",
+    },
+    animationDuration: "var(--duration-slow)",
+    animationTimingFunction: "var(--ease-standard)",
+    animationIterationCount: "infinite",
+  },
 });
 
 export default styles;

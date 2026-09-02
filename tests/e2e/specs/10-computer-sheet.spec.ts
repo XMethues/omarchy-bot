@@ -62,12 +62,20 @@ test.describe("contextual computer sheet", () => {
     await expect(trigger).toHaveAttribute("data-state", "bot-using");
     await expect(trigger).toHaveAccessibleName(/this bot is using it/i);
     await trigger.click();
+    const drawer = page.getByRole("complementary", { name: "Computer", exact: true });
+    await expect(drawer).toBeVisible();
+    await expect(page.getByRole("dialog", { name: "Computer" })).toHaveCount(0);
 
     const sheet = page.getByTestId("computer-sheet");
     await expect(sheet).toBeVisible();
     await expect(sheet.getByTestId("computer-preview")).toHaveAttribute("alt", "Latest computer preview for Computer Bot");
     await expect(sheet).toContainText("This bot is using the computer.");
     await expect(sheet).not.toContainText(/lease|TTL|token|queue depth/i);
+    await sheet.getByTestId("computer-preview-expand").click();
+    await expect(page.getByAltText("Expanded computer preview for Computer Bot")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.getByAltText("Expanded computer preview for Computer Bot")).toBeHidden();
+    await expect(drawer).toBeVisible();
     await expect(sheet.getByTestId("computer-take-control")).toBeVisible();
     await expect(sheet.getByTestId("computer-return-to-bot")).toHaveCount(0);
 
@@ -78,6 +86,9 @@ test.describe("contextual computer sheet", () => {
     await sheet.getByTestId("computer-return-to-bot").click();
     await expect(sheet).toContainText("Computer ready");
     await expect(sheet.getByTestId("computer-return-to-bot")).toHaveCount(0);
+    await page.getByTestId("computer-drawer-close").click();
+    await expect(drawer).toBeHidden();
+    await expect(trigger).toBeFocused();
   });
 
   test("waiting belongs only to the waiting bot and the emergency fail-safe stays global", async ({ page }) => {

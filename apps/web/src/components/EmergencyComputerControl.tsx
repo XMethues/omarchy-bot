@@ -1,6 +1,7 @@
 import type { JSX } from "react";
 import * as stylex from "@stylexjs/stylex";
 import { Button } from "@astryxdesign/core/Button";
+import { Icon } from "@astryxdesign/core/Icon";
 import { Text } from "@astryxdesign/core/Text";
 import { VStack } from "@astryxdesign/core/VStack";
 import type { ComputerViewDto } from "@omarchy-bot/protocol";
@@ -14,22 +15,20 @@ export interface EmergencyComputerControlProps {
 
 const localStyles = stylex.create({
   root: {
-    position: "fixed",
-    insetInlineEnd: "var(--spacing-4)",
-    insetBlockEnd: "var(--spacing-4)",
-    zIndex: 20,
-    alignItems: "flex-end",
+    width: "100%",
+    alignItems: "flex-start",
   },
 });
 
-/** Global fail-safe. Mount as an AppShell sibling, never inside conversation actions or the Computer Sheet. */
+/** Global fail-safe kept clear of the conversation composer and sheet actions. */
 export function EmergencyComputerControl({
   view,
   busy = false,
   onEmergencyStop,
   onResume,
-}: EmergencyComputerControlProps): JSX.Element {
+}: EmergencyComputerControlProps): JSX.Element | null {
   const stopped = view.state === "emergency-stopped";
+  if (view.state === "unavailable") return null;
   return (
     <VStack
       as="aside"
@@ -42,9 +41,11 @@ export function EmergencyComputerControl({
       {stopped ? <Text color="secondary">Computer control is stopped</Text> : null}
       <Button
         label={stopped ? "Resume computer control" : "Emergency stop computer"}
+        icon={<Icon icon="stop" size="sm" />}
         variant={stopped ? "secondary" : "destructive"}
         size="sm"
-        isDisabled={busy}
+        isIconOnly
+        isLoading={busy}
         onClick={stopped ? onResume : onEmergencyStop}
         data-testid={stopped ? "computer-resume" : "computer-emergency-stop"}
       />

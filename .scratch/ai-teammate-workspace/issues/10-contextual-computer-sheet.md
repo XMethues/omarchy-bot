@@ -8,7 +8,8 @@
 
 - [x] A Computer icon is always available in the conversation Header and is visually quiet while inactive.
 - [x] The icon reflects only plain-language selected-Bot states such as using computer, waiting, needs you, or user control.
-- [x] The Astryx Computer Sheet shows the latest preview and activity without lease holder, TTL, token, or queue-depth terminology.
+- [x] The desktop Computer surface is a docked Astryx drawer; narrow windows use an Astryx Bottom Sheet.
+- [x] The compact preview opens an Astryx Lightbox modal only after the user selects its expand icon.
 - [x] Take control appears only when human input is relevant and parks Bot desktop input before handing over the Shared Screen.
 - [x] Return to Bot re-observes the Shared Screen before resuming the parked work.
 - [x] A Bot waiting behind another shows Waiting for computer only on that Bot.
@@ -20,6 +21,6 @@
 ## Answer
 
 - `tests/integration/computer.test.ts` covers selected-Bot mapping, takeover parking, serialized input, ownership-free observation, re-observation ordering, approval-gate absence, snapshots, and emergency stop/resume.
-- `tests/e2e/specs/10-computer-sheet.spec.ts` covers responsive presentation, preview and action visibility, waiting-state isolation, takeover/return, and the separately mounted emergency control.
+- `tests/e2e/specs/10-computer-sheet.spec.ts` covers the docked desktop drawer, modal preview expansion, narrow Bottom Sheet, preview and action visibility, waiting-state isolation, takeover/return, and the global emergency control.
 
 Validated with `bun run typecheck`, focused computer integration tests, the complete 61-test integration suite, a production web build, and all three contextual-computer Playwright scenarios.

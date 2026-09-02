@@ -28,11 +28,11 @@ test.describe("create bot flow", () => {
 
     const claude = page.getByRole("radio", { name: "Claude" });
     await expect(claude).toBeDisabled();
-    await expect(page.getByText("Claude is not available: no adapter is installed in this Omarchy Bot build yet.")).toBeVisible();
+    await expect(page.getByText("Not available in this installation").first()).toBeVisible();
     await expect(page.getByRole("radio", { name: /^Pi/ })).toBeEnabled();
 
     await page.getByTestId("create-bot-submit").click();
-    await expect(page.getByText("Name is required.")).toBeVisible();
+    await expect(page.getByRole("alert").filter({ hasText: "Give this bot a name." })).toBeVisible();
 
     await page.getByTestId("create-bot-name").fill("E2E Bot");
     await page.getByTestId("create-bot-instructions").fill("Own release notes");
@@ -40,10 +40,12 @@ test.describe("create bot flow", () => {
     await page.getByTestId("create-bot-submit").click();
 
     await expect(page.locator("[data-testid^='sidebar-bot-']", { hasText: "E2E Bot" })).toBeVisible();
-    await expect(page.locator("header", { hasText: "E2E Bot" })).toBeVisible();
+    await expect(page.locator("[data-testid^='sidebar-bot-bot_']")).toHaveCount(1);
+    await expect(page.getByRole("heading", { level: 1, name: "E2E Bot" })).toBeVisible();
     await expect(page).toHaveURL(/(?:\?|&)bot=bot_[0-9a-f]{32}(?:&|$)/);
     await expect(page).toHaveURL(/(?:\?|&)thread=blank(?:&|$)/);
     await expect(page.getByTestId("composer").locator('[contenteditable="true"]')).toHaveText("");
+    await expect(page.getByTestId("transcript").getByRole("heading")).toHaveCount(0);
   });
 
   test("keeps two bots on the same agent as independent sidebar rows", async ({ page }) => {

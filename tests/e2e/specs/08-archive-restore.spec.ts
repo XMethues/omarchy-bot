@@ -57,7 +57,7 @@ test.describe("archive and restore bots", () => {
     await expect(page.getByTestId(`settings-archived-bot-${archivedBotId}`)).toHaveCount(0);
     await expect(page.getByTestId(`sidebar-bot-${archivedBotId}`)).toBeVisible();
     const firstActiveTestId = await page.locator("[data-testid^='sidebar-bot-bot_']").first().getAttribute("data-testid");
-    expect(firstActiveTestId).toBe(`sidebar-bot-${fallbackBotId}`);
+    expect(firstActiveTestId).toBe(`sidebar-bot-${archivedBotId}`);
   });
 
   test("keeps active work on cancel, then stops and archives only after confirmation", async ({ page }) => {

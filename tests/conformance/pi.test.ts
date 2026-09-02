@@ -16,6 +16,7 @@ import os from "node:os";
 import path from "node:path";
 import { WorkerClient, sanitizedEnv } from "../../apps/daemon/src/supervision/workerClient.ts";
 import { RED_PIXEL_PNG, startConformanceDaemon, type ConformanceDaemon } from "./helpers.ts";
+import { normalizeSessionEvent } from "../../workers/pi/src/normalize.ts";
 
 let daemon: ConformanceDaemon;
 let pi: WorkerClient;
@@ -292,10 +293,23 @@ describe("pi conformance (10 steps, real model)", () => {
       console.log("conformance: step 8 ok — worker restart clean (orphans checked in afterAll)");
 
       // ---- Step 9: capability inventory / event mapping ----
-      const REQUIRED_EVENT_TYPES = ["message.delta", "tool.started", "tool.updated", "tool.completed", "turn.completed", "turn.cancelled"] as const;
-      for (const t of REQUIRED_EVENT_TYPES) {
-        expect(seenEventTypes.has(t)).toBeTrue();
+      // Pi does not emit progress updates for every tool (fast read/write tools
+      // commonly jump from start to end), so require only live lifecycle
+      // boundaries here and exercise the optional update mapping directly.
+      const REQUIRED_LIVE_EVENT_TYPES = ["message.delta", "tool.started", "tool.completed", "turn.completed", "turn.cancelled"] as const;
+      for (const t of REQUIRED_LIVE_EVENT_TYPES) {
+        expect(seenEventTypes.has(t), `missing live event type ${t}; saw ${[...seenEventTypes].sort().join(", ")}`).toBeTrue();
       }
+      expect(normalizeSessionEvent({
+        type: "tool_execution_update",
+        toolCallId: "tool_conformance",
+        partialResult: { content: [{ type: "text", text: "partial output" }] },
+      }, "session_conformance")).toEqual([{
+        type: "tool.updated",
+        sessionId: "session_conformance",
+        id: "tool_conformance",
+        output: { text: "partial output" },
+      }]);
       console.log(`conformance: step 9 ok — normalized event inventory mapped: ${[...seenEventTypes].sort().join(", ")}`);
 
       // ---- Step 10: Computer fixture via the REAL broker + REAL computer worker ----

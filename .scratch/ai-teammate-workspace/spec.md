@@ -96,7 +96,7 @@ Use Astryx primitives for the product surface, local managed storage for attachm
 74. As a motion-sensitive user, I want reduced-motion mode to replace animation with static indicators, so that the workspace remains comfortable.
 75. As an Omarchy user, I want a Computer icon consistently available in the conversation Header, so that the selected Bot's screen context is discoverable.
 76. As an Omarchy user, I want the Computer icon quiet while inactive and stateful only when relevant, so that it does not create permanent operational noise.
-77. As an Omarchy user, I want the Computer Sheet to show a preview and plain-language activity, so that I can observe desktop work without lease terminology.
+77. As an Omarchy user, I want the Computer icon to open a docked desktop drawer or narrow-window Bottom Sheet with a preview that expands into a modal Lightbox, so that I can observe desktop work without lease terminology and enlarge it only when needed.
 78. As an Omarchy user, I want Take control shown only when human input is relevant, so that takeover is contextual.
 79. As an Omarchy user, I want Return to Bot while I control the Shared Screen, so that the handoff has a clear end.
 80. As an Omarchy user, I want the computer re-observed before the Bot resumes, so that automation continues from current desktop state.
@@ -137,7 +137,7 @@ Use Astryx primitives for the product surface, local managed storage for attachm
 - Store uploaded avatars locally after safe image decoding/re-encoding. Store generated avatars as versioned, validated DiceBear Avatar Recipes.
 - Use the Bot's selected Agent for prompt-to-recipe generation as a profile operation outside Thread history. Render only application-generated DiceBear output.
 - Animate generated avatar internals or an uploaded-avatar activity container only for selected, working, or streaming states. Gate movement behind reduced-motion preference.
-- Keep the Computer Broker as the exclusive Shared Screen input coordinator, but replace public lease/TTL/queue diagnostics with a contextual state projection for the selected Bot.
+- Keep the Computer Broker as the exclusive Shared Screen input coordinator, but replace public lease/TTL/queue diagnostics with a docked desktop drawer, narrow-window Bottom Sheet, and modal expanded preview for the selected Bot.
 - Keep Takeover, Return to Bot, waiting state, re-observation, and emergency stop semantics. Remove the separate omarchy-bot approval check for desktop actions; coordination remains distinct from Agent permissions.
 - Publish ordered Bot, Thread, turn/activity, dictation, and Computer state through the existing replayable WebSocket seam. Do not broadcast transcript text from dictation to non-owning clients.
 - Build the layout with Astryx SideNav, layout, Sheet/Dialog, ChatMessageList, ChatComposer, Avatar, selection, and status primitives discovered through the Astryx CLI. Do not retain TopNav or recreate Astryx primitives by hand.
@@ -153,9 +153,9 @@ Use Astryx primitives for the product surface, local managed storage for attachm
 - The primary seam is the localhost REST/WebSocket API against a real daemon process with fake Agent, Computer, and Voxtype boundaries. This seam verifies schema migration, Agent/Bot separation, Bot lifecycle, Thread and message behavior, native steering routing, attachment lifecycle, dictation outcomes, event replay, background state, and Computer coordination.
 - Migration tests start from a representative legacy database, boot the current daemon, and verify the migrated product exclusively through public API responses. They also verify that a second boot is idempotent and does not expose a legacy model.
 - API integration tests extend the existing daemon harness and fake worker prior art. Fakes model public worker/subprocess protocols, not daemon internals.
-- Browser E2E is the user seam for Sidebar ordering/pinning/unread, Bot creation and editing, history Sheet, blank Thread, window-local drafts, attachment staging, dictation states, streaming scroll behavior, collapsed Activity, Computer Sheet, responsive drawer, keyboard navigation, focus restoration, light/dark themes, and reduced motion.
+- Browser E2E is the user seam for Sidebar ordering/pinning/unread, Bot creation and editing, history Sheet, blank Thread, window-local drafts, attachment staging, dictation states, streaming scroll behavior, collapsed Activity, Computer drawer/Bottom Sheet and preview Lightbox, responsive navigation drawer, keyboard navigation, focus restoration, light/dark themes, and reduced motion.
 - Browser tests interact by accessible roles and visible labels rather than CSS selectors or component names. Accessibility checks include automated axe coverage plus focused keyboard scenarios.
-- Visual regression covers representative light/dark desktop and narrow-window states, selected/working avatar states, reduced motion, long transcript, errors, and contextual Takeover.
+- Visual regression covers representative light/dark desktop and narrow-window states, selected/working DiceBear avatar states, reduced motion, long transcript, errors, the docked Computer drawer, expanded preview modal, and contextual Takeover.
 - Agent worker conformance remains the adapter seam. It verifies the exact installed version's session lifecycle, stream boundaries, attachments, native cancellation, steering where claimed, native events, capability inventory evidence, and restart recovery.
 - Unsupported capability entries are tested as truthful absence, not as mocked emulation.
 - Computer tests verify that observation remains available without input ownership, input cannot interleave, Takeover parks Bot input, Return to Bot re-observes, waiting state is scoped to the affected Bot, and emergency stop revokes input.

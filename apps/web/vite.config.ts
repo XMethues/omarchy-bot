@@ -8,6 +8,13 @@ export default defineConfig(({ command }) => ({
     tanstackRouter({ target: "react", routesDirectory: "src/routes", generatedRouteTree: "src/routeTree.gen.ts" }),
     react(),
     stylex({ dev: command === "development", unstable_moduleResolution: { type: "commonJS" } }),
+    {
+      name: "stylex-stylesheet",
+      transformIndexHtml: {
+        order: "post",
+        handler: () => [{ tag: "link", attrs: { rel: "stylesheet", href: "/stylex.css" }, injectTo: "head" }],
+      },
+    },
   ],
   server: {
     port: 7322,

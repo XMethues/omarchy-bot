@@ -78,7 +78,7 @@ test.describe("Sidebar attention", () => {
     expect(threads[0]?.id).toBe(pinnedThreadId);
   });
 
-  test("keeps unread while above the latest output and clears it after Jump to latest", async ({ page }) => {
+  test("keeps unread above the latest output and clears it through the native latest control", async ({ page }) => {
     await page.goto("/");
     const botId = await createBot(page, `Unread boundary ${Date.now()}`);
     for (let index = 0; index < 5; index += 1) {
@@ -89,11 +89,12 @@ test.describe("Sidebar attention", () => {
 
     await postMessage(page, threadId, "say: background output at the precise read boundary");
     await expect(page.getByTestId(`sidebar-unread-${botId}`)).toBeVisible({ timeout: 15_000 });
-    await expect(page.getByTestId("jump-to-latest")).toBeVisible();
+    const scrollToLatest = page.getByRole("button", { name: "New messages" });
+    await expect(scrollToLatest).toBeVisible();
 
-    await page.getByTestId("jump-to-latest").click();
+    await scrollToLatest.click();
     await expect(page.getByTestId(`sidebar-unread-${botId}`)).toHaveCount(0, { timeout: 15_000 });
-    await expect(page.getByTestId("jump-to-latest")).toHaveCount(0);
+    await expect(scrollToLatest).toBeHidden();
   });
 
   test("suppresses focused viewed-Bot notifications and notifies for another Bot without prompting", async ({ page }) => {

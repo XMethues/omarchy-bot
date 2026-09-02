@@ -1,11 +1,15 @@
 import type { JSX } from "react";
 import { Button } from "@astryxdesign/core/Button";
+import { useAppShellMobile } from "@astryxdesign/core/AppShell";
 import { Heading } from "@astryxdesign/core/Heading";
+import { HStack } from "@astryxdesign/core/HStack";
+import { Icon } from "@astryxdesign/core/Icon";
 import { IconButton } from "@astryxdesign/core/IconButton";
-import { Monitor, MoreHorizontal } from "lucide-react";
+import { LayoutHeader } from "@astryxdesign/core/Layout";
+import { StackItem } from "@astryxdesign/core/Stack";
+import { VStack } from "@astryxdesign/core/VStack";
 import type { BotViewDto, ComputerViewDto, ThreadDto } from "@omarchy-bot/protocol";
 import { AvatarView } from "./AvatarView.tsx";
-import styles from "../lib/styles.ts";
 
 const COMPUTER_LABELS: Record<ComputerViewDto["state"], string> = {
   idle: "Open computer",
@@ -26,9 +30,34 @@ export interface ConversationHeaderProps {
   onOpenComputer: () => void;
 }
 
+function MobileSidebarTrigger(): JSX.Element | null {
+  const {
+    isMobile,
+    isMobileNavEnabled,
+    isMobileNavOpen,
+    mobileNavId,
+    openMobileNav,
+  } = useAppShellMobile();
+
+  if (!isMobile || !isMobileNavEnabled) return null;
+
+  return (
+    <IconButton
+      label="Open bot navigation"
+      tooltip="Open bot navigation"
+      icon={<Icon icon="menu" size="md" />}
+      variant="ghost"
+      onClick={openMobileNav}
+      aria-expanded={isMobileNavOpen}
+      {...(mobileNavId !== undefined ? { "aria-controls": mobileNavId } : {})}
+      data-testid="mobile-sidebar-trigger"
+    />
+  );
+}
+
 /**
- * Conversation-local header (workspace-redesign §2): bot name, thread title,
- * quiet computer icon, bot menu. There is no global TopNav anywhere.
+ * Conversation-local header: the sole page heading, thread history, Computer,
+ * and profile actions. AppShell provides the global navigation frame.
  */
 export function ConversationHeader({
   bot,
@@ -39,37 +68,60 @@ export function ConversationHeader({
   onOpenComputer,
 }: ConversationHeaderProps): JSX.Element {
   return (
-    <header xstyle={styles.header} data-testid="conversation-header">
-      {bot !== undefined ? (
-        <AvatarView avatar={bot.avatar} name={bot.name} size="sm" activity={bot.status === "working" ? "working" : "selected"} />
-      ) : null}
-      <div xstyle={styles.headerGrow} style={{ minWidth: 0 }}>
-        <Heading level={2} xstyle={styles.headerTitle}>
-          {bot?.name ?? "omarchy-bot"}
-        </Heading>
-        <Button
-          label={thread?.title ?? "New conversation"}
-          variant="ghost"
-          size="sm"
-          onClick={onOpenHistory}
-          data-testid="thread-history-trigger"
+    <LayoutHeader hasDivider label="Conversation">
+      <HStack
+        gap={3}
+        paddingInline={6}
+        paddingBlock={3}
+        vAlign="center"
+        data-testid="conversation-header"
+      >
+        <MobileSidebarTrigger />
+        {bot !== undefined ? (
+          <AvatarView
+            avatar={bot.avatar}
+            name={bot.name}
+            size="sm"
+            activity={bot.status === "working" ? "working" : "selected"}
+          />
+        ) : null}
+        <StackItem size="fill">
+          <VStack gap={0.5}>
+            <Heading level={1} maxLines={1}>
+              {bot?.name ?? "omarchy-bot"}
+            </Heading>
+            <HStack>
+              <Button
+                label={thread?.title ?? "New conversation"}
+                variant="ghost"
+                size="sm"
+                isDisabled={bot === undefined}
+                onClick={onOpenHistory}
+                data-testid="thread-history-trigger"
+              />
+            </HStack>
+          </VStack>
+        </StackItem>
+        <IconButton
+          label={COMPUTER_LABELS[computerState]}
+          tooltip={COMPUTER_LABELS[computerState]}
+          isDisabled={bot === undefined}
+          icon={<Icon icon="viewColumns" size="md" />}
+          variant={computerState === "idle" || computerState === "unavailable" ? "ghost" : "secondary"}
+          onClick={onOpenComputer}
+          data-state={computerState}
+          data-testid="header-computer"
         />
-      </div>
-      <IconButton
-        label={COMPUTER_LABELS[computerState]}
-        icon={<Monitor size={18} />}
-        variant={computerState === "idle" || computerState === "unavailable" ? "ghost" : "secondary"}
-        onClick={onOpenComputer}
-        data-state={computerState}
-        data-testid="header-computer"
-      />
-      <IconButton
-        label="Edit bot profile"
-        icon={<MoreHorizontal size={18} />}
-        variant="ghost"
-        onClick={onOpenProfile}
-        data-testid="profile-open"
-      />
-    </header>
+        <IconButton
+          label="Edit bot profile"
+          tooltip="Edit bot profile"
+          icon={<Icon icon="moreHorizontal" size="md" />}
+          variant="ghost"
+          onClick={onOpenProfile}
+          isDisabled={bot === undefined}
+          data-testid="profile-open"
+        />
+      </HStack>
+    </LayoutHeader>
   );
 }

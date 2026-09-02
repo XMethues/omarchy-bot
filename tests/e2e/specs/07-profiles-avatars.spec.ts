@@ -29,7 +29,7 @@ test.describe("Bot profiles and avatars", () => {
     const botId = await createBot(page, "Profile Bot");
     await openProfile(page);
 
-    await expect(page.getByText("Agent: pi. To use another Agent, create a new bot.")).toBeVisible();
+    await expect(page.getByText("This bot will keep using its current agent. Create a new bot to choose a different one.")).toBeVisible();
     await page.getByTestId("profile-name").fill("Renamed Profile Bot");
     await page.getByTestId("profile-instructions").fill("Use the latest profile instructions");
     await page.getByTestId("profile-save").click();
@@ -97,7 +97,7 @@ test.describe("Bot profiles and avatars", () => {
 
     const avatar = page.getByRole("dialog").getByTestId("avatar-view");
     await expect(avatar).toHaveAttribute("data-avatar-activity", "selected");
-    await expect(avatar.locator(":scope > span")).toHaveCSS("animation-name", "none");
+    await expect(avatar).toHaveCSS("animation-name", "none");
     await expect(page.getByRole("dialog")).toHaveScreenshot("profile-reduced-motion.png", {
       animations: "disabled",
       mask: [avatar],

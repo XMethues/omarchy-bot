@@ -1,5 +1,5 @@
-import type { JSX, ReactNode } from "react";
-import { useState } from "react";
+import type { JSX, ReactNode, RefObject } from "react";
+import { useRef, useState } from "react";
 import { AlertDialog } from "@astryxdesign/core/AlertDialog";
 import { Banner } from "@astryxdesign/core/Banner";
 import { BottomSheet } from "@astryxdesign/core/BottomSheet";
@@ -8,11 +8,11 @@ import { Dialog, DialogHeader } from "@astryxdesign/core/Dialog";
 import { EmptyState } from "@astryxdesign/core/EmptyState";
 import { Heading } from "@astryxdesign/core/Heading";
 import { HStack } from "@astryxdesign/core/HStack";
+import { Icon } from "@astryxdesign/core/Icon";
 import { Item } from "@astryxdesign/core/Item";
 import { Text } from "@astryxdesign/core/Text";
 import { VStack } from "@astryxdesign/core/VStack";
 import { useMediaQuery } from "@astryxdesign/core/hooks";
-import { ArchiveRestore } from "lucide-react";
 import type { BotDto, BotViewDto, DeleteBotResultDto } from "@omarchy-bot/protocol";
 import { clearDraftsByBot } from "../lib/drafts.ts";
 import { AvatarView } from "./AvatarView.tsx";
@@ -25,12 +25,19 @@ export interface SettingsDialogProps {
   onBotRestored?: (bot: BotDto) => void;
   onDeleteBot: (botId: string, confirmName: string) => Promise<DeleteBotResultDto>;
   onBotDeleted?: (botId: string) => void;
+  archivedBotsLoading?: boolean;
+  archivedBotsError?: string;
+  onRetryArchivedBots?: () => void;
   /** Other Settings domains, such as Voice, compose above Archived Bots. */
   children?: ReactNode;
 }
 
-interface SettingsContentProps extends Pick<SettingsDialogProps, "archivedBots" | "children"> {
+interface SettingsContentProps extends Pick<
+  SettingsDialogProps,
+  "archivedBots" | "archivedBotsLoading" | "archivedBotsError" | "onRetryArchivedBots" | "children"
+> {
   compactHeading: boolean;
+  regionRef: RefObject<HTMLDivElement | null>;
   restoringBotId?: string;
   deletingBotId?: string;
   error?: string;
@@ -40,8 +47,12 @@ interface SettingsContentProps extends Pick<SettingsDialogProps, "archivedBots" 
 
 function SettingsContent({
   archivedBots,
+  archivedBotsLoading = false,
+  archivedBotsError,
+  onRetryArchivedBots,
   children,
   compactHeading,
+  regionRef,
   restoringBotId,
   deletingBotId,
   error,
@@ -51,57 +62,75 @@ function SettingsContent({
   const archived = archivedBots.filter((bot) => bot.archived);
   const operationPending = restoringBotId !== undefined || deletingBotId !== undefined;
   return (
-    <VStack gap={4} padding={4} data-testid="settings-dialog">
+    <VStack gap={4} padding={4} aria-busy={archivedBotsLoading || operationPending || undefined} data-testid="settings-dialog">
       {compactHeading ? <Heading level={2}>Settings</Heading> : null}
       {children}
-      <VStack gap={2}>
+      <VStack ref={regionRef} gap={2} tabIndex={-1}>
         <VStack gap={0.5}>
-          <Heading level={3}>Archived Bots</Heading>
-          <Text color="secondary">Restore a Bot or permanently remove its conversations and local data.</Text>
+          <Heading level={3}>Archived bots</Heading>
+          <Text color="secondary">Restore a bot or permanently remove its conversations and saved data.</Text>
         </VStack>
         {error !== undefined ? <Banner status="error" title={error} /> : null}
-        {archived.length === 0 ? (
+        {archivedBotsLoading ? (
           <EmptyState
-            icon={<ArchiveRestore size={24} />}
+            icon={<Icon icon="clock" size="lg" />}
+            title="Loading archived bots"
+            description="Fetching bots that can be restored or removed."
+            isCompact
+          />
+        ) : archivedBotsError !== undefined ? (
+          <EmptyState
+            icon={<Icon icon="warning" size="lg" />}
+            title="Archived bots couldn’t load"
+            description={archivedBotsError}
+            {...(onRetryArchivedBots !== undefined
+              ? { actions: <Button label="Try loading again" variant="secondary" onClick={onRetryArchivedBots} /> }
+              : {})}
+            isCompact
+          />
+        ) : archived.length === 0 ? (
+          <EmptyState
+            icon={<Icon icon="checkDouble" size="lg" />}
             title="No archived bots"
             description="Bots you archive will remain available here."
             isCompact
           />
         ) : (
           archived.map((bot) => (
-            <Item
-              key={bot.id}
-              startContent={<AvatarView avatar={bot.avatar} name={bot.name} size="sm" activity="idle" />}
-              label={bot.name}
-              description="Conversations preserved"
-              endContent={
-                <HStack gap={1}>
-                  <Button
-                    label={`Restore ${bot.name}`}
-                    variant="secondary"
-                    size="sm"
-                    isLoading={restoringBotId === bot.id}
-                    isDisabled={operationPending && restoringBotId !== bot.id}
-                    onClick={() => onRestore(bot.id)}
-                    data-testid={`settings-restore-${bot.id}`}
-                  >
-                    Restore
-                  </Button>
-                  <Button
-                    label={`Permanently delete ${bot.name}`}
-                    variant="secondary"
-                    size="sm"
-                    isLoading={deletingBotId === bot.id}
-                    isDisabled={operationPending}
-                    onClick={() => onRequestDelete(bot)}
-                    data-testid={`settings-delete-${bot.id}`}
-                  >
-                    Delete
-                  </Button>
-                </HStack>
-              }
-              data-testid={`settings-archived-bot-${bot.id}`}
-            />
+            <VStack key={bot.id} gap={1}>
+              <Item
+                startContent={<AvatarView avatar={bot.avatar} name={bot.name} size="sm" activity="idle" />}
+                label={bot.name}
+                labelLines={2}
+                description="Conversations preserved"
+                align="start"
+                data-testid={`settings-archived-bot-${bot.id}`}
+              />
+              <HStack gap={1} wrap="wrap" justify="end">
+                <Button
+                  label={`Restore ${bot.name}`}
+                  variant="secondary"
+                  size="sm"
+                  isLoading={restoringBotId === bot.id}
+                  isDisabled={operationPending && restoringBotId !== bot.id}
+                  onClick={() => onRestore(bot.id)}
+                  data-testid={`settings-restore-${bot.id}`}
+                >
+                  Restore
+                </Button>
+                <Button
+                  label={`Permanently delete ${bot.name}`}
+                  variant="secondary"
+                  size="sm"
+                  isLoading={deletingBotId === bot.id}
+                  isDisabled={operationPending}
+                  onClick={() => onRequestDelete(bot)}
+                  data-testid={`settings-delete-${bot.id}`}
+                >
+                  Delete
+                </Button>
+              </HStack>
+            </VStack>
           ))
         )}
       </VStack>
@@ -109,7 +138,7 @@ function SettingsContent({
   );
 }
 
-/** Responsive, composable Settings surface with the archived-Bot lifecycle controls. */
+/** Responsive, composable settings surface with archived-bot lifecycle controls. */
 export function SettingsDialog({
   open,
   onClose,
@@ -118,14 +147,22 @@ export function SettingsDialog({
   onBotRestored,
   onDeleteBot,
   onBotDeleted,
+  archivedBotsLoading = false,
+  archivedBotsError,
+  onRetryArchivedBots,
   children,
 }: SettingsDialogProps): JSX.Element {
-  const isSmallScreen = useMediaQuery("(max-width: 640px)");
+  const isSmallScreen = useMediaQuery("(max-width: 767px)");
   const [restoringBotId, setRestoringBotId] = useState<string | undefined>(undefined);
   const [pendingDeleteBot, setPendingDeleteBot] = useState<BotViewDto | undefined>(undefined);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | undefined>(undefined);
   const [error, setError] = useState<string | undefined>(undefined);
+  const archivedRegionRef = useRef<HTMLDivElement>(null);
+
+  const focusArchivedRegion = (): void => {
+    requestAnimationFrame(() => archivedRegionRef.current?.focus());
+  };
 
   const restore = async (botId: string): Promise<void> => {
     setRestoringBotId(botId);
@@ -133,8 +170,9 @@ export function SettingsDialog({
     try {
       const restored = await onRestoreBot(botId);
       onBotRestored?.(restored);
+      focusArchivedRegion();
     } catch (restoreError) {
-      setError(restoreError instanceof Error ? restoreError.message : "The bot could not be restored.");
+      setError(restoreError instanceof Error ? restoreError.message : "This bot couldn’t be restored. Try again.");
     } finally {
       setRestoringBotId(undefined);
     }
@@ -148,19 +186,19 @@ export function SettingsDialog({
     setError(undefined);
     try {
       if (!clearDraftsByBot(bot.id)) {
-        setDeleteError("Current-window drafts could not be cleared. The archived Bot was kept so deletion can be retried.");
+        setDeleteError("Drafts saved in this browser couldn’t be cleared. The bot remains archived so you can try again.");
         return;
       }
       const result = await onDeleteBot(bot.id, bot.name);
       if (result.status === "failed") {
-        const detail = result.failures.map((failure) => failure.message).join("; ");
-        setDeleteError(`${detail || "Local cleanup did not complete."} The archived Bot was kept so deletion can be retried.`);
+        setDeleteError("Some saved data couldn’t be removed. The bot remains archived so you can try again.");
         return;
       }
       setPendingDeleteBot(undefined);
       onBotDeleted?.(bot.id);
+      focusArchivedRegion();
     } catch (deleteFailure) {
-      setDeleteError(deleteFailure instanceof Error ? deleteFailure.message : "The Bot could not be permanently deleted.");
+      setDeleteError(deleteFailure instanceof Error ? deleteFailure.message : "This bot couldn’t be permanently deleted. Try again.");
     } finally {
       setDeleting(false);
     }
@@ -169,7 +207,11 @@ export function SettingsDialog({
   const content = (
     <SettingsContent
       archivedBots={archivedBots}
+      archivedBotsLoading={archivedBotsLoading}
+      {...(archivedBotsError !== undefined ? { archivedBotsError } : {})}
+      {...(onRetryArchivedBots !== undefined ? { onRetryArchivedBots } : {})}
       compactHeading={isSmallScreen}
+      regionRef={archivedRegionRef}
       {...(restoringBotId !== undefined ? { restoringBotId } : {})}
       {...(deleting && pendingDeleteBot !== undefined ? { deletingBotId: pendingDeleteBot.id } : {})}
       {...(error !== undefined ? { error } : {})}
@@ -205,10 +247,10 @@ export function SettingsDialog({
             setDeleteError(undefined);
           }
         }}
-        title={deleteError === undefined ? `Permanently delete ${pendingDeleteBot?.name ?? "this Bot"}?` : "Couldn’t permanently delete Bot"}
+        title={deleteError === undefined ? `Permanently delete ${pendingDeleteBot?.name ?? "this bot"}?` : "Couldn’t permanently delete bot"}
         description={
           deleteError
-            ?? `${pendingDeleteBot?.name ?? "This Bot"} and all of its Threads, messages, attachments, uploaded avatar, and other local managed data will be permanently removed. This cannot be undone.`
+            ?? `${pendingDeleteBot?.name ?? "This bot"}’s Threads and local managed data, including messages, attachments, and avatar data, will be permanently removed. This cannot be undone.`
         }
         cancelLabel="Keep archived Bot"
         actionLabel={deleteError === undefined ? "Delete permanently" : "Try again"}

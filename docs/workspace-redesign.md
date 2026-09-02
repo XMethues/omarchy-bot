@@ -155,7 +155,6 @@ Voice is an input method, not an audio-message transport.
 3. The resulting text is inserted into the originating Composer draft at its insertion point.
 4. Existing text is preserved.
 5. The user may review or edit the transcript and presses Send explicitly, matching the observed Grok Bot behavior.
-
 Escape cancels recording. Empty speech or failure leaves the draft unchanged. Raw audio is not uploaded, attached, or retained by Omarchy Bot.
 
 ### Optional auto-send
@@ -188,7 +187,8 @@ The current implementation has one real Omarchy screen shared by all Bots and th
 - Keep one invisible global input arbiter so clicks and typing cannot interleave.
 - Do not show lease holders, TTLs, queue depth, or engineering diagnostics in normal UI.
 - A Computer icon is always present in the Conversation Header. It is visually quiet while inactive and gains state only while the Bot is using the computer or needs human input.
-- The icon opens a contextual Computer Sheet with preview and plain-language activity.
+- The icon opens a docked Computer drawer on desktop and an Astryx Bottom Sheet on narrow windows, with a live preview and plain-language activity.
+- Selecting the preview’s expand icon opens the desktop image in an Astryx Lightbox modal.
 - Show **Take control** only when human input is relevant.
 - While the user controls the screen, show **Return to Bot**; re-observe before resuming automation.
 - A Bot waiting behind another shows **Waiting for computer** on that Bot only, without exposing queue mechanics.

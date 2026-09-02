@@ -1,21 +1,35 @@
 import type { ChangeEvent, DragEvent, JSX, ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { ChatComposer, ChatComposerInput } from "@astryxdesign/core/Chat";
-import { ChatMessage } from "@astryxdesign/core/Chat";
-import { ChatMessageBubble } from "@astryxdesign/core/Chat";
-import { ChatMessageList } from "@astryxdesign/core/Chat";
-import { ChatSystemMessage } from "@astryxdesign/core/Chat";
-import { ChatToolCalls, type ChatToolCallItem } from "@astryxdesign/core/Chat";
-import { ChatLayout } from "@astryxdesign/core/Chat";
-import { Collapsible } from "@astryxdesign/core/Collapsible";
+import * as stylex from "@stylexjs/stylex";
+import { Paperclip } from "lucide-react";
+import { AspectRatio } from "@astryxdesign/core/AspectRatio";
 import { Button } from "@astryxdesign/core/Button";
-import type { AttachmentDto, BotViewDto, DictationDto, DictationResultDto, MessageDto, ThreadDto } from "@omarchy-bot/protocol";
+import {
+  ChatComposer,
+  ChatComposerDrawer,
+  ChatComposerInput,
+  ChatLayout,
+  ChatMessage,
+  ChatMessageBubble,
+  ChatMessageList,
+  ChatSystemMessage,
+  ChatToolCalls,
+  type ChatToolCallItem,
+} from "@astryxdesign/core/Chat";
+import { Collapsible } from "@astryxdesign/core/Collapsible";
+import { EmptyState } from "@astryxdesign/core/EmptyState";
+import { HStack } from "@astryxdesign/core/HStack";
 import { Icon } from "@astryxdesign/core/Icon";
+import { Item } from "@astryxdesign/core/Item";
+import { Token } from "@astryxdesign/core/Token";
+import { VStack } from "@astryxdesign/core/VStack";
+import type { AttachmentDto, BotViewDto, DictationDto, DictationResultDto, MessageDto, ThreadDto } from "@omarchy-bot/protocol";
 import { getDelta, subscribeDeltas } from "../lib/live.ts";
 import { api, apiErrorMessage, trimSendText } from "../lib/api.ts";
 import { loadDraft, saveDraft, type ConversationDraft } from "../lib/drafts.ts";
 import { insertDictationTranscript } from "../lib/dictation.ts";
 import { AvatarView } from "./AvatarView.tsx";
+import { useTranscriptAttentionSurface } from "./TranscriptAttention.tsx";
 import styles from "../lib/styles.ts";
 
 export interface VoiceDraftTarget {
@@ -39,6 +53,9 @@ interface ChatPanelProps {
   dictation: DictationController;
   autoSendVoice: boolean;
   onVoiceAutoSend: (target: VoiceDraftTarget, text: string) => Promise<void>;
+  messagesLoading?: boolean;
+  messagesError?: string;
+  onRetryMessages?: () => void;
 }
 
 function stringPayloadField(payload: unknown, field: string): string | undefined {
@@ -91,48 +108,40 @@ function apiStatus(error: unknown): number | undefined {
 }
 
 function attachmentErrorMessage(error: unknown, fileName: string): string {
-  if (error !== null && typeof error === "object" && "body" in error) {
-    let body = error.body;
-    if (typeof body === "string") {
-      try {
-        body = JSON.parse(body);
-      } catch {
-        return `${fileName}: ${body}`;
-      }
-    }
-    if (body !== null && typeof body === "object" && "error" in body && typeof body.error === "string") {
-      return `${fileName}: ${body.error}`;
-    }
+  const status = apiStatus(error);
+  if (status === 413) return `${fileName} is too large to attach. Choose a smaller file and try again.`;
+  if (status === 400 || status === 415) {
+    return `This bot can’t use ${fileName}. Remove it or choose a supported file.`;
   }
-  return `${fileName}: ${apiErrorMessage(error, "Attachment could not be staged.")}`;
+  return `${fileName} couldn’t be attached. Check your connection and try again.`;
 }
 
 function AttachmentContent({ attachment, previewUrl }: { attachment: AttachmentDto; previewUrl?: string }): JSX.Element {
   const imageUrl = attachment.mediaType.startsWith("image/")
     ? previewUrl ?? attachment.url
     : undefined;
+  const metadata = `${attachment.mediaType} · ${formatAttachmentSize(attachment.size)}`;
   if (imageUrl !== undefined) {
     return (
-      <img
-        src={imageUrl}
-        alt={attachment.name}
-        loading="lazy"
-        xstyle={styles.attachmentImage}
-        data-testid={attachment.kind === "managed" ? "message-image-attachment" : "staged-image-preview"}
-      />
+      <AspectRatio ratio={4 / 3} fit="cover" xstyle={styles.attachmentPreview}>
+        <img
+          src={imageUrl}
+          alt={attachment.name}
+          loading="lazy"
+          {...stylex.props(styles.attachmentImage)}
+          data-testid={attachment.kind === "managed" ? "message-image-attachment" : "staged-image-preview"}
+        />
+      </AspectRatio>
     );
   }
-  const metadata = `${attachment.mediaType} · ${formatAttachmentSize(attachment.size)}`;
-  return attachment.url !== undefined ? (
-    <a href={attachment.url} download={attachment.name} xstyle={styles.attachmentFile} data-testid="message-file-attachment">
-      <strong>{attachment.name}</strong>
-      <span>{metadata}</span>
-    </a>
-  ) : (
-    <div xstyle={styles.attachmentFile} data-testid="staged-file-row">
-      <strong>{attachment.name}</strong>
-      <span>{metadata}</span>
-    </div>
+  return (
+    <Item
+      label={attachment.name}
+      description={metadata}
+      density="compact"
+      {...(attachment.url !== undefined ? { href: attachment.url } : {})}
+      data-testid={attachment.url !== undefined ? "message-file-attachment" : "staged-file-row"}
+    />
   );
 }
 interface DictationOrigin {
@@ -167,12 +176,16 @@ export function ChatPanel({
   dictation,
   autoSendVoice,
   onVoiceAutoSend,
+  messagesLoading = false,
+  messagesError,
+  onRetryMessages,
 }: ChatPanelProps): JSX.Element {
   const [draft, setDraft] = useState<ConversationDraft>(EMPTY_DRAFT);
   const [submitError, setSubmitError] = useState<string | undefined>(undefined);
   const [voiceStatus, setVoiceStatus] = useState<string | undefined>(undefined);
   const [voiceState, setVoiceState] = useState<DictationDto>(dictation.state);
   const [stagedAttachments, setStagedAttachments] = useState<AttachmentDto[]>([]);
+  const [restoringAttachments, setRestoringAttachments] = useState(false);
   const composerInputRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const previewUrlsRef = useRef(new Map<string, string>());
@@ -181,20 +194,23 @@ export function ChatPanel({
   const draftBotId = bot?.id;
   const draftThreadId = thread?.id;
   const selectedDraftRef = useRef({ botId: draftBotId, threadId: draftThreadId });
+  const transcriptAttention = useTranscriptAttentionSurface();
   selectedDraftRef.current = { botId: draftBotId, threadId: draftThreadId };
 
-  // Restore only this window's references and discard daemon-confirmed 404s.
+  // Restore this conversation's staged files without blocking text editing.
   useEffect(() => {
     const generation = ++restoreGenerationRef.current;
     setSubmitError(undefined);
     setStagedAttachments([]);
     if (draftBotId === undefined) {
       setDraft(EMPTY_DRAFT);
+      setRestoringAttachments(false);
       return;
     }
 
     const restored = loadDraft(draftBotId, draftThreadId);
     setDraft(restored);
+    setRestoringAttachments(restored.stagedIds.length > 0);
     void Promise.all(restored.stagedIds.map(async (id): Promise<AttachmentRestoreResult> => {
       try {
         return { id, attachment: await api.getStagedAttachment(id) };
@@ -210,10 +226,11 @@ export function ChatPanel({
       if (missing.size > 0) saveDraft(draftBotId, draftThreadId, next);
       setDraft(next);
       setStagedAttachments(valid);
+      setRestoringAttachments(false);
       if (missing.size > 0) {
         setSubmitError(`${missing.size === 1 ? "A staged attachment is" : `${missing.size} staged attachments are`} no longer available and ${missing.size === 1 ? "was" : "were"} removed from this draft.`);
       } else if (unavailable) {
-        setSubmitError("Some staged attachments could not be checked. Their draft references were preserved.");
+        setSubmitError("Some draft attachments couldn’t be checked. They are still saved with this draft; check your connection and try again.");
       }
     });
   }, [draftBotId, draftThreadId]);
@@ -506,14 +523,11 @@ export function ChatPanel({
             key: message.id,
             name: message.kind === "event" ? capability ?? "Agent event" : name ?? "Tool",
             status: state === "running" ? "running" : state === "error" ? "error" : "complete",
-            ...(message.payload !== undefined
-              ? { resultDetail: <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{JSON.stringify(message.payload, null, 2)}</pre> }
-              : {}),
           };
         });
         out.push(
           <ChatMessage key={g.key} sender="system">
-            <div xstyle={styles.activityWrap}>
+            <div {...stylex.props(styles.activityWrap)}>
               <Collapsible trigger={`Activity (${g.items.length})`} defaultIsOpen={false} data-testid="activity">
                 <ChatToolCalls calls={calls} isExpanded />
               </Collapsible>
@@ -522,16 +536,16 @@ export function ChatPanel({
         );
         continue;
       }
-      const m = g.message;
-      if (m.author.kind === "system") {
-        out.push(<ChatSystemMessage key={m.id}>{m.text ?? ""}</ChatSystemMessage>);
+      const message = g.message;
+      if (message.author.kind === "system") {
+        out.push(<ChatSystemMessage key={message.id}>{message.text ?? ""}</ChatSystemMessage>);
         continue;
       }
 
-      const sender = m.author.kind === "user" ? "user" : "assistant";
+      const sender = message.author.kind === "user" ? "user" : "assistant";
       out.push(
         <ChatMessage
-          key={m.id}
+          key={message.id}
           sender={sender}
           avatar={
             sender === "assistant" && bot !== undefined ? (
@@ -541,9 +555,9 @@ export function ChatPanel({
           data-testid={sender === "assistant" ? "assistant-message" : "user-message"}
         >
           <ChatMessageBubble variant="filled">
-            <div xstyle={styles.messageContent}>
-              {m.text !== undefined ? <span>{m.text}</span> : null}
-              {m.attachments?.map((attachment) => <AttachmentContent key={attachment.id} attachment={attachment} />)}
+            <div {...stylex.props(styles.messageContent)}>
+              {message.text !== undefined ? <span>{message.text}</span> : null}
+              {message.attachments?.map((attachment) => <AttachmentContent key={attachment.id} attachment={attachment} />)}
             </div>
           </ChatMessageBubble>
         </ChatMessage>,
@@ -559,18 +573,20 @@ export function ChatPanel({
         ? "Transcribing voice…"
         : voiceStatus;
   const composerStatus =
-    bot !== undefined && !isAgentReady
-      ? { type: "warning" as const, message: "The bot's agent is not ready." }
-      : submitError !== undefined
-        ? { type: "error" as const, message: submitError }
-        : voiceMessage !== undefined
-          ? {
-              type: voiceState.state === "recording" || voiceState.state === "transcribing" ? ("warning" as const) : ("error" as const),
-              message: voiceMessage,
-            }
-          : voiceState.state === "unavailable"
-            ? { type: "warning" as const, message: voiceState.error ?? "Voice dictation is unavailable." }
-            : undefined;
+    submitError !== undefined
+      ? { type: "error" as const, message: submitError }
+      : voiceMessage !== undefined
+        ? {
+            type: voiceState.state === "recording" || voiceState.state === "transcribing" ? ("warning" as const) : ("error" as const),
+            message: voiceMessage,
+          }
+        : voiceState.state === "unavailable"
+          ? { type: "warning" as const, message: voiceState.error ?? "Voice dictation isn’t available right now." }
+          : restoringAttachments
+            ? { type: "warning" as const, message: "Checking draft attachments…" }
+            : bot !== undefined && !isAgentReady
+              ? { type: "warning" as const, message: "This bot can’t send messages until its agent is ready." }
+              : undefined;
   const dictationLabel =
     voiceState.state === "recording"
       ? "Stop voice recording"
@@ -593,63 +609,101 @@ export function ChatPanel({
       data-state={voiceState.state}
     />
   );
-  const composerActions = (
-    <div xstyle={styles.composerActions}>
-      <input
-        ref={fileInputRef}
-        type="file"
-        multiple
-        onChange={selectFiles}
-        xstyle={styles.hiddenFileInput}
-        data-testid="attachment-input"
-        tabIndex={-1}
-      />
-      <Button
-        label="Attach files"
-        variant="ghost"
-        size="sm"
-        isDisabled={bot === undefined}
-        onClick={() => fileInputRef.current?.click()}
-        data-testid="attachment-picker"
-      />
-      {dictationButton}
-    </div>
-  );
+
+  const attachmentDrawer = stagedAttachments.length > 0 ? (
+    <ChatComposerDrawer count={stagedAttachments.length} label="Attachments">
+      <VStack gap={1} aria-label="Staged attachments">
+        {stagedAttachments.map((attachment) => {
+          const previewUrl = previewUrlsRef.current.get(attachment.id);
+          const isImage = attachment.mediaType.startsWith("image/") && previewUrl !== undefined;
+          return (
+            <div
+              key={attachment.id}
+              data-testid="staged-attachment"
+              data-attachment-id={attachment.id}
+            >
+              <Item
+                label={attachment.name}
+                description={attachment.mediaType}
+                density="compact"
+                startContent={
+                  isImage ? (
+                    <AspectRatio ratio={1} fit="cover" xstyle={styles.attachmentThumbnail}>
+                      <img
+                        src={previewUrl}
+                        alt={attachment.name}
+                        {...stylex.props(styles.attachmentImage)}
+                        data-testid="staged-image-preview"
+                      />
+                    </AspectRatio>
+                  ) : (
+                    <Icon icon="info" size="sm" />
+                  )
+                }
+                endContent={
+                  <HStack gap={1}>
+                    <Token
+                      label={formatAttachmentSize(attachment.size)}
+                      size="sm"
+                      description={`File size for ${attachment.name}`}
+                    />
+                    <Button
+                      label={`Remove ${attachment.name}`}
+                      icon={<Icon icon="close" size="sm" />}
+                      variant="ghost"
+                      size="sm"
+                      isIconOnly
+                      onClick={() => void removeStagedAttachment(attachment)}
+                      data-testid="remove-staged-attachment"
+                    />
+                  </HStack>
+                }
+                {...(!isImage ? { "data-testid": "staged-file-row" } : {})}
+              />
+            </div>
+          );
+        })}
+      </VStack>
+    </ChatComposerDrawer>
+  ) : undefined;
+
   const composer = (
-    <div xstyle={styles.composerWrap}>
+    <div {...stylex.props(styles.composerWrap)}>
       <div
-        xstyle={styles.composerDropZone}
+        {...stylex.props(styles.composerDropZone)}
         onDragOver={(event) => event.preventDefault()}
         onDrop={dropFiles}
       >
-        {stagedAttachments.length > 0 ? (
-          <div xstyle={styles.stagedAttachments} aria-label="Staged attachments">
-            {stagedAttachments.map((attachment) => (
-              <div
-                key={attachment.id}
-                xstyle={styles.stagedAttachment}
-                data-testid="staged-attachment"
-                data-attachment-id={attachment.id}
-              >
-                <AttachmentContent attachment={attachment} previewUrl={previewUrlsRef.current.get(attachment.id)} />
-                <Button
-                  label={`Remove ${attachment.name}`}
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => void removeStagedAttachment(attachment)}
-                  data-testid="remove-staged-attachment"
-                />
-              </div>
-            ))}
-          </div>
-        ) : null}
+        <input
+          ref={fileInputRef}
+          type="file"
+          multiple
+          aria-label="Choose files to attach"
+          onChange={selectFiles}
+          {...stylex.props(styles.hiddenFileInput)}
+          data-testid="attachment-input"
+          tabIndex={-1}
+        />
         <ChatComposer
           value={draft.text}
           onChange={onDraftChange}
           onSubmit={() => void send()}
           input={<ChatComposerInput ref={composerInputRef} onKeyUp={rememberCursor} onMouseUp={rememberCursor} />}
-          sendActions={composerActions}
-          placeholder={bot === undefined ? "Select or create a bot" : isAgentReady ? "Message…" : "The bot's agent is not ready"}
+          {...(attachmentDrawer !== undefined ? { drawer: attachmentDrawer } : {})}
+          headerActions={
+            <Button
+              label="Attach files"
+              icon={<Icon icon={Paperclip} size="sm" />}
+              variant="ghost"
+              size="sm"
+              isIconOnly
+              isDisabled={bot === undefined}
+              onClick={() => fileInputRef.current?.click()}
+              data-testid="attachment-picker"
+            />
+          }
+          sendActions={dictationButton}
+          placeholder={bot === undefined ? "Select or create a bot" : isAgentReady ? "Message…" : "This bot’s agent isn’t ready"}
           isDisabled={bot === undefined || !isAgentReady}
           data-testid="composer"
           {...(composerStatus !== undefined ? { status: composerStatus } : {})}
@@ -658,20 +712,62 @@ export function ChatPanel({
     </div>
   );
 
+  const transcriptEmptyState = messagesLoading ? (
+    <EmptyState
+      icon={<Icon icon="clock" size="lg" />}
+      title="Loading conversation"
+      description="Fetching this bot’s messages."
+      isCompact
+    />
+  ) : messagesError !== undefined ? (
+    <EmptyState
+      icon={<Icon icon="warning" size="lg" />}
+      title="Conversation couldn’t load"
+      description={messagesError}
+      {...(onRetryMessages !== undefined
+        ? { actions: <Button label="Try loading again" variant="secondary" onClick={onRetryMessages} /> }
+        : {})}
+      isCompact
+    />
+  ) : bot === undefined ? (
+    <EmptyState
+      icon={<Icon icon="info" size="lg" />}
+      title="Choose a bot"
+      description="Select or create a bot to begin a conversation."
+      isCompact
+    />
+  ) : undefined;
+
+  const transcriptContent = messagesLoading || messagesError !== undefined ? [] : [...rows];
+  if (isStreaming && bot !== undefined && !messagesLoading && messagesError === undefined) {
+    transcriptContent.push(
+      <ChatMessage
+        key="streaming-response"
+        sender="assistant"
+        avatar={<AvatarView avatar={bot.avatar} name={bot.name} size="sm" activity="streaming" />}
+        data-testid="streaming-message"
+      >
+        <ChatMessageBubble variant="filled">
+          {delta.length > 0 ? delta : <span {...stylex.props(styles.workingIndicator)}>{bot.name} is working…</span>}
+        </ChatMessageBubble>
+      </ChatMessage>,
+    );
+  }
+
   return (
-    <div xstyle={styles.fillColumn} data-testid="chat-panel">
-      <ChatLayout composer={composer}>
-        <ChatMessageList isStreaming={isStreaming} data-testid="transcript">
-          {rows}
-          {isStreaming && bot !== undefined ? (
-            <ChatMessage
-              sender="assistant"
-              avatar={<AvatarView avatar={bot.avatar} name={bot.name} size="sm" activity="streaming" />}
-              data-testid="streaming-message"
-            >
-              <ChatMessageBubble variant="filled">{delta}</ChatMessageBubble>
-            </ChatMessage>
-          ) : null}
+    <div {...stylex.props(styles.fillColumn)} data-testid="chat-panel">
+      <ChatLayout
+        {...(transcriptAttention !== null
+          ? { ref: transcriptAttention.viewportRef, onScroll: transcriptAttention.onViewportScroll }
+          : {})}
+        composer={composer}
+      >
+        <ChatMessageList
+          isStreaming={isStreaming && !messagesLoading && messagesError === undefined}
+          emptyState={transcriptEmptyState}
+          data-testid="transcript"
+        >
+          {transcriptContent}
         </ChatMessageList>
       </ChatLayout>
     </div>

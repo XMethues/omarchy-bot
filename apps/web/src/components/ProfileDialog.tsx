@@ -1,5 +1,6 @@
 import type { ChangeEvent, JSX } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import * as stylex from "@stylexjs/stylex";
 import { Banner } from "@astryxdesign/core/Banner";
 import { Button } from "@astryxdesign/core/Button";
 import { Dialog, DialogHeader } from "@astryxdesign/core/Dialog";
@@ -10,6 +11,7 @@ import { TextInput } from "@astryxdesign/core/TextInput";
 import { VStack } from "@astryxdesign/core/VStack";
 import type { BotDto, BotViewDto } from "@omarchy-bot/protocol";
 import { api, apiErrorMessage } from "../lib/api.ts";
+import styles from "../lib/styles.ts";
 import { AvatarView } from "./AvatarView.tsx";
 
 export interface ProfileDialogProps {
@@ -20,8 +22,9 @@ export interface ProfileDialogProps {
 }
 
 type BusyAction = "save" | "variation" | "upload" | "recipe";
+type InvalidField = "name" | "avatarDescription";
 
-/** Profile fields and avatar choices for one Bot. The Agent is display-only. */
+/** Profile fields and avatar choices for one bot. Its agent remains fixed. */
 export function ProfileDialog({ bot, open, onClose, onUpdated }: ProfileDialogProps): JSX.Element {
   const [current, setCurrent] = useState<BotDto>(bot);
   const [name, setName] = useState(bot.name);
@@ -29,7 +32,10 @@ export function ProfileDialog({ bot, open, onClose, onUpdated }: ProfileDialogPr
   const [prompt, setPrompt] = useState("");
   const [busy, setBusy] = useState<BusyAction | undefined>(undefined);
   const [error, setError] = useState<string | undefined>(undefined);
+  const [invalidField, setInvalidField] = useState<InvalidField | undefined>(undefined);
   const fileInput = useRef<HTMLInputElement>(null);
+  const nameInput = useRef<HTMLInputElement>(null);
+  const promptInput = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -39,6 +45,7 @@ export function ProfileDialog({ bot, open, onClose, onUpdated }: ProfileDialogPr
     setPrompt("");
     setBusy(undefined);
     setError(undefined);
+    setInvalidField(undefined);
   }, [bot, open]);
 
   const acceptUpdate = useCallback(
@@ -53,15 +60,19 @@ export function ProfileDialog({ bot, open, onClose, onUpdated }: ProfileDialogPr
 
   const save = useCallback(async (): Promise<void> => {
     if (name.trim().length === 0) {
-      setError("Name is required.");
+      setInvalidField("name");
+      setError("Give this bot a name before saving.");
+      nameInput.current?.focus();
       return;
     }
     setBusy("save");
+    setInvalidField(undefined);
     setError(undefined);
     try {
       acceptUpdate(await api.patchBot(bot.id, { name: name.trim(), instructions }));
     } catch (updateError) {
-      setError(apiErrorMessage(updateError, "The profile could not be saved."));
+      setError(apiErrorMessage(updateError, "This profile couldn’t be saved. Check your connection and try again."));
+      nameInput.current?.focus();
     } finally {
       setBusy(undefined);
     }
@@ -73,7 +84,7 @@ export function ProfileDialog({ bot, open, onClose, onUpdated }: ProfileDialogPr
     try {
       acceptUpdate(await api.generateAvatar(bot.id));
     } catch (updateError) {
-      setError(apiErrorMessage(updateError, "A new avatar variation could not be created."));
+      setError(apiErrorMessage(updateError, "A new avatar variation couldn’t be created. Try again."));
     } finally {
       setBusy(undefined);
     }
@@ -85,11 +96,11 @@ export function ProfileDialog({ bot, open, onClose, onUpdated }: ProfileDialogPr
       event.currentTarget.value = "";
       if (file === undefined) return;
       if (!["image/png", "image/jpeg", "image/webp"].includes(file.type)) {
-        setError("Choose a PNG, JPEG, or WebP image.");
+        setError("That image format isn’t supported. Choose a PNG, JPEG, or WebP image.");
         return;
       }
       if (file.size > 8 * 1024 * 1024) {
-        setError("Choose an image no larger than 8MB.");
+        setError("That image is larger than 8 MB. Choose a smaller image and try again.");
         return;
       }
       setBusy("upload");
@@ -97,7 +108,7 @@ export function ProfileDialog({ bot, open, onClose, onUpdated }: ProfileDialogPr
       try {
         acceptUpdate(await api.uploadAvatar(bot.id, file));
       } catch (updateError) {
-        setError(apiErrorMessage(updateError, "The image could not be uploaded."));
+        setError(apiErrorMessage(updateError, "The image couldn’t be uploaded. Check your connection and try again."));
       } finally {
         setBusy(undefined);
       }
@@ -108,16 +119,20 @@ export function ProfileDialog({ bot, open, onClose, onUpdated }: ProfileDialogPr
   const createRecipe = useCallback(async (): Promise<void> => {
     const description = prompt.trim();
     if (description.length === 0) {
+      setInvalidField("avatarDescription");
       setError("Describe the avatar you want.");
+      promptInput.current?.focus();
       return;
     }
     setBusy("recipe");
+    setInvalidField(undefined);
     setError(undefined);
     try {
       acceptUpdate(await api.avatarRecipe(bot.id, { prompt: description }));
       setPrompt("");
     } catch (updateError) {
-      setError(apiErrorMessage(updateError, "The avatar description could not be applied."));
+      setError(apiErrorMessage(updateError, "The avatar description couldn’t be applied. Try again."));
+      promptInput.current?.focus();
     } finally {
       setBusy(undefined);
     }
@@ -127,86 +142,115 @@ export function ProfileDialog({ bot, open, onClose, onUpdated }: ProfileDialogPr
 
   return (
     <Dialog isOpen={open} onOpenChange={(isOpen) => !isOpen && onClose()} width={560} purpose="form">
-      <DialogHeader title="Bot profile" subtitle="Shape this teammate's identity while keeping its Agent fixed." />
-      <VStack padding={4} gap={4}>
-        {error !== undefined ? <Banner status="error" title={error} /> : null}
-        <HStack gap={3} align="center">
-          <AvatarView avatar={current.avatar} name={current.name} size={96} activity="selected" />
-          <VStack gap={0.5}>
-            <Text type="label-lg">Current avatar</Text>
-            <Text color="secondary">Rendered locally and kept deterministic.</Text>
-          </VStack>
-        </HStack>
-
-        <TextInput label="Name" value={name} onChange={(value) => setName(value.slice(0, 80))} isRequired data-testid="profile-name" />
-        <TextArea
-          label="Job / Instructions"
-          value={instructions}
-          onChange={setInstructions}
-          maxLength={8000}
-          placeholder="What should this bot do?"
-          data-testid="profile-instructions"
-        />
-        <Text color="secondary">Agent: {bot.agentId}. To use another Agent, create a new bot.</Text>
-        <Button
-          label={busy === "save" ? "Saving…" : "Save profile"}
-          variant="primary"
-          type="button"
-          isLoading={busy === "save"}
-          isDisabled={disabled && busy !== "save"}
-          onClick={() => void save()}
-          data-testid="profile-save"
-        />
-
-        <VStack gap={2}>
-          <Text type="label-lg">Avatar choices</Text>
-          <HStack gap={2} wrap="wrap">
-            <Button
-              label={busy === "variation" ? "Creating…" : "New variation"}
-              variant="secondary"
-              type="button"
-              isLoading={busy === "variation"}
-              isDisabled={disabled && busy !== "variation"}
-              onClick={() => void newVariation()}
-              data-testid="avatar-variation"
-            />
-            <Button
-              label={busy === "upload" ? "Uploading…" : "Upload image"}
-              variant="secondary"
-              type="button"
-              isLoading={busy === "upload"}
-              isDisabled={disabled}
-              onClick={() => fileInput.current?.click()}
-              data-testid="avatar-upload-button"
-            />
-            <input
-              ref={fileInput}
-              type="file"
-              accept="image/png,image/jpeg,image/webp"
-              onChange={(event) => void upload(event)}
-              style={{ display: "none" }}
-              data-testid="avatar-upload-input"
-            />
+      <DialogHeader title="Bot profile" subtitle="Update this teammate’s name, job, and avatar." />
+      <form
+        noValidate
+        onSubmit={(event) => {
+          event.preventDefault();
+          void save();
+        }}
+      >
+        <VStack padding={4} gap={4} aria-busy={disabled || undefined}>
+          {error !== undefined ? <Banner status="error" title={error} /> : null}
+          <HStack gap={3} align="center" wrap="wrap">
+            <AvatarView avatar={current.avatar} name={current.name} size="lg" activity="selected" />
+            <VStack gap={0.5}>
+              <Text type="label-lg">Current avatar</Text>
+              <Text color="secondary">This image represents the bot throughout your workspace.</Text>
+            </VStack>
           </HStack>
+
+          <TextInput
+            ref={nameInput}
+            autoFocus
+            label="Name"
+            value={name}
+            onChange={(value) => {
+              setName(value.slice(0, 80));
+              if (invalidField === "name" && value.trim().length > 0) setInvalidField(undefined);
+            }}
+            isRequired
+            {...(invalidField === "name" ? { status: { type: "error" as const, message: "Enter a name." } } : {})}
+            width="100%"
+            data-testid="profile-name"
+          />
           <TextArea
-            label="Describe avatar"
-            value={prompt}
-            onChange={setPrompt}
-            maxLength={2000}
-            placeholder="A calm geometric teammate with crisp blue shapes"
-            data-testid="avatar-prompt"
+            label="Job / Instructions"
+            value={instructions}
+            onChange={setInstructions}
+            maxLength={8000}
+            placeholder="What should this bot do?"
+            width="100%"
+            data-testid="profile-instructions"
           />
+          <Text color="secondary">This bot will keep using its current agent. Create a new bot to choose a different one.</Text>
           <Button
-            label={busy === "recipe" ? "Creating…" : "Create from description"}
-            variant="secondary"
-            type="button"
-            isLoading={busy === "recipe"}
-            isDisabled={disabled && busy !== "recipe"}
-            onClick={() => void createRecipe()}
-            data-testid="avatar-recipe-submit"
+            label="Save profile"
+            variant="primary"
+            type="submit"
+            isLoading={busy === "save"}
+            isDisabled={disabled && busy !== "save"}
+            data-testid="profile-save"
           />
+
+          <VStack gap={2}>
+            <Text type="label-lg">Avatar choices</Text>
+            <HStack gap={2} wrap="wrap">
+              <Button
+                label="New variation"
+                variant="secondary"
+                type="button"
+                isLoading={busy === "variation"}
+                isDisabled={disabled && busy !== "variation"}
+                onClick={() => void newVariation()}
+                data-testid="avatar-variation"
+              />
+              <Button
+                label="Upload image"
+                variant="secondary"
+                type="button"
+                isLoading={busy === "upload"}
+                isDisabled={disabled}
+                onClick={() => fileInput.current?.click()}
+                data-testid="avatar-upload-button"
+              />
+              <input
+                ref={fileInput}
+                type="file"
+                accept="image/png,image/jpeg,image/webp"
+                aria-label="Choose an avatar image"
+                onChange={(event) => void upload(event)}
+                {...stylex.props(styles.hiddenFileInput)}
+                tabIndex={-1}
+                data-testid="avatar-upload-input"
+              />
+            </HStack>
+            <TextArea
+              ref={promptInput}
+              label="Describe avatar"
+              value={prompt}
+              onChange={(value) => {
+                setPrompt(value);
+                if (invalidField === "avatarDescription" && value.trim().length > 0) setInvalidField(undefined);
+              }}
+              maxLength={2000}
+              placeholder="A calm geometric teammate with crisp blue shapes"
+              {...(invalidField === "avatarDescription" ? { status: { type: "error" as const, message: "Describe the avatar you want." } } : {})}
+              width="100%"
+              data-testid="avatar-prompt"
+            />
+            <Button
+              label="Create from description"
+              variant="secondary"
+              type="button"
+              isLoading={busy === "recipe"}
+              isDisabled={disabled && busy !== "recipe"}
+              onClick={() => void createRecipe()}
+              data-testid="avatar-recipe-submit"
+            />
+          </VStack>
         </VStack>
-      </VStack>
+      </form>
     </Dialog>
   );
 }

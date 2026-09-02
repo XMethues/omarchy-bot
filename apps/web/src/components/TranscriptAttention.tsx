@@ -1,6 +1,7 @@
-import type { JSX, ReactNode, UIEvent } from "react";
-import { useCallback, useEffect, useRef, useState } from "react";
-import { Button } from "@astryxdesign/core/Button";
+import type { JSX, ReactNode, RefObject, UIEventHandler } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef } from "react";
+import { VStack } from "@astryxdesign/core/VStack";
+import styles from "../lib/styles.ts";
 
 const LATEST_THRESHOLD_PX = 8;
 
@@ -14,36 +15,22 @@ export interface TranscriptAttentionProps {
   children: ReactNode;
 }
 
-function scrollViewport(root: HTMLElement): HTMLElement | undefined {
-  const candidates: HTMLElement[] = [root, ...root.querySelectorAll<HTMLElement>("*")];
-  let ancestor = root.parentElement;
-  while (ancestor !== null) {
-    candidates.push(ancestor);
-    ancestor = ancestor.parentElement;
-  }
+interface TranscriptAttentionSurface {
+  viewportRef: RefObject<HTMLDivElement | null>;
+  onViewportScroll: UIEventHandler<HTMLDivElement>;
+}
 
-  let transcript: HTMLElement | undefined;
-  for (const candidate of candidates) {
-    if (candidate.dataset.testid === "transcript") transcript = candidate;
-    const overflow = getComputedStyle(candidate).overflowY;
-    if (
-      (overflow === "auto" || overflow === "scroll")
-      && candidate.scrollHeight > candidate.clientHeight + LATEST_THRESHOLD_PX
-    ) {
-      return candidate;
-    }
-  }
-  return candidates.find((candidate) => candidate.scrollHeight > candidate.clientHeight + LATEST_THRESHOLD_PX) ?? transcript;
+const TranscriptAttentionContext = createContext<TranscriptAttentionSurface | null>(null);
+
+export function useTranscriptAttentionSurface(): TranscriptAttentionSurface | null {
+  return useContext(TranscriptAttentionContext);
 }
 
 function isAtLatest(viewport: HTMLElement): boolean {
   return viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <= LATEST_THRESHOLD_PX;
 }
 
-/**
- * Owns the read boundary without coupling ChatPanel to sidebar state. It may
- * wrap any transcript whose scrolling viewport is inside the wrapper.
- */
+/** Owns the read boundary while ChatLayout remains the one native scrolling surface. */
 export function TranscriptAttention({
   botId,
   threadId,
@@ -53,11 +40,9 @@ export function TranscriptAttention({
   onRead,
   children,
 }: TranscriptAttentionProps): JSX.Element {
-  const rootRef = useRef<HTMLDivElement>(null);
-  const viewportRef = useRef<HTMLElement | undefined>(undefined);
+  const viewportRef = useRef<HTMLDivElement>(null);
   const atLatestRef = useRef(true);
   const readInFlightRef = useRef<string | undefined>(undefined);
-  const [showJump, setShowJump] = useState(false);
 
   const acknowledgeIfLatest = useCallback(
     (atLatest: boolean): void => {
@@ -68,7 +53,6 @@ export function TranscriptAttention({
         && threadId !== undefined
         && unreadThreadId === threadId
         && latestMessageId !== undefined;
-      setShowJump(hasMatchingUnread && !atLatest);
       if (!hasMatchingUnread || !atLatest) return;
 
       const readKey = `${botId}:${threadId}:${latestMessageId}`;
@@ -81,85 +65,50 @@ export function TranscriptAttention({
     [botId, threadId, unreadCount, unreadThreadId, latestMessageId, onRead],
   );
 
-  const inspectViewport = useCallback(
-    (candidate?: HTMLElement): void => {
-      const root = rootRef.current;
-      if (root === null) return;
-      const viewport = candidate ?? scrollViewport(root) ?? viewportRef.current;
-      if (viewport === undefined) return;
-      viewportRef.current = viewport;
-      acknowledgeIfLatest(isAtLatest(viewport));
-    },
+  const inspectViewport = useCallback((): void => {
+    const viewport = viewportRef.current;
+    if (viewport !== null) acknowledgeIfLatest(isAtLatest(viewport));
+  }, [acknowledgeIfLatest]);
+
+  const onViewportScroll = useCallback<UIEventHandler<HTMLDivElement>>(
+    (event): void => acknowledgeIfLatest(isAtLatest(event.currentTarget)),
     [acknowledgeIfLatest],
   );
 
-  const onScrollCapture = useCallback(
-    (event: UIEvent<HTMLDivElement>): void => {
-      if (!(event.target instanceof HTMLElement)) return;
-      viewportRef.current = event.target;
-      inspectViewport(event.target);
-    },
-    [inspectViewport],
-  );
-
   useEffect(() => {
-    viewportRef.current = undefined;
     atLatestRef.current = true;
     readInFlightRef.current = undefined;
-    setShowJump(false);
   }, [botId, threadId]);
 
   useEffect(() => {
-    const root = rootRef.current;
-    if (root === null) return;
     const followLatest = atLatestRef.current;
     const frame = requestAnimationFrame(() => {
-      const viewport = viewportRef.current ?? scrollViewport(root);
-      if (viewport === undefined) return;
-      viewportRef.current = viewport;
+      const viewport = viewportRef.current;
+      if (viewport === null) return;
       if (followLatest) viewport.scrollTop = viewport.scrollHeight;
-      inspectViewport(viewport);
+      acknowledgeIfLatest(isAtLatest(viewport));
     });
     return () => cancelAnimationFrame(frame);
-  }, [latestMessageId, botId, threadId, inspectViewport]);
+  }, [latestMessageId, botId, threadId, acknowledgeIfLatest]);
 
   useEffect(() => {
-    const root = rootRef.current;
-    if (root === null) return;
-    const observer = new ResizeObserver(() => inspectViewport());
-    observer.observe(root);
+    const viewport = viewportRef.current;
+    if (viewport === null) return;
+    const observer = new ResizeObserver(inspectViewport);
+    observer.observe(viewport);
     return () => observer.disconnect();
   }, [inspectViewport]);
 
-  useEffect(() => {
-    const onAnyScroll = (): void => inspectViewport();
-    window.addEventListener("scroll", onAnyScroll, true);
-    return () => window.removeEventListener("scroll", onAnyScroll, true);
-  }, [inspectViewport]);
-
-  const jumpToLatest = (): void => {
-    const root = rootRef.current;
-    if (root === null) return;
-    const viewport = viewportRef.current ?? scrollViewport(root);
-    if (viewport === undefined) return;
-    viewportRef.current = viewport;
-    viewport.scrollTop = viewport.scrollHeight;
-    inspectViewport(viewport);
-  };
+  const surface = useMemo(
+    () => ({ viewportRef, onViewportScroll }),
+    [onViewportScroll],
+  );
 
   return (
-    <div
-      ref={rootRef}
-      onScrollCapture={onScrollCapture}
-      data-testid="transcript-attention"
-      style={{ position: "relative", display: "flex", flex: 1, minHeight: 0, overflow: "hidden", flexDirection: "column" }}
-    >
-      {children}
-      {showJump ? (
-        <div style={{ position: "absolute", insetInlineEnd: "var(--spacing-4)", bottom: "var(--spacing-4)" }}>
-          <Button label={`Jump to latest (${unreadCount})`} variant="secondary" size="sm" onClick={jumpToLatest} data-testid="jump-to-latest" />
-        </div>
-      ) : null}
-    </div>
+    <TranscriptAttentionContext value={surface}>
+      <VStack gap={0} xstyle={styles.fillColumn} data-testid="transcript-attention">
+        {children}
+      </VStack>
+    </TranscriptAttentionContext>
   );
 }

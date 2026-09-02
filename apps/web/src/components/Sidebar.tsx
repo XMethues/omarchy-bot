@@ -1,18 +1,23 @@
-import type { JSX } from "react";
+import type { JSX, ReactNode } from "react";
 import { useState } from "react";
-import { SideNav } from "@astryxdesign/core/SideNav";
-import { SideNavHeading } from "@astryxdesign/core/SideNav";
-import { SideNavSection } from "@astryxdesign/core/SideNav";
-import { Item } from "@astryxdesign/core/Item";
-import { Button } from "@astryxdesign/core/Button";
+import { useAppShellMobile } from "@astryxdesign/core/AppShell";
+import {
+  SideNav,
+  SideNavHeading,
+  SideNavItem,
+  SideNavSection,
+} from "@astryxdesign/core/SideNav";
+import { Plus } from "lucide-react";
 import { AlertDialog } from "@astryxdesign/core/AlertDialog";
 import { DropdownMenu } from "@astryxdesign/core/DropdownMenu";
 import { Badge } from "@astryxdesign/core/Badge";
+import { Icon } from "@astryxdesign/core/Icon";
+import { StatusDot } from "@astryxdesign/core/StatusDot";
+import { IconButton } from "@astryxdesign/core/IconButton";
 import { Timestamp } from "@astryxdesign/core/Timestamp";
 import { VStack } from "@astryxdesign/core/VStack";
 import { HStack } from "@astryxdesign/core/HStack";
 import { Text } from "@astryxdesign/core/Text";
-import { Archive, MoreHorizontal, Pin, PinOff, Plus, Settings } from "lucide-react";
 import type { BotDto, BotViewDto } from "@omarchy-bot/protocol";
 import { AvatarView } from "./AvatarView.tsx";
 import { clearDraftsByBot } from "../lib/drafts.ts";
@@ -26,9 +31,9 @@ const STATUS_LABEL: Record<BotViewDto["status"], string> = {
   unavailable: "Unavailable",
 };
 
-const STATUS_VARIANT: Record<BotViewDto["status"], "neutral" | "info" | "warning" | "error" | "success"> = {
+const STATUS_VARIANT: Record<BotViewDto["status"], "accent" | "warning" | "error" | "neutral"> = {
   idle: "neutral",
-  working: "info",
+  working: "accent",
   waiting: "warning",
   needs_you: "warning",
   error: "error",
@@ -44,6 +49,7 @@ export interface SidebarProps {
   onPinBot: (botId: string, pinned: boolean) => Promise<void>;
   onArchiveBot: (botId: string, body: { confirmStop?: boolean }) => Promise<BotDto>;
   onBotArchived: (botId: string) => void;
+  safetyControl?: ReactNode;
 }
 
 const activityTime = (bot: BotViewDto): string => bot.lastActivityAt ?? bot.createdAt;
@@ -78,11 +84,13 @@ export function Sidebar({
   onPinBot,
   onArchiveBot,
   onBotArchived,
+  safetyControl,
 }: SidebarProps): JSX.Element {
   const [pendingBot, setPendingBot] = useState<BotViewDto | undefined>(undefined);
   const [archiveError, setArchiveError] = useState<string | undefined>(undefined);
   const [pinError, setPinError] = useState<string | undefined>(undefined);
   const [archiving, setArchiving] = useState(false);
+  const { closeMobileNav, isMobile } = useAppShellMobile();
   const ordered = orderSidebarBots(bots);
 
   const finishArchive = (botId: string): void => {
@@ -135,47 +143,115 @@ export function Sidebar({
   };
   return (
     <>
-      <SideNav
-        data-testid="sidebar"
-        header={<SideNavHeading heading="omarchy-bot" subheading="AI teammate workspace" />}
-        footerIcons={
-          <Button label="Settings" variant="ghost" size="sm" icon={<Settings size={16} />} onClick={onOpenSettings} data-testid="sidebar-settings" />
-        }
-        topContent={
-          <Button label="New bot" variant="primary" size="md" icon={<Plus size={16} />} onClick={onCreateBot} data-testid="sidebar-create-bot" />
-        }
-      >
-        <SideNavSection title="Bots">
-          {pinError !== undefined ? (
-            <Text role="alert">{pinError}</Text>
-          ) : null}
-          {ordered.length === 0 ? (
-            <VStack padding={4}>
-              <Text color="secondary">No bots yet. Create one to start chatting.</Text>
-            </VStack>
-          ) : (
-            ordered.map((bot) => (
-              <Item
-                key={bot.id}
-                onClick={() => onSelectBot(bot.id)}
-                isSelected={bot.id === selectedBotId}
-                startContent={
-                  <AvatarView
-                    avatar={bot.avatar}
-                    name={bot.name}
-                    size="sm"
-                    activity={bot.status === "working" ? "working" : bot.id === selectedBotId ? "selected" : "idle"}
+      <VStack height="100%" data-testid="sidebar">
+        <SideNav
+          aria-label="Bot navigation"
+          {...(isMobile ? { "data-testid": "mobile-sidebar" } : {})}
+          header={<SideNavHeading heading="omarchy-bot" subheading="AI teammate workspace" />}
+          footerIcons={
+            <IconButton
+              label="Settings"
+              tooltip="Settings"
+              variant="ghost"
+              icon={<Icon icon="wrench" size="sm" />}
+              onClick={() => {
+                if (isMobile) closeMobileNav();
+                onOpenSettings();
+              }}
+              data-testid="sidebar-settings"
+            />
+          }
+          footer={safetyControl}
+          topContent={
+            <IconButton
+              label="New bot"
+              tooltip="New bot"
+              variant="primary"
+              icon={<Icon icon={Plus} size="md" />}
+              onClick={() => {
+                if (isMobile) closeMobileNav();
+                onCreateBot();
+              }}
+              data-testid="sidebar-create-bot"
+            />
+          }
+        >
+          <SideNavSection title="Bots">
+            {pinError !== undefined ? (
+              <Text role="alert">{pinError}</Text>
+            ) : null}
+            {ordered.length === 0 ? (
+              <VStack padding={4}>
+                <Text color="secondary">No bots yet. Create one to start chatting.</Text>
+              </VStack>
+            ) : (
+              ordered.map((bot) => (
+                <VStack key={bot.id} gap={0.5}>
+                  <SideNavItem
+                    onClick={() => {
+                      onSelectBot(bot.id);
+                      if (isMobile) closeMobileNav();
+                    }}
+                    isSelected={bot.id === selectedBotId}
+                    icon={
+                      <AvatarView
+                        avatar={bot.avatar}
+                        name={bot.name}
+                        size="sm"
+                        activity={bot.status === "working" ? "working" : bot.id === selectedBotId ? "selected" : "idle"}
+                      />
+                    }
+                    label={bot.name}
+                    actions={
+                      <DropdownMenu
+                        button={{
+                          label: `Actions for ${bot.name}`,
+                          variant: "ghost",
+                          icon: <Icon icon="moreHorizontal" size="sm" />,
+                          isIconOnly: true,
+                        }}
+                        data-testid={`sidebar-bot-actions-${bot.id}`}
+                        items={[
+                          {
+                            id: "pin",
+                            label: bot.pinned ? "Unpin" : "Pin",
+                            description: bot.pinned ? "Return to recent activity order" : "Keep above recent bots",
+                            onClick: () => void togglePin(bot),
+                          },
+                          {
+                            id: "archive",
+                            label: "Archive",
+                            description: "Move this bot to Settings",
+                            onClick: () => requestArchive(bot),
+                          },
+                        ]}
+                        placement="below"
+                        alignment="end"
+                        hasChevron={false}
+                      />
+                    }
+                    data-testid={`sidebar-bot-${bot.id}`}
                   />
-                }
-                label={bot.name}
-                description={bot.previewText ?? "No messages yet"}
-                descriptionLines={1}
-                labelLines={1}
-                endContent={
-                  <HStack gap={1} align="center">
-                    <VStack gap={0.5}>
-                      {bot.previewAt !== undefined ? <Timestamp value={bot.previewAt} format="relative_short" /> : null}
-                      {bot.status !== "idle" ? <Badge variant={STATUS_VARIANT[bot.status]} label={STATUS_LABEL[bot.status]} /> : null}
+                  <VStack gap={0.5} paddingInline={3}>
+                    <Text type="supporting" color="secondary" maxLines={1}>
+                      {bot.previewText ?? "No messages yet"}
+                    </Text>
+                    <HStack gap={1} vAlign="center" wrap="wrap">
+                      {bot.previewAt !== undefined ? (
+                        <Timestamp value={bot.previewAt} format="relative_short" isLive />
+                      ) : null}
+                      {bot.status !== "idle" ? (
+                        <>
+                          <StatusDot
+                            variant={STATUS_VARIANT[bot.status]}
+                            label={STATUS_LABEL[bot.status]}
+                            tooltip={STATUS_LABEL[bot.status]}
+                          />
+                          <Text type="supporting" color="secondary">
+                            {STATUS_LABEL[bot.status]}
+                          </Text>
+                        </>
+                      ) : null}
                       {bot.unreadCount > 0 ? (
                         <Badge
                           variant="blue"
@@ -184,44 +260,23 @@ export function Sidebar({
                           data-testid={`sidebar-unread-${bot.id}`}
                         />
                       ) : null}
-                    </VStack>
-                    {bot.pinned ? <Pin size={12} aria-label="Pinned" data-testid={`sidebar-pinned-${bot.id}`} /> : null}
-                    <DropdownMenu
-                      button={{
-                        label: `Actions for ${bot.name}`,
-                        variant: "ghost",
-                        size: "sm",
-                        icon: <MoreHorizontal size={16} />,
-                        isIconOnly: true,
-                      }}
-                      data-testid={`sidebar-bot-actions-${bot.id}`}
-                      items={[
-                        {
-                          id: "pin",
-                          label: bot.pinned ? "Unpin" : "Pin",
-                          description: bot.pinned ? "Return to recent activity order" : "Keep above recent bots",
-                          icon: bot.pinned ? <PinOff size={16} /> : <Pin size={16} />,
-                          onClick: () => void togglePin(bot),
-                        },
-                        {
-                          id: "archive",
-                          label: "Archive",
-                          description: "Move this bot to Settings",
-                          icon: <Archive size={16} />,
-                          onClick: () => requestArchive(bot),
-                        },
-                      ]}
-                      placement="below"
-                      alignment="end"
-                    />
-                  </HStack>
-                }
-                data-testid={`sidebar-bot-${bot.id}`}
-              />
-            ))
-          )}
-        </SideNavSection>
-      </SideNav>
+                      {bot.pinned ? (
+                        <Text
+                          type="supporting"
+                          color="secondary"
+                          data-testid={`sidebar-pinned-${bot.id}`}
+                        >
+                          Pinned
+                        </Text>
+                      ) : null}
+                    </HStack>
+                  </VStack>
+                </VStack>
+              ))
+            )}
+          </SideNavSection>
+        </SideNav>
+      </VStack>
       <AlertDialog
         isOpen={pendingBot !== undefined}
         onOpenChange={(open) => {
