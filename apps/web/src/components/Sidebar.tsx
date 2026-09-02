@@ -12,7 +12,7 @@ import { Timestamp } from "@astryxdesign/core/Timestamp";
 import { VStack } from "@astryxdesign/core/VStack";
 import { HStack } from "@astryxdesign/core/HStack";
 import { Text } from "@astryxdesign/core/Text";
-import { Archive, MoreHorizontal, Plus, Settings } from "lucide-react";
+import { Archive, MoreHorizontal, Pin, PinOff, Plus, Settings } from "lucide-react";
 import type { BotDto, BotViewDto } from "@omarchy-bot/protocol";
 import { AvatarView } from "./AvatarView.tsx";
 import { clearDraftsByBot } from "../lib/drafts.ts";
@@ -41,8 +41,27 @@ export interface SidebarProps {
   onSelectBot: (botId: string) => void;
   onCreateBot: () => void;
   onOpenSettings: () => void;
+  onPinBot: (botId: string, pinned: boolean) => Promise<void>;
   onArchiveBot: (botId: string, body: { confirmStop?: boolean }) => Promise<BotDto>;
   onBotArchived: (botId: string) => void;
+}
+
+const activityTime = (bot: BotViewDto): string => bot.lastActivityAt ?? bot.createdAt;
+
+export function orderSidebarBots(bots: BotViewDto[]): BotViewDto[] {
+  return [...bots.filter((bot) => !bot.archived)].sort(
+    (a, b) =>
+      Number(b.pinned) - Number(a.pinned)
+      || activityTime(b).localeCompare(activityTime(a))
+      || a.id.localeCompare(b.id),
+  );
+}
+
+/** Startup deliberately ignores pins: open the teammate with newest activity. */
+export function mostRecentlyActiveBot(bots: BotViewDto[]): BotViewDto | undefined {
+  return [...bots.filter((bot) => !bot.archived)].sort(
+    (a, b) => activityTime(b).localeCompare(activityTime(a)) || a.id.localeCompare(b.id),
+  )[0];
 }
 
 /**
@@ -56,15 +75,15 @@ export function Sidebar({
   onSelectBot,
   onCreateBot,
   onOpenSettings,
+  onPinBot,
   onArchiveBot,
   onBotArchived,
 }: SidebarProps): JSX.Element {
   const [pendingBot, setPendingBot] = useState<BotViewDto | undefined>(undefined);
   const [archiveError, setArchiveError] = useState<string | undefined>(undefined);
+  const [pinError, setPinError] = useState<string | undefined>(undefined);
   const [archiving, setArchiving] = useState(false);
-  const ordered = [...bots.filter((bot) => !bot.archived)].sort(
-    (a, b) => Number(b.pinned) - Number(a.pinned) || (b.lastActivityAt ?? "").localeCompare(a.lastActivityAt ?? ""),
-  );
+  const ordered = orderSidebarBots(bots);
 
   const finishArchive = (botId: string): void => {
     clearDraftsByBot(botId);
@@ -105,6 +124,15 @@ export function Sidebar({
     }
     void archive(bot, false);
   };
+
+  const togglePin = async (bot: BotViewDto): Promise<void> => {
+    setPinError(undefined);
+    try {
+      await onPinBot(bot.id, !bot.pinned);
+    } catch (error) {
+      setPinError(error instanceof Error ? error.message : `Could not ${bot.pinned ? "unpin" : "pin"} ${bot.name}.`);
+    }
+  };
   return (
     <>
       <SideNav
@@ -118,6 +146,9 @@ export function Sidebar({
         }
       >
         <SideNavSection title="Bots">
+          {pinError !== undefined ? (
+            <Text role="alert">{pinError}</Text>
+          ) : null}
           {ordered.length === 0 ? (
             <VStack padding={4}>
               <Text color="secondary">No bots yet. Create one to start chatting.</Text>
@@ -145,8 +176,16 @@ export function Sidebar({
                     <VStack gap={0.5}>
                       {bot.previewAt !== undefined ? <Timestamp value={bot.previewAt} format="relative_short" /> : null}
                       {bot.status !== "idle" ? <Badge variant={STATUS_VARIANT[bot.status]} label={STATUS_LABEL[bot.status]} /> : null}
-                      {bot.unreadCount > 0 ? <Badge variant="blue" label={bot.unreadCount} /> : null}
+                      {bot.unreadCount > 0 ? (
+                        <Badge
+                          variant="blue"
+                          label={bot.unreadCount}
+                          aria-label={`${bot.unreadCount} unread ${bot.unreadCount === 1 ? "message" : "messages"}`}
+                          data-testid={`sidebar-unread-${bot.id}`}
+                        />
+                      ) : null}
                     </VStack>
+                    {bot.pinned ? <Pin size={12} aria-label="Pinned" data-testid={`sidebar-pinned-${bot.id}`} /> : null}
                     <DropdownMenu
                       button={{
                         label: `Actions for ${bot.name}`,
@@ -157,6 +196,13 @@ export function Sidebar({
                       }}
                       data-testid={`sidebar-bot-actions-${bot.id}`}
                       items={[
+                        {
+                          id: "pin",
+                          label: bot.pinned ? "Unpin" : "Pin",
+                          description: bot.pinned ? "Return to recent activity order" : "Keep above recent bots",
+                          icon: bot.pinned ? <PinOff size={16} /> : <Pin size={16} />,
+                          onClick: () => void togglePin(bot),
+                        },
                         {
                           id: "archive",
                           label: "Archive",

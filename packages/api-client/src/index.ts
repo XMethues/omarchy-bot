@@ -1,6 +1,7 @@
 import type {
   AgentDto,
   ApprovalDto,
+  AttachmentDto,
   ArchiveBodyDto,
   AvatarRecipeBodyDto,
   BotDto,
@@ -160,7 +161,7 @@ export class ApiClient {
   }
 
   // ----- attachments -----
-  async stageAttachment(botId: string, file: File): Promise<import("@omarchy-bot/protocol").AttachmentDto> {
+  async stageAttachment(botId: string, file: File): Promise<AttachmentDto> {
     const form = new FormData();
     form.append("file", file);
     const res = await this.f(`${this.base}/api/attachments/stage`, {
@@ -175,7 +176,10 @@ export class ApiClient {
       err.body = text;
       throw err;
     }
-    return (await res.json()) as import("@omarchy-bot/protocol").AttachmentDto;
+    return (await res.json()) as AttachmentDto;
+  }
+  getStagedAttachment(id: string): Promise<AttachmentDto> {
+    return this.req(`/api/attachments/staged/${id}`);
   }
   unstageAttachment(id: string): Promise<void> {
     return this.req(`/api/attachments/staged/${id}`, { method: "DELETE" });
@@ -236,7 +240,11 @@ export class ApiClient {
 
   // ----- events -----
   /** Control/state WebSocket with cursor replay. Never guesses missed state. */
-  connectEvents(lastCursor: number | undefined, onEvent: (e: EventEnvelope) => void, opts?: { snapshotRequired?: () => void; onOpen?: () => void }): WebSocket {
+  connectEvents(
+    lastCursor: number | undefined,
+    onEvent: (e: EventEnvelope) => void,
+    opts?: { snapshotRequired?: () => void; onOpen?: () => void; onCaughtUp?: () => void },
+  ): WebSocket {
     // Resolve relative bases (web served by the daemon) against the page origin.
     const base = this.base !== "" ? this.base : (typeof window !== "undefined" ? window.location.origin : "");
     const wsUrl = `${base.replace(/^http/, "ws")}/api/events`;
@@ -255,6 +263,7 @@ export class ApiClient {
       }
       if (msg.type === "event") onEvent(msg.envelope);
       if (msg.type === "snapshot_required") opts?.snapshotRequired?.();
+      if (msg.type === "hello") opts?.onCaughtUp?.();
     };
     return ws;
   }

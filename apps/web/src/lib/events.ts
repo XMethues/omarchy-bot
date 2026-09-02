@@ -14,9 +14,78 @@ export type QueryTag =
 
 export type Invalidate = (tag: QueryTag, threadId?: string) => void;
 
+export interface NotificationContext {
+  selectedBotId?: string;
+  botName?: (botId: string) => string | undefined;
+}
+
+interface NotificationDecision {
+  botId: string;
+  kind: "completed" | "needs_you";
+}
+
+function notificationDecision(envelope: EventEnvelope): NotificationDecision | undefined {
+  if (envelope.type !== "turn.status") return undefined;
+  const payload = payloadOf(envelope);
+  if (typeof payload.botId !== "string") return undefined;
+  if (payload.to === "completed") return { botId: payload.botId, kind: "completed" };
+  if (payload.to === "waiting_for_input") return { botId: payload.botId, kind: "needs_you" };
+  return undefined;
+}
+
+export function shouldNotifyBot(input: {
+  botId: string;
+  selectedBotId?: string;
+  documentHidden: boolean;
+  windowFocused: boolean;
+}): boolean {
+  return input.documentHidden || !input.windowFocused || input.selectedBotId !== input.botId;
+}
+
+/** Call only from an explicit user gesture (for example a Settings button). */
+export async function requestDesktopNotificationPermission(): Promise<NotificationPermission> {
+  if (typeof Notification === "undefined") return "denied";
+  if (Notification.permission !== "default") return Notification.permission;
+  return Notification.requestPermission();
+}
+
+export function notifyForAttentionEvent(
+  envelope: EventEnvelope,
+  context: NotificationContext,
+): Notification | undefined {
+  const decision = notificationDecision(envelope);
+  if (
+    decision === undefined
+    || typeof Notification === "undefined"
+    || Notification.permission !== "granted"
+    || !shouldNotifyBot({
+      botId: decision.botId,
+      ...(context.selectedBotId !== undefined ? { selectedBotId: context.selectedBotId } : {}),
+      documentHidden: document.hidden,
+      windowFocused: document.hasFocus(),
+    })
+  ) {
+    return undefined;
+  }
+
+  const name = context.botName?.(decision.botId) ?? "Bot";
+  return new Notification(
+    decision.kind === "completed" ? `${name} finished working` : `${name} needs you`,
+    {
+      body: decision.kind === "completed" ? "Background work is complete." : "Your input is needed to continue.",
+      tag: `omarchy-bot:${decision.botId}:${decision.kind}`,
+    },
+  );
+}
+
 let cursor: number | undefined;
 let socket: WebSocket | undefined;
 let started = false;
+let handlers: {
+  invalidate: Invalidate;
+  onSnapshotRequired: () => void;
+  getNotificationContext?: () => NotificationContext;
+} | undefined;
 
 function payloadOf(envelope: EventEnvelope): Record<string, unknown> {
   return (envelope.payload ?? {}) as Record<string, unknown>;
@@ -39,6 +108,7 @@ function route(envelope: EventEnvelope, invalidate: Invalidate): void {
     case "bot.created":
     case "bot.updated":
     case "bot.activity":
+    case "bot.pinned":
     case "bot.archived":
     case "bot.restored":
     case "bot.read":
@@ -107,33 +177,54 @@ function route(envelope: EventEnvelope, invalidate: Invalidate): void {
  * Single shared WS connection with cursor-based replay. On snapshot_required
  * (or repeated reconnects) callers refetch everything; the cursor resets.
  */
-export function startEventPump(invalidate: Invalidate, onSnapshotRequired: () => void): void {
+export function startEventPump(
+  invalidate: Invalidate,
+  onSnapshotRequired: () => void,
+  getNotificationContext?: () => NotificationContext,
+): void {
+  handlers = {
+    invalidate,
+    onSnapshotRequired,
+    ...(getNotificationContext !== undefined ? { getNotificationContext } : {}),
+  };
   if (started) return;
   started = true;
   let retries = 0;
 
   const connect = (): void => {
+    let notificationsReady = cursor !== undefined;
     socket = api.connectEvents(
       cursor,
       (envelope) => {
         cursor = envelope.cursor;
-        route(envelope, invalidate);
+        const current = handlers;
+        if (current === undefined) return;
+        route(envelope, current.invalidate);
+        if (notificationsReady && current.getNotificationContext !== undefined) {
+          notifyForAttentionEvent(envelope, current.getNotificationContext());
+        }
       },
       {
         snapshotRequired: () => {
+          const current = handlers;
           cursor = undefined;
-          onSnapshotRequired();
+          notificationsReady = false;
+          current?.onSnapshotRequired();
         },
         onOpen: () => {
           retries = 0;
+        },
+        onCaughtUp: () => {
+          notificationsReady = true;
         },
       },
     );
     socket.onclose = () => {
       retries += 1;
       if (retries > 5) {
+        const current = handlers;
         cursor = undefined;
-        onSnapshotRequired();
+        current?.onSnapshotRequired();
       }
       setTimeout(connect, Math.min(1000 * 2 ** retries, 10_000));
     };

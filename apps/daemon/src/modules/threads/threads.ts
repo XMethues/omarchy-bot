@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Database } from "bun:sqlite";
-import type { MessageDto, ThreadDto, TurnDto } from "@omarchy-bot/protocol";
+import type { AttachmentDto, MessageDto, ThreadDto, TurnDto } from "@omarchy-bot/protocol";
 import type { EventLog } from "../events/eventLog.ts";
 
 interface ThreadRow {
@@ -8,6 +8,9 @@ interface ThreadRow {
 }
 interface MessageRow {
   id: string; thread_id: string; seq: number; author_kind: string; kind: string; text: string | null; payload: string | null; created_at: string;
+}
+interface MessageAttachmentRow {
+  id: string; name: string; media_type: string; size: number;
 }
 interface TurnRow {
   id: string; thread_id: string; bot_id: string; status: string; worker_session_id: string | null; native_session_id: string; steer_count: number; started_at: string; finished_at: string | null; outcome_reason: string | null;
@@ -144,11 +147,23 @@ export class ThreadsService {
   }
 
   private toMessageDto(m: MessageRow): MessageDto {
+    const attachmentRows = this.db
+      .query(`SELECT id, name, media_type, size FROM attachments WHERE message_id = ? AND kind = 'managed' ORDER BY created_at, id`)
+      .all(m.id) as MessageAttachmentRow[];
+    const attachments: AttachmentDto[] = attachmentRows.map((attachment) => ({
+      id: attachment.id,
+      kind: "managed",
+      name: attachment.name,
+      mediaType: attachment.media_type,
+      size: attachment.size,
+      url: `/api/attachments/${attachment.id}`,
+    }));
     return {
       id: m.id, threadId: m.thread_id, seq: m.seq,
       author: m.author_kind === "user" ? { kind: "user" } : m.author_kind === "bot" ? { kind: "bot" } : { kind: "system" },
       kind: m.kind as MessageDto["kind"],
       ...(m.text !== null ? { text: m.text } : {}),
+      ...(attachments.length > 0 ? { attachments } : {}),
       ...(m.payload !== null ? { payload: JSON.parse(m.payload) } : {}),
       createdAt: m.created_at,
     };

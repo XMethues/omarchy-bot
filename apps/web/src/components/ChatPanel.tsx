@@ -1,4 +1,4 @@
-import type { JSX, ReactNode } from "react";
+import type { ChangeEvent, DragEvent, JSX, ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { ChatComposer, ChatComposerInput } from "@astryxdesign/core/Chat";
 import { ChatMessage } from "@astryxdesign/core/Chat";
@@ -9,7 +9,7 @@ import { ChatToolCalls, type ChatToolCallItem } from "@astryxdesign/core/Chat";
 import { ChatLayout } from "@astryxdesign/core/Chat";
 import { Collapsible } from "@astryxdesign/core/Collapsible";
 import { Button } from "@astryxdesign/core/Button";
-import type { BotViewDto, DictationDto, DictationResultDto, MessageDto, ThreadDto } from "@omarchy-bot/protocol";
+import type { AttachmentDto, BotViewDto, DictationDto, DictationResultDto, MessageDto, ThreadDto } from "@omarchy-bot/protocol";
 import { Icon } from "@astryxdesign/core/Icon";
 import { getDelta, subscribeDeltas } from "../lib/live.ts";
 import { api, apiErrorMessage, trimSendText } from "../lib/api.ts";
@@ -81,9 +81,71 @@ function groupMessages(messages: MessageDto[]): Row[] {
 }
 
 const EMPTY_DRAFT: ConversationDraft = { text: "", cursor: 0, stagedIds: [] };
+
+function formatAttachmentSize(size: number): string {
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${Math.ceil(size / 1024)} KB`;
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function apiStatus(error: unknown): number | undefined {
+  if (error !== null && typeof error === "object" && "status" in error && typeof error.status === "number") return error.status;
+  return undefined;
+}
+
+function attachmentErrorMessage(error: unknown, fileName: string): string {
+  if (error !== null && typeof error === "object" && "body" in error) {
+    let body = error.body;
+    if (typeof body === "string") {
+      try {
+        body = JSON.parse(body);
+      } catch {
+        return `${fileName}: ${body}`;
+      }
+    }
+    if (body !== null && typeof body === "object" && "error" in body && typeof body.error === "string") {
+      return `${fileName}: ${body.error}`;
+    }
+  }
+  return `${fileName}: ${apiErrorMessage(error, "Attachment could not be staged.")}`;
+}
+
+function AttachmentContent({ attachment, previewUrl }: { attachment: AttachmentDto; previewUrl?: string }): JSX.Element {
+  const imageUrl = attachment.mediaType.startsWith("image/")
+    ? previewUrl ?? attachment.url
+    : undefined;
+  if (imageUrl !== undefined) {
+    return (
+      <img
+        src={imageUrl}
+        alt={attachment.name}
+        loading="lazy"
+        xstyle={styles.attachmentImage}
+        data-testid={attachment.kind === "managed" ? "message-image-attachment" : "staged-image-preview"}
+      />
+    );
+  }
+  const metadata = `${attachment.mediaType} · ${formatAttachmentSize(attachment.size)}`;
+  return attachment.url !== undefined ? (
+    <a href={attachment.url} download={attachment.name} xstyle={styles.attachmentFile} data-testid="message-file-attachment">
+      <strong>{attachment.name}</strong>
+      <span>{metadata}</span>
+    </a>
+  ) : (
+    <div xstyle={styles.attachmentFile} data-testid="staged-file-row">
+      <strong>{attachment.name}</strong>
+      <span>{metadata}</span>
+    </div>
+  );
+}
 interface DictationOrigin {
   target: VoiceDraftTarget;
   anchor: number;
+}
+interface AttachmentRestoreResult {
+  id: string;
+  attachment?: AttachmentDto;
+  error?: unknown;
 }
 
 function composerCursor(root: HTMLDivElement | null, fallback: number): number {
@@ -115,18 +177,56 @@ export function ChatPanel({
   const [submitError, setSubmitError] = useState<string | undefined>(undefined);
   const [voiceStatus, setVoiceStatus] = useState<string | undefined>(undefined);
   const [voiceState, setVoiceState] = useState<DictationDto>(dictation.state);
+  const [stagedAttachments, setStagedAttachments] = useState<AttachmentDto[]>([]);
   const composerInputRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const previewUrlsRef = useRef(new Map<string, string>());
+  const restoreGenerationRef = useRef(0);
   const dictationOriginRef = useRef<DictationOrigin | undefined>(undefined);
   const draftBotId = bot?.id;
   const draftThreadId = thread?.id;
   const selectedDraftRef = useRef({ botId: draftBotId, threadId: draftThreadId });
   selectedDraftRef.current = { botId: draftBotId, threadId: draftThreadId };
 
-  // Restore the window-local draft for this bot+thread; hide (not move) others.
+  // Restore only this window's references and discard daemon-confirmed 404s.
   useEffect(() => {
+    const generation = ++restoreGenerationRef.current;
     setSubmitError(undefined);
-    setDraft(draftBotId === undefined ? EMPTY_DRAFT : loadDraft(draftBotId, draftThreadId));
+    setStagedAttachments([]);
+    if (draftBotId === undefined) {
+      setDraft(EMPTY_DRAFT);
+      return;
+    }
+
+    const restored = loadDraft(draftBotId, draftThreadId);
+    setDraft(restored);
+    void Promise.all(restored.stagedIds.map(async (id): Promise<AttachmentRestoreResult> => {
+      try {
+        return { id, attachment: await api.getStagedAttachment(id) };
+      } catch (error) {
+        return { id, error };
+      }
+    })).then((results) => {
+      if (restoreGenerationRef.current !== generation) return;
+      const valid = results.flatMap((result) => result.attachment === undefined ? [] : [result.attachment]);
+      const missing = new Set(results.filter((result) => result.error !== undefined && apiStatus(result.error) === 404).map((result) => result.id));
+      const unavailable = results.some((result) => result.error !== undefined && apiStatus(result.error) !== 404);
+      const next = { ...restored, stagedIds: restored.stagedIds.filter((id) => !missing.has(id)) };
+      if (missing.size > 0) saveDraft(draftBotId, draftThreadId, next);
+      setDraft(next);
+      setStagedAttachments(valid);
+      if (missing.size > 0) {
+        setSubmitError(`${missing.size === 1 ? "A staged attachment is" : `${missing.size} staged attachments are`} no longer available and ${missing.size === 1 ? "was" : "were"} removed from this draft.`);
+      } else if (unavailable) {
+        setSubmitError("Some staged attachments could not be checked. Their draft references were preserved.");
+      }
+    });
   }, [draftBotId, draftThreadId]);
+
+  useEffect(() => () => {
+    for (const previewUrl of previewUrlsRef.current.values()) URL.revokeObjectURL(previewUrl);
+    previewUrlsRef.current.clear();
+  }, []);
 
   useEffect(() => {
     setVoiceState(dictation.state);
@@ -142,6 +242,87 @@ export function ChatPanel({
     },
     [draftBotId, draftThreadId],
   );
+  const stageFiles = useCallback(async (files: readonly File[]): Promise<void> => {
+    if (draftBotId === undefined || files.length === 0) return;
+    const origin = { botId: draftBotId, threadId: draftThreadId };
+    setSubmitError(undefined);
+    const staged: AttachmentDto[] = [];
+    const errors: string[] = [];
+    for (const file of files) {
+      try {
+        const attachment = await api.stageAttachment(origin.botId, file);
+        staged.push(attachment);
+        if (attachment.mediaType.startsWith("image/")) {
+          previewUrlsRef.current.set(attachment.id, URL.createObjectURL(file));
+        }
+      } catch (error) {
+        errors.push(attachmentErrorMessage(error, file.name));
+      }
+    }
+    if (staged.length > 0) {
+      const stored = loadDraft(origin.botId, origin.threadId);
+      const next: ConversationDraft = {
+        ...stored,
+        stagedIds: [...new Set([...stored.stagedIds, ...staged.map((attachment) => attachment.id)])],
+      };
+      saveDraft(origin.botId, origin.threadId, next);
+      const selected = selectedDraftRef.current;
+      if (selected.botId === origin.botId && selected.threadId === origin.threadId) {
+        restoreGenerationRef.current += 1;
+        setDraft(next);
+        setStagedAttachments((current) => {
+          const byId = new Map(current.map((attachment) => [attachment.id, attachment]));
+          for (const attachment of staged) byId.set(attachment.id, attachment);
+          return [...byId.values()];
+        });
+      }
+    }
+    if (errors.length > 0) setSubmitError(errors.join(" "));
+  }, [draftBotId, draftThreadId]);
+
+  const selectFiles = useCallback((event: ChangeEvent<HTMLInputElement>): void => {
+    const files = Array.from(event.currentTarget.files ?? []);
+    event.currentTarget.value = "";
+    void stageFiles(files);
+  }, [stageFiles]);
+
+  const dropFiles = useCallback((event: DragEvent<HTMLDivElement>): void => {
+    event.preventDefault();
+    if (event.dataTransfer.files.length > 0) void stageFiles(Array.from(event.dataTransfer.files));
+  }, [stageFiles]);
+
+  const removeStagedAttachment = useCallback(async (attachment: AttachmentDto): Promise<void> => {
+    if (draftBotId === undefined) return;
+    const origin = { botId: draftBotId, threadId: draftThreadId };
+    const stored = loadDraft(origin.botId, origin.threadId);
+    const next = { ...stored, stagedIds: stored.stagedIds.filter((id) => id !== attachment.id) };
+    saveDraft(origin.botId, origin.threadId, next);
+    const selected = selectedDraftRef.current;
+    if (selected.botId === origin.botId && selected.threadId === origin.threadId) {
+      setSubmitError(undefined);
+      setDraft(next);
+      setStagedAttachments((current) => current.filter((candidate) => candidate.id !== attachment.id));
+    }
+
+    try {
+      await api.unstageAttachment(attachment.id);
+      const previewUrl = previewUrlsRef.current.get(attachment.id);
+      if (previewUrl !== undefined) {
+        URL.revokeObjectURL(previewUrl);
+        previewUrlsRef.current.delete(attachment.id);
+      }
+    } catch (error) {
+      saveDraft(origin.botId, origin.threadId, stored);
+      const currentSelection = selectedDraftRef.current;
+      if (currentSelection.botId === origin.botId && currentSelection.threadId === origin.threadId) {
+        setDraft(stored);
+        setStagedAttachments((current) =>
+          current.some((candidate) => candidate.id === attachment.id) ? current : [...current, attachment],
+        );
+        setSubmitError(attachmentErrorMessage(error, attachment.name));
+      }
+    }
+  }, [draftBotId, draftThreadId]);
 
   const rememberCursor = useCallback(() => {
     if (draftBotId === undefined) return;
@@ -231,7 +412,7 @@ export function ChatPanel({
       if (autoSendVoice) {
         try {
           await onVoiceAutoSend(origin.target, inserted.text);
-          saveOriginDraft(origin, EMPTY_DRAFT);
+          saveOriginDraft(origin, { ...EMPTY_DRAFT, stagedIds: inserted.stagedIds });
         } catch (error) {
           setSubmitError(apiErrorMessage(error, "Voice transcription was inserted but could not be sent."));
         }
@@ -280,24 +461,42 @@ export function ChatPanel({
   const grouped = useMemo(() => groupMessages(messages), [messages]);
 
   const send = useCallback(
-    async (text: string): Promise<void> => {
-      const trimmed = trimSendText(text);
+    async (): Promise<void> => {
+      const trimmed = trimSendText(draft.text);
       if (trimmed.length === 0 || bot === undefined) return;
+      const originThreadId = thread?.id;
+      const attachmentIds = [...draft.stagedIds];
+      const preservedDraft = { ...draft };
+      const body = {
+        text: trimmed,
+        clientTag: crypto.randomUUID(),
+        ...(attachmentIds.length > 0 ? { attachmentIds } : {}),
+      };
       setSubmitError(undefined);
       try {
-        if (thread !== undefined) {
-          const res = await api.sendMessage(thread.id, { text: trimmed, clientTag: crypto.randomUUID() });
-          onMessageSent(res.threadId);
-        } else {
-          const res = await api.sendBotMessage(bot.id, { text: trimmed, clientTag: crypto.randomUUID() });
-          onMessageSent(res.threadId);
+        const response = thread !== undefined
+          ? await api.sendMessage(thread.id, body)
+          : await api.sendBotMessage(bot.id, body);
+        saveDraft(bot.id, originThreadId, EMPTY_DRAFT);
+        setDraft(EMPTY_DRAFT);
+        setStagedAttachments([]);
+        for (const id of attachmentIds) {
+          const previewUrl = previewUrlsRef.current.get(id);
+          if (previewUrl !== undefined) {
+            URL.revokeObjectURL(previewUrl);
+            previewUrlsRef.current.delete(id);
+          }
         }
-        onDraftChange("");
+        onMessageSent(response.threadId);
       } catch (error) {
+        // Astryx clears its controlled editor on submit; restore the originating
+        // draft only after the daemon rejects the whole atomic send.
+        saveDraft(bot.id, originThreadId, preservedDraft);
+        setDraft(preservedDraft);
         setSubmitError(apiErrorMessage(error, "Message could not be sent."));
       }
     },
-    [bot, thread, onMessageSent, onDraftChange],
+    [bot, thread, draft, onMessageSent],
   );
 
   const rows = useMemo(() => {
@@ -371,7 +570,12 @@ export function ChatPanel({
           }
           data-testid={sender === "assistant" ? "assistant-message" : "user-message"}
         >
-          <ChatMessageBubble variant="filled">{m.text ?? ""}</ChatMessageBubble>
+          <ChatMessageBubble variant="filled">
+            <div xstyle={styles.messageContent}>
+              {m.text !== undefined ? <span>{m.text}</span> : null}
+              {m.attachments?.map((attachment) => <AttachmentContent key={attachment.id} attachment={attachment} />)}
+            </div>
+          </ChatMessageBubble>
         </ChatMessage>,
       );
     }
@@ -419,19 +623,68 @@ export function ChatPanel({
       data-state={voiceState.state}
     />
   );
+  const composerActions = (
+    <div xstyle={styles.composerActions}>
+      <input
+        ref={fileInputRef}
+        type="file"
+        multiple
+        onChange={selectFiles}
+        xstyle={styles.hiddenFileInput}
+        data-testid="attachment-input"
+        tabIndex={-1}
+      />
+      <Button
+        label="Attach files"
+        variant="ghost"
+        size="sm"
+        isDisabled={bot === undefined}
+        onClick={() => fileInputRef.current?.click()}
+        data-testid="attachment-picker"
+      />
+      {dictationButton}
+    </div>
+  );
   const composer = (
     <div xstyle={styles.composerWrap}>
-      <ChatComposer
-        value={draft.text}
-        onChange={onDraftChange}
-        onSubmit={(value) => void send(value)}
-        input={<ChatComposerInput ref={composerInputRef} onKeyUp={rememberCursor} onMouseUp={rememberCursor} />}
-        sendActions={dictationButton}
-        placeholder={bot === undefined ? "Select or create a bot" : isAgentReady ? "Message…" : "The bot's agent is not ready"}
-        isDisabled={bot === undefined || !isAgentReady}
-        data-testid="composer"
-        {...(composerStatus !== undefined ? { status: composerStatus } : {})}
-      />
+      <div
+        xstyle={styles.composerDropZone}
+        onDragOver={(event) => event.preventDefault()}
+        onDrop={dropFiles}
+      >
+        {stagedAttachments.length > 0 ? (
+          <div xstyle={styles.stagedAttachments} aria-label="Staged attachments">
+            {stagedAttachments.map((attachment) => (
+              <div
+                key={attachment.id}
+                xstyle={styles.stagedAttachment}
+                data-testid="staged-attachment"
+                data-attachment-id={attachment.id}
+              >
+                <AttachmentContent attachment={attachment} previewUrl={previewUrlsRef.current.get(attachment.id)} />
+                <Button
+                  label={`Remove ${attachment.name}`}
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => void removeStagedAttachment(attachment)}
+                  data-testid="remove-staged-attachment"
+                />
+              </div>
+            ))}
+          </div>
+        ) : null}
+        <ChatComposer
+          value={draft.text}
+          onChange={onDraftChange}
+          onSubmit={() => void send()}
+          input={<ChatComposerInput ref={composerInputRef} onKeyUp={rememberCursor} onMouseUp={rememberCursor} />}
+          sendActions={composerActions}
+          placeholder={bot === undefined ? "Select or create a bot" : isAgentReady ? "Message…" : "The bot's agent is not ready"}
+          isDisabled={bot === undefined || !isAgentReady}
+          data-testid="composer"
+          {...(composerStatus !== undefined ? { status: composerStatus } : {})}
+        />
+      </div>
     </div>
   );
 

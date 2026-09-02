@@ -10,11 +10,14 @@ import type { ApprovalsService } from "../modules/approvals/approvals.ts";
 import type { ComputerBroker } from "../modules/computer/broker.ts";
 import type { AvatarService } from "../modules/avatars/avatarService.ts";
 import type { DictationService } from "../modules/dictation/dictationService.ts";
+import type { AttachmentsService } from "../modules/attachments/attachments.ts";
 import { handleAvatarRequest } from "./avatarRoutes.ts";
 import { handleThreadFeatureRequest } from "./threadRoutes.ts";
 import { handleBotArchiveRequest } from "./botArchiveRoutes.ts";
+import { handleBotAttentionRequest } from "./botAttentionRoutes.ts";
 import { handleComputerRequest } from "./computerRoutes.ts";
 import { handleDictationRequest } from "./dictationRoutes.ts";
+import { handleAttachmentRequest } from "./attachmentRoutes.ts";
 import type { Supervisor } from "../supervision/supervisor.ts";
 import { existsSync } from "node:fs";
 import path from "node:path";
@@ -31,6 +34,7 @@ export interface DaemonServices {
   turns: TurnService;
   approvals: ApprovalsService;
   avatars: AvatarService;
+  attachments: AttachmentsService;
   dictation: DictationService;
   computer: ComputerBroker;
   /** Exposed for the conformance suite and advanced embedders; not used by HTTP handlers. */
@@ -102,6 +106,9 @@ export function startHttp(svc: DaemonServices): { stop: () => Promise<void>; por
       if (!body.success) throw new HttpError(400, body.error.issues[0]?.message ?? "invalid body");
       return json(svc.bots.patch(botGet[1]!, body.data));
     }
+    const attentionResponse = await handleBotAttentionRequest(req, svc.bots, pathname);
+    if (attentionResponse) return attentionResponse;
+
     const archiveResponse = await handleBotArchiveRequest(req, svc.bots, svc.turns, pathname);
     if (archiveResponse) return archiveResponse;
 
@@ -112,11 +119,14 @@ export function startHttp(svc: DaemonServices): { stop: () => Promise<void>; por
     if (threadFeatureResponse) return threadFeatureResponse;
 
 
+    const attachmentResponse = await handleAttachmentRequest(req, svc.attachments, pathname);
+    if (attachmentResponse) return attachmentResponse;
+
     const botMessages = m(/^\/api\/bots\/([\w-]+)\/messages$/);
     if (botMessages && req.method === "POST") {
       // Lazy threads: first send atomically creates thread+message+turn.
       const body = await parseBody(req, SendMessageBody);
-      const result = await svc.turns.send(botMessages[1]!, null, body.text.trim());
+      const result = await svc.turns.send(botMessages[1]!, null, body.text.trim(), body.attachmentIds ?? []);
       return json(result, 202);
     }
 
@@ -132,7 +142,7 @@ export function startHttp(svc: DaemonServices): { stop: () => Promise<void>; por
       const body = await parseBody(req, SendMessageBody);
       const thread = svc.threads.getThread(threadMsgs[1]!);
       if (!thread) return notFound(`unknown thread ${threadMsgs[1]}`);
-      const result = await svc.turns.send(thread.botId, thread.id, body.text.trim());
+      const result = await svc.turns.send(thread.botId, thread.id, body.text.trim(), body.attachmentIds ?? []);
       return json(result, 202);
     }
 

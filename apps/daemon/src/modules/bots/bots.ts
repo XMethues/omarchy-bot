@@ -45,7 +45,24 @@ export class BotsService {
     private readonly events: EventLog,
     private readonly agents: AgentsRegistry,
     private readonly threads: ThreadsService,
-  ) {}
+  ) {
+    // TurnService already records user/final assistant text. Other Bot and
+    // system transcript output has no useful preview, but still needs attention.
+    this.events.subscribe((event) => {
+      if (event.type !== "message.appended" || event.aggregateType !== "thread") return;
+      const message = event.payload as {
+        author?: { kind?: unknown };
+        kind?: unknown;
+        threadId?: unknown;
+      } | undefined;
+      const isSystemOutput = message?.author?.kind === "system";
+      const isNonTextBotOutput = message?.author?.kind === "bot" && message.kind !== "text";
+      if (!isSystemOutput && !isNonTextBotOutput) return;
+      const threadId = typeof message?.threadId === "string" ? message.threadId : event.aggregateId;
+      const thread = this.threads.getThread(threadId);
+      if (thread !== undefined) this.#recordUnreadOutput(thread.botId, threadId);
+    });
+  }
 
   #row(id: string): BotRow | undefined {
     return this.db.query(`SELECT * FROM bots WHERE id = ?`).get(id) as BotRow | undefined;
@@ -101,8 +118,12 @@ export class BotsService {
       .query(opts.includeArchived ? `SELECT * FROM bots` : `SELECT * FROM bots WHERE archived = 0`)
       .all() as BotRow[];
     const views = rows.map((r) => this.#toView(r));
-    // Pinned first, then most recently active; never archived-first.
-    views.sort((a, b) => Number(b.pinned) - Number(a.pinned) || (b.lastActivityAt ?? "").localeCompare(a.lastActivityAt ?? ""));
+    views.sort(
+      (a, b) =>
+        Number(b.pinned) - Number(a.pinned)
+        || (b.lastActivityAt ?? b.createdAt).localeCompare(a.lastActivityAt ?? a.createdAt)
+        || a.id.localeCompare(b.id),
+    );
     return views;
   }
 
@@ -156,6 +177,15 @@ export class BotsService {
     this.db.query(`UPDATE bots SET name = ?, instructions = ?, updated_at = ? WHERE id = ?`).run(name, instructions, new Date().toISOString(), id);
     this.events.append("bot", id, "bot.updated", { name, instructions });
     return this.getDto(id);
+  }
+
+  /** Pinning changes navigation placement only; it never touches a Thread. */
+  pin(id: string, pinned: boolean): BotDto {
+    if (!this.#row(id)) throw new HttpError(404, `unknown bot ${id}`);
+    this.db.query(`UPDATE bots SET pinned = ? WHERE id = ?`).run(pinned ? 1 : 0, id);
+    const bot = this.getDto(id);
+    this.events.append("bot", id, "bot.pinned", { pinned });
+    return bot;
   }
   /**
    * Archive hides a Bot without changing its Threads, Agent reference, or
@@ -249,23 +279,51 @@ export class BotsService {
 
   recordActivity(botId: string, threadId: string, previewText: string, assistantMessage: boolean): void {
     const now = new Date().toISOString();
-    const preview = previewText.slice(0, 120);
-    this.db
-      .query(`INSERT INTO bot_state (bot_id, last_activity_at, preview_text, preview_at, unread_count, unread_thread_id)
-              VALUES (?, ?, ?, ?, ?, ?)
-              ON CONFLICT(bot_id) DO UPDATE SET
-                last_activity_at = excluded.last_activity_at,
-                preview_text = excluded.preview_text,
-                preview_at = excluded.preview_at,
-                unread_count = bot_state.unread_count + ?,
-                unread_thread_id = excluded.unread_thread_id`)
-      .run(botId, now, preview, now, assistantMessage ? 1 : 0, threadId, assistantMessage ? 1 : 0);
+    const preview = previewText.replace(/\s+/g, " ").trim().slice(0, 120);
+    if (assistantMessage) {
+      this.db
+        .query(`INSERT INTO bot_state (bot_id, last_activity_at, preview_text, preview_at, unread_count, unread_thread_id)
+                VALUES (?, ?, ?, ?, 1, ?)
+                ON CONFLICT(bot_id) DO UPDATE SET
+                  last_activity_at = excluded.last_activity_at,
+                  preview_text = excluded.preview_text,
+                  preview_at = excluded.preview_at,
+                  unread_count = bot_state.unread_count + 1,
+                  unread_thread_id = excluded.unread_thread_id`)
+        .run(botId, now, preview, now, threadId);
+    } else {
+      // User activity updates recency/preview without stealing the boundary
+      // from unread output that may belong to another Thread.
+      this.db
+        .query(`INSERT INTO bot_state (bot_id, last_activity_at, preview_text, preview_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(bot_id) DO UPDATE SET
+                  last_activity_at = excluded.last_activity_at,
+                  preview_text = excluded.preview_text,
+                  preview_at = excluded.preview_at`)
+        .run(botId, now, preview, now);
+    }
     this.events.append("bot", botId, "bot.activity", { threadId, preview, at: now });
   }
 
-  clearUnread(botId: string, threadId: string): void {
+  #recordUnreadOutput(botId: string, threadId: string): void {
+    const now = new Date().toISOString();
+    this.db
+      .query(`INSERT INTO bot_state (bot_id, last_activity_at, unread_count, unread_thread_id)
+              VALUES (?, ?, 1, ?)
+              ON CONFLICT(bot_id) DO UPDATE SET
+                last_activity_at = excluded.last_activity_at,
+                unread_count = bot_state.unread_count + 1,
+                unread_thread_id = excluded.unread_thread_id`)
+      .run(botId, now, threadId);
+    this.events.append("bot", botId, "bot.activity", { threadId, at: now });
+  }
+
+  clearUnread(botId: string, threadId: string): BotViewDto {
+    this.getView(botId);
     this.db.query(`UPDATE bot_state SET unread_count = 0, unread_thread_id = NULL WHERE bot_id = ? AND unread_thread_id = ?`).run(botId, threadId);
     this.events.append("bot", botId, "bot.read", { threadId });
+    return this.getView(botId);
   }
 
   unreadCount(botId: string): number {

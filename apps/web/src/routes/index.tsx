@@ -1,11 +1,12 @@
 import type { JSX } from "react";
+import { Button } from "@astryxdesign/core/Button";
 import { AppShell } from "@astryxdesign/core/AppShell";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { api, apiErrorMessage } from "../lib/api.ts";
-import { startEventPump, type QueryTag } from "../lib/events.ts";
-import { Sidebar } from "../components/Sidebar.tsx";
+import { requestDesktopNotificationPermission, startEventPump, type QueryTag } from "../lib/events.ts";
+import { mostRecentlyActiveBot, Sidebar } from "../components/Sidebar.tsx";
 import { clearDraftsByBot } from "../lib/drafts.ts";
 import { ConversationHeader } from "../components/ConversationHeader.tsx";
 import { ChatPanel } from "../components/ChatPanel.tsx";
@@ -16,6 +17,7 @@ import { SettingsDialog } from "../components/SettingsDialog.tsx";
 import { ComputerSheet } from "../components/ComputerSheet.tsx";
 import { EmergencyComputerControl } from "../components/EmergencyComputerControl.tsx";
 import { VoiceSettingsControl, useVoiceAutoSendSetting } from "../components/VoiceSettingsControl.tsx";
+import { TranscriptAttention } from "../components/TranscriptAttention.tsx";
 import styles from "../lib/styles.ts";
 
 export const Route = createFileRoute("/")({
@@ -50,6 +52,9 @@ function HomeScreen(): JSX.Element {
   const [computerError, setComputerError] = useState<string | undefined>(undefined);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [autoSendVoice, setAutoSendVoice] = useVoiceAutoSendSetting();
+  const selectedBotRef = useRef<string | undefined>(selectedBotId);
+  const botNamesRef = useRef<Record<string, string>>({});
+  selectedBotRef.current = selectedBotId;
 
   const invalidate = useCallback(
     (tag: QueryTag, threadId?: string) => {
@@ -59,11 +64,18 @@ function HomeScreen(): JSX.Element {
   );
 
   useEffect(() => {
-    startEventPump(invalidate, () => void qc.invalidateQueries());
+    startEventPump(invalidate, () => void qc.invalidateQueries(), () => {
+      const current = selectedBotRef.current;
+      return {
+        ...(current !== undefined ? { selectedBotId: current } : {}),
+        botName: (botId) => botNamesRef.current[botId],
+      };
+    });
   }, [qc, invalidate]);
 
   const agents = useQuery({ queryKey: ["agents"], queryFn: () => api.listAgents(), refetchInterval: 30_000 });
   const bots = useQuery({ queryKey: ["bots"], queryFn: () => api.listBots(), refetchInterval: 30_000 });
+  botNamesRef.current = Object.fromEntries((bots.data ?? []).map((candidate) => [candidate.id, candidate.name]));
   const approvals = useQuery({ queryKey: ["approvals"], queryFn: () => api.listApprovals(), refetchInterval: 15_000 });
   const allBots = useQuery({
     queryKey: ["bots", "all"],
@@ -130,7 +142,7 @@ function HomeScreen(): JSX.Element {
     if (bots.data === undefined) return;
     if (selectedBotId !== undefined && bots.data.some((candidate) => candidate.id === selectedBotId)) return;
     if (selectedBotId !== undefined) clearDraftsByBot(selectedBotId);
-    const first = bots.data[0];
+    const first = mostRecentlyActiveBot(bots.data);
     if (first === undefined) {
       if (selectedBotId !== undefined) void navigate({ search: {}, replace: true });
       return;
@@ -210,6 +222,10 @@ function HomeScreen(): JSX.Element {
           onSelectBot={selectBot}
           onCreateBot={() => setCreateOpen(true)}
           onOpenSettings={() => setSettingsOpen(true)}
+          onPinBot={async (botId, pinned) => {
+            await api.pinBot(botId, { pinned });
+            invalidate("bots");
+          }}
           onArchiveBot={(botId, body) => api.archiveBot(botId, body)}
           onBotArchived={(botId) => {
             qc.setQueryData(["bots"], (current: typeof bots.data) => current?.filter((candidate) => candidate.id !== botId));
@@ -228,6 +244,17 @@ function HomeScreen(): JSX.Element {
           computerState={computer.data?.state ?? "unavailable"}
           onOpenComputer={() => setComputerOpen(true)}
         />
+        <TranscriptAttention
+          {...(bot !== undefined ? { botId: bot.id } : {})}
+          {...(thread !== undefined ? { threadId: thread.id } : {})}
+          unreadCount={bot?.unreadCount ?? 0}
+          {...(bot?.unreadThreadId !== undefined ? { unreadThreadId: bot.unreadThreadId } : {})}
+          {...(messages.data?.at(-1)?.id !== undefined ? { latestMessageId: messages.data.at(-1)!.id } : {})}
+          onRead={async (botId, threadId) => {
+            await api.markBotRead(botId, threadId);
+            invalidate("bots");
+          }}
+        >
         <ChatPanel
           bot={bot}
           thread={thread}
@@ -249,6 +276,7 @@ function HomeScreen(): JSX.Element {
           onMessageSent={onMessageSent}
           isAgentReady={isAgentReady}
         />
+        </TranscriptAttention>
       </div>
       <CreateBotDialog
         isOpen={createOpen}
@@ -283,7 +311,15 @@ function HomeScreen(): JSX.Element {
         onRestoreBot={(botId) => api.restoreBot(botId)}
         onBotRestored={() => invalidate("bots")}
       >
-        <VoiceSettingsControl value={autoSendVoice} onChange={setAutoSendVoice} />
+        <>
+          <VoiceSettingsControl value={autoSendVoice} onChange={setAutoSendVoice} />
+          <Button
+            label="Enable desktop notifications"
+            variant="secondary"
+            onClick={() => void requestDesktopNotificationPermission()}
+            data-testid="enable-notifications"
+          />
+        </>
       </SettingsDialog>
       {bot !== undefined ? (
         <ComputerSheet

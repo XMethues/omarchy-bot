@@ -12,6 +12,7 @@
  *                    during hang returns an error (failure path is testable)
  *   steer-echo       long atomic tool action; message.steer is acknowledged
  *                    immediately, applied after tool.completed, then completes
+ *   attachment-echo validates the daemon's managed worker paths and echoes metadata/content
  *
  * Stays alive until stdin closes (daemon lifecycle contract).
  */
@@ -26,6 +27,13 @@ const heartbeat = setInterval(() => write({ type: "heartbeat" }), 5_000);
 heartbeat.unref?.();
 
 let sessionCounter = 0;
+interface FakeAttachment {
+  id: string;
+  name: string;
+  path: string;
+  mediaType: string;
+}
+
 interface FakeSession {
   aborted: boolean;
   streaming: boolean;
@@ -63,13 +71,31 @@ readJsonl(Bun.stdin.stream(), (raw) => {
       break;
     }
     case "message.send": {
-      const { sessionId, message } = msg as unknown as { sessionId: string; turnId: string; message: { text: string } };
+      const command = msg as unknown as {
+        sessionId: string;
+        turnId: string;
+        message: { text: string; attachments?: FakeAttachment[] };
+      };
+      const { sessionId, message } = command;
       const text = message.text;
       const s = sessions.get(sessionId)!;
       s.aborted = false;
       s.directive = undefined;
       s.steerReply = undefined;
       void (async () => {
+        if (text === "attachment-echo") {
+          const summaries = await Promise.all((message.attachments ?? []).map(async (attachment) => {
+            const file = Bun.file(attachment.path);
+            const content = attachment.mediaType === "text/plain" || attachment.mediaType === "application/json"
+              ? await file.text()
+              : `${file.size} bytes`;
+            return `${attachment.id}|${attachment.name}|${attachment.mediaType}|${content}`;
+          }));
+          write({ type: "event", event: { type: "message.delta", sessionId, text: summaries.join("\n") } });
+          write({ type: "event", event: { type: "turn.completed", sessionId, usage: { tokens: 1 } } });
+          respond(msg.requestId!, { accepted: true });
+          return;
+        }
         if (text.startsWith("say:")) {
           const said = text.slice(4).trim();
           write({ type: "event", event: { type: "message.delta", sessionId, text: said.slice(0, 3) } });

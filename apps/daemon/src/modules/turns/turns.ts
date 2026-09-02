@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Database } from "bun:sqlite";
-import type { AgentEvent } from "@omarchy-bot/agent-contract";
+import type { AgentEvent, WorkerUserMessage } from "@omarchy-bot/agent-contract";
 import type { MessageDto, SendResultDto, TurnDto } from "@omarchy-bot/protocol";
 import { canTransitionTurn, isTerminalTurn, type AgentId, type TurnStatus } from "@omarchy-bot/domain";
 import type { ThreadsService } from "../threads/threads.ts";
@@ -8,6 +8,7 @@ import type { ApprovalsService } from "../approvals/approvals.ts";
 import type { AgentsRegistry } from "../agents/registry.ts";
 import type { BotsService } from "../bots/bots.ts";
 import type { EventLog } from "../events/eventLog.ts";
+import type { AttachmentsService } from "../attachments/attachments.ts";
 import type { Supervisor } from "../../supervision/supervisor.ts";
 import { HttpError } from "../bots/bots.ts";
 
@@ -58,6 +59,7 @@ export class TurnService {
     private readonly approvals: ApprovalsService,
     private readonly agents: AgentsRegistry,
     private readonly bots: BotsService,
+    private readonly attachments: AttachmentsService,
     private readonly supervisor: Supervisor,
     private readonly cfg: { turnTimeoutMs: number },
   ) {}
@@ -94,7 +96,13 @@ export class TurnService {
    * Send a user message. `threadId: null` creates the thread atomically with
    * the first message and turn (lazy threads — abandoned blanks persist nothing).
    */
-  async send(botId: string, threadId: string | null, text: string, opts: { cwd?: string } = {}): Promise<SendResultDto> {
+  async send(
+    botId: string,
+    threadId: string | null,
+    text: string,
+    attachmentIds: string[] = [],
+    opts: { cwd?: string } = {},
+  ): Promise<SendResultDto> {
     const bot = this.db.query(`SELECT * FROM bots WHERE id = ? AND archived = 0`).get(botId) as { id: string; agent_id: string; instructions: string } | undefined;
     if (!bot) throw new HttpError(404, `unknown bot ${botId}`);
     const agentId = bot.agent_id as AgentId;
@@ -108,11 +116,18 @@ export class TurnService {
       const thread = this.threads.getThread(existingThreadId);
       if (!thread || thread.botId !== botId) throw new HttpError(404, `unknown thread ${existingThreadId} for bot ${botId}`);
       const active = this.threads.activeTurn(existingThreadId);
-      if (active !== undefined) return this.#steer(active, text);
+      if (active !== undefined) {
+        if (attachmentIds.length > 0) throw new HttpError(409, "attachments cannot be added while steering an active turn");
+        return this.#steer(active, text);
+      }
     }
 
     const turnId = `turn_${randomUUID().replace(/-/g, "")}`;
-    const result: { threadId: string; messageId: string } = this.db.transaction(() => {
+    const result: {
+      threadId: string;
+      messageId: string;
+      workerAttachments: NonNullable<WorkerUserMessage["attachments"]>;
+    } = this.db.transaction(() => {
       let tid = existingThreadId;
       let title = "New conversation";
       if (tid === undefined) {
@@ -129,7 +144,14 @@ export class TurnService {
         }
       }
       this.threads.insertTurnRow({ id: turnId, threadId: tid, botId, nativeSessionId: this.threads.getNativeSession(tid) ?? "" });
-      return { threadId: tid, messageId: userMsg.id };
+      const workerAttachments = this.attachments.promoteForMessage({
+        attachmentIds,
+        botId,
+        threadId: tid,
+        messageId: userMsg.id,
+        agentId,
+      });
+      return { threadId: tid, messageId: userMsg.id, workerAttachments };
     })();
 
     this.events.append("thread", result.threadId, "thread.created", { botId, threadId: result.threadId, turnId });
@@ -137,7 +159,7 @@ export class TurnService {
     this.events.append("thread", result.threadId, "message.appended", userMsgDto);
     this.events.append("turn", turnId, "turn.created", { turnId, threadId: result.threadId, botId });
     this.bots.recordActivity(botId, result.threadId, text, false);
-    const start = this.#startTurn(turnId, result.threadId, botId, agentId, text);
+    const start = this.#startTurn(turnId, result.threadId, botId, agentId, text, result.workerAttachments);
     this.#turnStarts.set(turnId, start);
     void start
       .catch((err: unknown) => {
@@ -153,7 +175,14 @@ export class TurnService {
     return { threadId: result.threadId, messageId: result.messageId, turnId, action: "sent" };
   }
 
-  async #startTurn(turnId: string, threadId: string, botId: string, agentId: AgentId, text: string): Promise<TurnContext> {
+  async #startTurn(
+    turnId: string,
+    threadId: string,
+    botId: string,
+    agentId: AgentId,
+    text: string,
+    attachments: NonNullable<WorkerUserMessage["attachments"]>,
+  ): Promise<TurnContext> {
     const botRow = this.db.query(`SELECT instructions FROM bots WHERE id = ?`).get(botId) as { instructions: string } | undefined;
     const thread = this.threads.getThread(threadId)!;
     const worker = await this.supervisor.agentWorker(agentId);
@@ -183,7 +212,11 @@ export class TurnService {
     // Dispatch without awaiting turn completion. A worker acknowledges send
     // independently, while this resolved start promise makes immediate steering
     // wait only for the worker session to become drivable.
-    void worker.request({ type: "message.send", sessionId: opened.sessionId, turnId, message: { text } }, 60_000).catch((err: unknown) => {
+    const message: WorkerUserMessage = {
+      text,
+      ...(attachments.length > 0 ? { attachments } : {}),
+    };
+    void worker.request({ type: "message.send", sessionId: opened.sessionId, turnId, message }, 60_000).catch((err: unknown) => {
       if (this.#turns.get(opened.sessionId) !== ctx) return;
       this.#routeTurnEvent(ctx, {
         type: "error",
