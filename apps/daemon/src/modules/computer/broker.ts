@@ -121,7 +121,7 @@ export class ComputerBroker {
     void this.#grantNext();
   }
 
-  /** User Take over (design.md §5.3): stop bot input, lease to human, park the run. */
+  /** Contextual takeover: stop Bot input, hand the shared screen to the user, and park the run. */
   takeOver(): { ok: boolean; lease: ReturnType<ComputerBroker["state"]>["lease"] } {
     const l = this.#lease();
     if (l && !l.holder_is_human) {

@@ -128,7 +128,7 @@ export class WorkerClient {
     }
   }
 
-  /** Send a command and await its result. Never auto-retried (app-structure.md §7.1). */
+  /** Send a command and await its result. Mutating worker commands are never auto-retried. */
   async request(cmd: Record<string, unknown>, timeoutMs: number): Promise<any> {
     if (!this.alive) throw new Error(`${this.opts.name} worker not running`);
     const requestId = (cmd.requestId as string) ?? randomUUID();

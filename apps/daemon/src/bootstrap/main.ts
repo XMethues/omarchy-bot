@@ -81,7 +81,7 @@ export async function main(): Promise<{ stop: () => Promise<void>; port: number;
   const stop = async (): Promise<void> => {
     if (stopping) return;
     stopping = true;
-    // Shutdown order (app-structure.md §12):
+    // Safe shutdown order: stop new work before revoking shared resources.
     clearInterval(statusTimer);
     permissions.failClosedAll(); // 4. pending approvals resolve as unavailable
     computer.emergencyStop(); // 3. revoke leases, stop input (also parks runs)

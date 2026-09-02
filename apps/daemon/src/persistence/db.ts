@@ -148,7 +148,7 @@ export function openDb(cfg: Config): Database {
   return db;
 }
 
-/** Startup rule (app-structure.md §12): leases never survive a restart as bot-held. */
+/** Shared-screen safety rule: input ownership never survives a daemon restart. */
 export function recoverOnStartup(db: Database): void {
   db.exec("DELETE FROM computer_leases");
   const now = new Date().toISOString();

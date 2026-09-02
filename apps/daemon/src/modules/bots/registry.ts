@@ -62,7 +62,7 @@ export class BotRegistry {
 
   list(): BotDto[] {
     const rows = this.db.query(`SELECT * FROM bots ORDER BY enabled DESC, id ASC`).all() as BotRow[];
-    // Default agent Bot ranks first, but gets no extra permissions (research.md §6).
+    // Legacy ordering until Agent records and user-created Bots are separated.
     rows.sort((a, b) => Number(b.enabled) - Number(a.enabled) || (a.id === this.defaultAgent ? -1 : b.id === this.defaultAgent ? 1 : a.id.localeCompare(b.id)));
     return rows.map((r) => ({
       id: r.id, displayName: r.display_name, agentVersion: r.agent_version, status: r.status,

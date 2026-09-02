@@ -44,7 +44,7 @@ export function isInputAction(name: ComputerActionName): boolean {
   return INPUT_ACTIONS.includes(name);
 }
 
-/** Actions that surface as Action needed even under `trusted` (design.md §6). */
+/** Legacy action classification pending removal with the old Computer approval layer. */
 export const SENSITIVE_ACTIONS: readonly ComputerActionName[] = ["open_url"];
 
 export function isSensitiveAction(name: ComputerActionName): boolean {
