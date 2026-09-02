@@ -44,11 +44,11 @@ function HomeScreen() {
     startEventPump(invalidate, () => void qc.invalidateQueries());
   }, [qc, invalidate]);
 
-  const bots = useQuery({ queryKey: ["bots"], queryFn: api.listBots, refetchInterval: 30_000 });
-  const threads = useQuery({ queryKey: ["threads"], queryFn: api.listThreads, refetchInterval: 60_000 });
-  const tasks = useQuery({ queryKey: ["tasks"], queryFn: api.listTasks, refetchInterval: 15_000 });
-  const approvals = useQuery({ queryKey: ["approvals"], queryFn: api.listApprovals, refetchInterval: 15_000 });
-  const computer = useQuery({ queryKey: ["computer"], queryFn: api.computerState, refetchInterval: 5_000 });
+  const bots = useQuery({ queryKey: ["bots"], queryFn: () => api.listBots(), refetchInterval: 30_000 });
+  const threads = useQuery({ queryKey: ["threads"], queryFn: () => api.listThreads(), refetchInterval: 60_000 });
+  const tasks = useQuery({ queryKey: ["tasks"], queryFn: () => api.listTasks(), refetchInterval: 15_000 });
+  const approvals = useQuery({ queryKey: ["approvals"], queryFn: () => api.listApprovals(), refetchInterval: 15_000 });
+  const computer = useQuery({ queryKey: ["computer"], queryFn: () => api.computerState(), refetchInterval: 5_000 });
 
   // Default selection: first bot, its latest thread.
   useEffect(() => {

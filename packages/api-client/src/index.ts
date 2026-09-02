@@ -25,7 +25,7 @@ export class ApiClient {
 
   constructor(opts: ApiClientOptions = {}) {
     this.base = (opts.baseUrl ?? "").replace(/\/$/, "");
-    this.f = opts.fetch ?? fetch;
+    this.f = opts.fetch ?? fetch.bind(globalThis);
   }
 
   private async req<T>(path: string, init?: RequestInit): Promise<T> {
