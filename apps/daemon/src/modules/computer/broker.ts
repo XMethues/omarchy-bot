@@ -2,13 +2,25 @@ import { randomUUID } from "node:crypto";
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { Database } from "bun:sqlite";
-import { isInputAction, type ComputerAction } from "@omarchy-bot/domain";
+import { isInputAction, type ComputerAction, type ComputerLease } from "@omarchy-bot/domain";
 import type { EventLog } from "../events/eventLog.ts";
 import type { TurnService } from "../turns/turns.ts";
 import type { Supervisor } from "../../supervision/supervisor.ts";
 import type { Config } from "../../bootstrap/config.ts";
 
 interface LeaseRow { holder_is_human: number; holder_bot_id: string | null; run_id: string | null; token: string; acquired_at: string; expires_at: string }
+interface ParkedBot {
+  actor: { botId: string };
+  turnId?: string;
+}
+export interface ComputerBrokerState {
+  lease: ComputerLease | null;
+  queuedBotIds: string[];
+  needsHumanBotIds: string[];
+  emergencyStopped: boolean;
+  lastImageAt?: string;
+}
+
 
 /**
  * ComputerBroker: the only grantor/revoker of the exclusive input lease and
@@ -17,11 +29,13 @@ interface LeaseRow { holder_is_human: number; holder_bot_id: string | null; run_
  * arbitration stays internal — no approval gate sits on this path.)
  */
 export class ComputerBroker {
-  #queue: { actor: { botId: string }; turnId?: string }[] = [];
+  #queue: ParkedBot[] = [];
+  #parkedForHuman: ParkedBot | undefined;
+  #parkedForEmergency: ParkedBot | undefined;
   #emergencyStopped = false;
   #lastSnapshotAt = 0;
-  #snapshotCache?: { mediaType: string; bytes: Uint8Array };
-  #lastImageAt?: string;
+  #snapshotCache: { mediaType: string; bytes: Uint8Array } | undefined;
+  #lastImageAt: string | undefined;
 
   constructor(
     private readonly db: Database,
@@ -55,8 +69,13 @@ export class ComputerBroker {
     return l.holder_bot_id === actor.botId && (turnId === undefined || l.run_id === turnId);
   }
 
-  state(): { lease: { holder: { botId: string } | "human"; turnId?: string; acquiredAt: string; expiresAt: string } | null; queueDepth: number; emergencyStopped: boolean; lastImageAt?: string } {
+  state(): ComputerBrokerState {
     const l = this.#lease();
+    const needsHumanBotIds = (
+      this.db
+        .query(`SELECT DISTINCT bot_id FROM turns WHERE status = 'waiting_for_input'`)
+        .all() as { bot_id: string }[]
+    ).map((row) => row.bot_id);
     return {
       lease: l
         ? {
@@ -66,7 +85,8 @@ export class ComputerBroker {
             expiresAt: l.expires_at,
           }
         : null,
-      queueDepth: this.#queue.length,
+      queuedBotIds: this.#queue.map((entry) => entry.actor.botId),
+      needsHumanBotIds,
       emergencyStopped: this.#emergencyStopped,
       ...(this.#lastImageAt !== undefined ? { lastImageAt: this.#lastImageAt } : {}),
     };
@@ -119,11 +139,15 @@ export class ComputerBroker {
   }
 
   /** Contextual takeover: stop Bot input, hand the shared screen to the user, and park the turn. */
-  takeOver(): { ok: boolean; lease: ReturnType<ComputerBroker["state"]>["lease"] } {
+  takeOver(): { ok: boolean; lease: ComputerLease | null } {
     const l = this.#lease();
     if (l && !l.holder_is_human) {
       const parkedBotId = l.holder_bot_id!;
       const parkedTurn = l.run_id ?? undefined;
+      this.#parkedForHuman = {
+        actor: { botId: parkedBotId },
+        ...(parkedTurn !== undefined ? { turnId: parkedTurn } : {}),
+      };
       this.#writeLease(undefined);
       this.events.append("computer", "lease", "computer.take_over", { from: { botId: parkedBotId }, turnId: parkedTurn });
       this.turns.parkForHuman(parkedTurn);
@@ -132,6 +156,7 @@ export class ComputerBroker {
         token: randomUUID(), acquired_at: new Date().toISOString(), expires_at: new Date(Date.now() + 24 * 3600_000).toISOString(),
       });
     } else if (!l) {
+      this.#parkedForHuman = undefined;
       this.#writeLease({
         holder_is_human: 1, holder_bot_id: null, run_id: null,
         token: randomUUID(), acquired_at: new Date().toISOString(), expires_at: new Date(Date.now() + 24 * 3600_000).toISOString(),
@@ -141,20 +166,27 @@ export class ComputerBroker {
     return { ok: true, lease: this.state().lease };
   }
 
-  /** User I'm done: re-observe, then hand the lease to the next waiting turn. */
+  /** User is done: re-observe successfully, then restore the parked Bot before any queued Bot. */
   async imDone(note?: string): Promise<{ observation?: string | null }> {
     const l = this.#lease();
     if (!l || !l.holder_is_human) return {};
-    let observation: string | undefined;
-    try {
-      const r = (await this.supervisor.computerCommand({ type: "act", action: { name: "observe", args: {} } }, 15_000)) as { text?: string } | undefined;
-      observation = r?.text;
-    } catch {
-      observation = undefined; // fail open for observation only
-    }
-    this.#writeLease(undefined);
+
+    const result = (await this.supervisor.computerCommand(
+      { type: "act", action: { name: "observe", args: {} } },
+      15_000,
+    )) as { text?: string } | undefined;
+    const observation = result?.text;
     this.events.append("computer", "lease", "computer.im_done", { note: note ?? null, observation: observation ?? null });
-    await this.#grantNext();
+
+    const parked = this.#parkedForHuman;
+    this.#parkedForHuman = undefined;
+    this.#writeLease(undefined);
+    if (parked !== undefined) {
+      const restored = await this.acquire(parked.actor, parked.turnId);
+      if (restored.granted) this.turns.resumeAfterHuman(parked.turnId);
+    } else {
+      await this.#grantNext();
+    }
     return observation !== undefined ? { observation } : {};
   }
 
@@ -162,23 +194,41 @@ export class ComputerBroker {
     const next = this.#queue.shift();
     if (!next) return;
     const res = await this.acquire(next.actor, next.turnId);
-    if (res.granted) this.turns.resumeAfterHuman(next.turnId);
+    if (res.granted) this.turns.resumeAfterComputer(next.turnId);
   }
 
   emergencyStop(): void {
     this.#emergencyStopped = true;
     const l = this.#lease();
-    if (l && !l.holder_is_human) {
-      const turnId = l.run_id ?? undefined;
-      this.#writeLease(undefined);
-      this.turns.parkForHuman(turnId);
+    this.#parkedForEmergency =
+      l !== undefined && !l.holder_is_human
+        ? {
+            actor: { botId: l.holder_bot_id! },
+            ...(l.run_id !== null ? { turnId: l.run_id } : {}),
+          }
+        : undefined;
+    if (this.#parkedForEmergency?.turnId !== undefined) {
+      this.turns.parkForHuman(this.#parkedForEmergency.turnId);
     }
-    this.#queue = [];
+    this.#parkedForHuman = undefined;
+    this.#writeLease(undefined);
     this.events.append("computer", "lease", "computer.emergency_stop", {});
   }
 
-  resumeAfterEmergencyStop(): void {
+  async resumeAfterEmergencyStop(): Promise<void> {
+    if (!this.#emergencyStopped) return;
+    const parked = this.#parkedForEmergency;
+    if (parked !== undefined || this.#queue.length > 0) {
+      await this.supervisor.computerCommand({ type: "act", action: { name: "observe", args: {} } }, 15_000);
+    }
+    this.#parkedForEmergency = undefined;
     this.#emergencyStopped = false;
+    if (parked !== undefined) {
+      const restored = await this.acquire(parked.actor, parked.turnId);
+      if (restored.granted) this.turns.resumeAfterHuman(parked.turnId);
+    } else {
+      await this.#grantNext();
+    }
     this.events.append("computer", "lease", "computer.resumed", {});
   }
 

@@ -3,22 +3,41 @@ import { Button } from "@astryxdesign/core/Button";
 import { Heading } from "@astryxdesign/core/Heading";
 import { IconButton } from "@astryxdesign/core/IconButton";
 import { Monitor, MoreHorizontal } from "lucide-react";
-import type { BotViewDto, ThreadDto } from "@omarchy-bot/protocol";
+import type { BotViewDto, ComputerViewDto, ThreadDto } from "@omarchy-bot/protocol";
 import { AvatarView } from "./AvatarView.tsx";
 import styles from "../lib/styles.ts";
 
-interface ConversationHeaderProps {
+const COMPUTER_LABELS: Record<ComputerViewDto["state"], string> = {
+  idle: "Open computer",
+  "bot-using": "Open computer, this bot is using it",
+  waiting: "Open computer, this bot is waiting",
+  "needs-you": "Open computer, this bot needs you",
+  "user-control": "Open computer, you have control",
+  "emergency-stopped": "Open computer, control is stopped",
+  unavailable: "Open computer, unavailable",
+};
+
+export interface ConversationHeaderProps {
   bot?: BotViewDto;
   thread?: ThreadDto;
+  computerState: ComputerViewDto["state"];
   onOpenHistory: () => void;
   onOpenProfile: () => void;
+  onOpenComputer: () => void;
 }
 
 /**
  * Conversation-local header (workspace-redesign §2): bot name, thread title,
  * quiet computer icon, bot menu. There is no global TopNav anywhere.
  */
-export function ConversationHeader({ bot, thread, onOpenHistory, onOpenProfile }: ConversationHeaderProps): JSX.Element {
+export function ConversationHeader({
+  bot,
+  thread,
+  computerState,
+  onOpenHistory,
+  onOpenProfile,
+  onOpenComputer,
+}: ConversationHeaderProps): JSX.Element {
   return (
     <header xstyle={styles.header} data-testid="conversation-header">
       {bot !== undefined ? (
@@ -36,8 +55,14 @@ export function ConversationHeader({ bot, thread, onOpenHistory, onOpenProfile }
           data-testid="thread-history-trigger"
         />
       </div>
-      {/* Computer sheet lands with T10; the icon is present and quiet until then. */}
-      <IconButton label="Computer (coming soon)" icon={<Monitor size={18} />} variant="ghost" isDisabled data-testid="header-computer" />
+      <IconButton
+        label={COMPUTER_LABELS[computerState]}
+        icon={<Monitor size={18} />}
+        variant={computerState === "idle" || computerState === "unavailable" ? "ghost" : "secondary"}
+        onClick={onOpenComputer}
+        data-state={computerState}
+        data-testid="header-computer"
+      />
       <IconButton
         label="Edit bot profile"
         icon={<MoreHorizontal size={18} />}

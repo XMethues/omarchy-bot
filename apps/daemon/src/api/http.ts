@@ -9,18 +9,16 @@ import type { TurnService } from "../modules/turns/turns.ts";
 import type { ApprovalsService } from "../modules/approvals/approvals.ts";
 import type { ComputerBroker } from "../modules/computer/broker.ts";
 import type { AvatarService } from "../modules/avatars/avatarService.ts";
+import type { DictationService } from "../modules/dictation/dictationService.ts";
 import { handleAvatarRequest } from "./avatarRoutes.ts";
 import { handleThreadFeatureRequest } from "./threadRoutes.ts";
+import { handleBotArchiveRequest } from "./botArchiveRoutes.ts";
+import { handleComputerRequest } from "./computerRoutes.ts";
+import { handleDictationRequest } from "./dictationRoutes.ts";
 import type { Supervisor } from "../supervision/supervisor.ts";
 import { existsSync } from "node:fs";
 import path from "node:path";
-import {
-  CreateBotBody,
-  PatchBotBody,
-  RespondApprovalBody,
-  SendMessageBody,
-  type ComputerViewDto,
-} from "@omarchy-bot/protocol";
+import { CreateBotBody, PatchBotBody, RespondApprovalBody, SendMessageBody } from "@omarchy-bot/protocol";
 import { HttpError } from "../modules/bots/bots.ts";
 
 export interface DaemonServices {
@@ -33,6 +31,7 @@ export interface DaemonServices {
   turns: TurnService;
   approvals: ApprovalsService;
   avatars: AvatarService;
+  dictation: DictationService;
   computer: ComputerBroker;
   /** Exposed for the conformance suite and advanced embedders; not used by HTTP handlers. */
   supervisor: Supervisor;
@@ -62,20 +61,6 @@ function notFound(message: string): Response {
   return json({ error: message }, 404);
 }
 
-/** Plain-language computer view (ADR 0004): no lease/TTL/queue mechanics. */
-function computerView(svc: DaemonServices): ComputerViewDto {
-  const state = svc.computer.state();
-  if (state.emergencyStopped) return { state: "emergency-stopped", activity: "All computer control is stopped." };
-  if (state.lease !== null) {
-    if (state.lease.holder === "human") {
-      return { state: "user-control", activity: "You are using the computer. Return it to the bots when done." };
-    }
-    return { state: "bot-using", botId: state.lease.holder.botId, activity: "A bot is using the computer." };
-  }
-  if (state.queueDepth > 0) return { state: "waiting", activity: "A bot is waiting for the computer." };
-  const previewAt = state.lastImageAt;
-  return { state: "idle", activity: "The computer is free.", ...(previewAt !== undefined ? { previewAt } : {}) };
-}
 
 /**
  * Localhost REST + WS. Mutating commands are accepted -> completed-via-events.
@@ -117,6 +102,9 @@ export function startHttp(svc: DaemonServices): { stop: () => Promise<void>; por
       if (!body.success) throw new HttpError(400, body.error.issues[0]?.message ?? "invalid body");
       return json(svc.bots.patch(botGet[1]!, body.data));
     }
+    const archiveResponse = await handleBotArchiveRequest(req, svc.bots, svc.turns, pathname);
+    if (archiveResponse) return archiveResponse;
+
     const avatarResponse = await handleAvatarRequest(req, svc.avatars, pathname);
     if (avatarResponse) return avatarResponse;
 
@@ -166,28 +154,11 @@ export function startHttp(svc: DaemonServices): { stop: () => Promise<void>; por
       return json(updated);
     }
 
-    if (pathname === "/api/computer/state" && req.method === "GET") return json(computerView(svc));
-    if (pathname === "/api/computer/take-control" && req.method === "POST") {
-      svc.computer.takeOver();
-      return json(computerView(svc));
-    }
-    if (pathname === "/api/computer/return-to-bot" && req.method === "POST") {
-      await svc.computer.imDone();
-      return json(computerView(svc));
-    }
-    if (pathname === "/api/computer/emergency-stop" && req.method === "POST") {
-      svc.computer.emergencyStop();
-      return json(computerView(svc));
-    }
-    if (pathname === "/api/computer/resume" && req.method === "POST") {
-      svc.computer.resumeAfterEmergencyStop();
-      return json(computerView(svc));
-    }
-    if (pathname === "/api/computer/snapshot" && req.method === "GET") {
-      const snap = await svc.computer.snapshot();
-      if (!snap) return new Response("no snapshot", { status: 503 });
-      return new Response(snap.bytes as unknown as BodyInit, { headers: { "content-type": snap.mediaType, "cache-control": "no-store" } });
-    }
+    const dictationResponse = await handleDictationRequest(req, svc.dictation, pathname);
+    if (dictationResponse) return dictationResponse;
+
+    const computerResponse = await handleComputerRequest(req, svc.computer);
+    if (computerResponse) return computerResponse;
 
     // Release: serve the built web UI if present.
     const dist = path.resolve(import.meta.dir, "../../../web/dist");

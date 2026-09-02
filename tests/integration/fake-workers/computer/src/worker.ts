@@ -14,6 +14,9 @@ const write = (msg: unknown): void => {
 write({ type: "hello", v: 1, worker: "computer:computer", pid: process.pid });
 
 const log: { action: string; hadLease: boolean }[] = [];
+const ONE_PIXEL_PNG =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+
 
 readJsonl(Bun.stdin.stream(), (raw) => {
   const msg = raw as { type: string; requestId?: string; action?: { name: string; args?: Record<string, unknown> }; lease?: { token: string } };
@@ -36,6 +39,9 @@ readJsonl(Bun.stdin.stream(), (raw) => {
       payload: {
         text: `fake-${action.name}#${log.length}`,
         ...(action.name === "list_windows" ? { windowList: [] } : {}),
+        ...(action.name === "screenshot"
+          ? { image: { mediaType: "image/png", base64: ONE_PIXEL_PNG } }
+          : {}),
       },
     });
     return;

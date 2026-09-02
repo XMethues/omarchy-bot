@@ -3,14 +3,19 @@ import { AppShell } from "@astryxdesign/core/AppShell";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { api } from "../lib/api.ts";
+import { api, apiErrorMessage } from "../lib/api.ts";
 import { startEventPump, type QueryTag } from "../lib/events.ts";
 import { Sidebar } from "../components/Sidebar.tsx";
+import { clearDraftsByBot } from "../lib/drafts.ts";
 import { ConversationHeader } from "../components/ConversationHeader.tsx";
 import { ChatPanel } from "../components/ChatPanel.tsx";
 import { CreateBotDialog } from "../components/CreateBotDialog.tsx";
 import { HistoryDialog } from "../components/HistoryDialog.tsx";
 import { ProfileDialog } from "../components/ProfileDialog.tsx";
+import { SettingsDialog } from "../components/SettingsDialog.tsx";
+import { ComputerSheet } from "../components/ComputerSheet.tsx";
+import { EmergencyComputerControl } from "../components/EmergencyComputerControl.tsx";
+import { VoiceSettingsControl, useVoiceAutoSendSetting } from "../components/VoiceSettingsControl.tsx";
 import styles from "../lib/styles.ts";
 
 export const Route = createFileRoute("/")({
@@ -28,6 +33,7 @@ const QUERY_KEYS: Tags = {
   bots: ["bots"],
   threads: ["threads"],
   messages: ["messages"],
+  dictation: ["dictation"],
   approvals: ["approvals"],
   turns: ["turns"],
   computer: ["computer"],
@@ -40,6 +46,10 @@ function HomeScreen(): JSX.Element {
   const [createOpen, setCreateOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
+  const [computerOpen, setComputerOpen] = useState(false);
+  const [computerError, setComputerError] = useState<string | undefined>(undefined);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [autoSendVoice, setAutoSendVoice] = useVoiceAutoSendSetting();
 
   const invalidate = useCallback(
     (tag: QueryTag, threadId?: string) => {
@@ -55,8 +65,58 @@ function HomeScreen(): JSX.Element {
   const agents = useQuery({ queryKey: ["agents"], queryFn: () => api.listAgents(), refetchInterval: 30_000 });
   const bots = useQuery({ queryKey: ["bots"], queryFn: () => api.listBots(), refetchInterval: 30_000 });
   const approvals = useQuery({ queryKey: ["approvals"], queryFn: () => api.listApprovals(), refetchInterval: 15_000 });
+  const allBots = useQuery({
+    queryKey: ["bots", "all"],
+    queryFn: () => api.listBots(true),
+    enabled: settingsOpen,
+  });
+  const dictation = useQuery({
+    queryKey: ["dictation"],
+    queryFn: () => api.dictation(),
+    refetchInterval: 15_000,
+  });
+  const dictationController = useMemo(
+    () => ({
+      state: dictation.data ?? { state: "unavailable" as const },
+      start: async () => {
+        const state = await api.startDictation();
+        qc.setQueryData(["dictation"], state);
+        return state;
+      },
+      stop: async () => {
+        const result = await api.stopDictation();
+        invalidate("dictation");
+        return result;
+      },
+      cancel: async () => {
+        const state = await api.cancelDictation();
+        qc.setQueryData(["dictation"], state);
+        return state;
+      },
+    }),
+    [dictation.data, invalidate, qc],
+  );
 
   const bot = useMemo(() => bots.data?.find((b) => b.id === selectedBotId), [bots.data, selectedBotId]);
+  const computer = useQuery({
+    queryKey: ["computer", bot?.id],
+    queryFn: () => api.computerState(bot?.id),
+    refetchInterval: 15_000,
+  });
+
+  const computerAction = useMutation({
+    mutationFn: (action: "take" | "return" | "stop" | "resume") => {
+      if (action === "take") return api.takeControl();
+      if (action === "return") return api.returnToBot();
+      if (action === "stop") return api.emergencyStop();
+      return api.resumeComputer();
+    },
+    onSuccess: () => {
+      setComputerError(undefined);
+      invalidate("computer");
+    },
+    onError: (error) => setComputerError(apiErrorMessage(error, "Computer control could not be updated.")),
+  });
 
   const threads = useQuery({
     queryKey: ["threads", bot?.id],
@@ -65,18 +125,16 @@ function HomeScreen(): JSX.Element {
     refetchInterval: 60_000,
   });
 
-  // Startup with no URL params: select the most recently active bot. Leaving
-  // the thread param absent lets the thread query below resolve its latest
-  // conversation; bots with no history resolve to an explicit blank draft.
+  // Startup and archive fallback select the most recent available Bot.
   useEffect(() => {
-    if (selectedBotId !== undefined) return;
-    const list = bots.data ?? [];
-    if (list.length === 0) return;
-    const ordered = [...list].sort(
-      (a, b) => Number(b.pinned) - Number(a.pinned) || (b.lastActivityAt ?? "").localeCompare(a.lastActivityAt ?? ""),
-    );
-    const first = ordered[0];
-    if (first === undefined) return;
+    if (bots.data === undefined) return;
+    if (selectedBotId !== undefined && bots.data.some((candidate) => candidate.id === selectedBotId)) return;
+    if (selectedBotId !== undefined) clearDraftsByBot(selectedBotId);
+    const first = bots.data[0];
+    if (first === undefined) {
+      if (selectedBotId !== undefined) void navigate({ search: {}, replace: true });
+      return;
+    }
     void navigate({ search: { bot: first.id }, replace: true });
   }, [selectedBotId, bots.data, navigate]);
 
@@ -116,11 +174,12 @@ function HomeScreen(): JSX.Element {
 
   const selectBot = useCallback(
     (botId: string): void => {
+      invalidate("computer");
       // Drop the thread param: the resolution effect below opens the newly
       // selected bot's most recent thread or a genuinely blank composer.
       void navigate({ search: { bot: botId } });
     },
-    [navigate],
+    [navigate, invalidate],
   );
 
   const onMessageSent = useCallback(
@@ -150,8 +209,12 @@ function HomeScreen(): JSX.Element {
           selectedBotId={selectedBotId}
           onSelectBot={selectBot}
           onCreateBot={() => setCreateOpen(true)}
-          onOpenSettings={() => {
-            /* Settings lands with T03; the button is named and inert until then. */
+          onOpenSettings={() => setSettingsOpen(true)}
+          onArchiveBot={(botId, body) => api.archiveBot(botId, body)}
+          onBotArchived={(botId) => {
+            qc.setQueryData(["bots"], (current: typeof bots.data) => current?.filter((candidate) => candidate.id !== botId));
+            invalidate("bots");
+            if (selectedBotId === botId) void navigate({ search: {}, replace: true });
           }}
         />
       }
@@ -162,6 +225,8 @@ function HomeScreen(): JSX.Element {
           thread={thread}
           onOpenHistory={() => setHistoryOpen(true)}
           onOpenProfile={() => setProfileOpen(true)}
+          computerState={computer.data?.state ?? "unavailable"}
+          onOpenComputer={() => setComputerOpen(true)}
         />
         <ChatPanel
           bot={bot}
@@ -169,6 +234,18 @@ function HomeScreen(): JSX.Element {
           messages={messages.data ?? []}
           pendingApprovalIds={pendingApprovalIds}
           onRespondApproval={(id, decision) => respondApproval.mutate({ id, decision })}
+          dictation={dictationController}
+          autoSendVoice={autoSendVoice}
+          onVoiceAutoSend={async (target, text) => {
+            const response =
+              target.threadId !== undefined
+                ? await api.sendMessage(target.threadId, { text, clientTag: crypto.randomUUID() })
+                : await api.sendBotMessage(target.botId, { text, clientTag: crypto.randomUUID() });
+            invalidate("threads");
+            invalidate("bots");
+            invalidate("messages", target.threadId);
+            if (target.threadId === undefined && bot?.id === target.botId && thread === undefined) onMessageSent(response.threadId);
+          }}
           onMessageSent={onMessageSent}
           isAgentReady={isAgentReady}
         />
@@ -177,8 +254,9 @@ function HomeScreen(): JSX.Element {
         isOpen={createOpen}
         onClose={() => setCreateOpen(false)}
         onCreated={(botId) => {
-          invalidate("bots");
-          void navigate({ search: { bot: botId, thread: "blank" } });
+          void qc.invalidateQueries({ queryKey: ["bots"] }).then(() => {
+            void navigate({ search: { bot: botId, thread: "blank" } });
+          });
         }}
       />
       {bot !== undefined ? (
@@ -198,6 +276,34 @@ function HomeScreen(): JSX.Element {
           />
         </>
       ) : null}
+      <SettingsDialog
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        archivedBots={allBots.data ?? []}
+        onRestoreBot={(botId) => api.restoreBot(botId)}
+        onBotRestored={() => invalidate("bots")}
+      >
+        <VoiceSettingsControl value={autoSendVoice} onChange={setAutoSendVoice} />
+      </SettingsDialog>
+      {bot !== undefined ? (
+        <ComputerSheet
+          bot={bot}
+          view={computer.data ?? { state: "unavailable", activity: "Computer state is loading." }}
+          snapshotUrl={api.computerImageUrl()}
+          open={computerOpen}
+          busy={computerAction.isPending}
+          {...(computerError !== undefined ? { error: computerError } : {})}
+          onClose={() => setComputerOpen(false)}
+          onTakeControl={() => computerAction.mutate("take")}
+          onReturnToBot={() => computerAction.mutate("return")}
+        />
+      ) : null}
+      <EmergencyComputerControl
+        view={computer.data ?? { state: "unavailable" }}
+        busy={computerAction.isPending}
+        onEmergencyStop={() => computerAction.mutate("stop")}
+        onResume={() => computerAction.mutate("resume")}
+      />
     </AppShell>
   );
 }

@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { Database } from "bun:sqlite";
 import type { AgentId } from "@omarchy-bot/domain";
-import type { AvatarDto, AvatarRecipeDto, BotDto, BotViewDto } from "@omarchy-bot/protocol";
+import type { AvatarDto, AvatarRecipeDto, BotDto, BotViewDto, TurnDto } from "@omarchy-bot/protocol";
 import type { EventLog } from "../events/eventLog.ts";
 import type { AgentsRegistry } from "../agents/registry.ts";
 import type { ThreadsService } from "../threads/threads.ts";
@@ -16,6 +16,11 @@ interface BotRow {
 interface BotStateRow {
   bot_id: string; last_activity_at: string | null; preview_text: string | null; preview_at: string | null;
   unread_count: number; unread_thread_id: string | null;
+}
+
+export interface BotTurnAborter {
+  abortTurn(turnId: string, reason: string): Promise<void>;
+  waitForTerminal(turnId: string): Promise<TurnDto>;
 }
 
 /** A new Bot ships with a deterministic generated avatar recipe. */
@@ -152,6 +157,46 @@ export class BotsService {
     this.events.append("bot", id, "bot.updated", { name, instructions });
     return this.getDto(id);
   }
+  /**
+   * Archive hides a Bot without changing its Threads, Agent reference, or
+   * native sessions. Active turns must reach a persisted terminal state first.
+   */
+  async archive(id: string, body: { confirmStop?: boolean }, turns: BotTurnAborter): Promise<BotDto> {
+    const row = this.#row(id);
+    if (!row) throw new HttpError(404, `unknown bot ${id}`);
+    if (row.archived) return this.#toDto(row);
+
+    const activeTurns = this.threads
+      .listThreads(id)
+      .flatMap((thread) => thread.activeTurn === undefined ? [] : [thread.activeTurn]);
+    if (activeTurns.length > 0 && body.confirmStop !== true) {
+      throw new HttpError(409, "working", { confirmRequired: true });
+    }
+    if (activeTurns.length > 0) {
+      const terminalTurns = activeTurns.map((turn) => turns.waitForTerminal(turn.id));
+      await Promise.all(activeTurns.map((turn) => turns.abortTurn(turn.id, "bot archived")));
+      await Promise.all(terminalTurns);
+    }
+
+    const now = new Date().toISOString();
+    this.db.query(`UPDATE bots SET archived = 1, archived_at = ?, updated_at = ? WHERE id = ?`).run(now, now, id);
+    const archived = this.getDto(id);
+    this.events.append("bot", id, "bot.archived", archived);
+    return archived;
+  }
+
+  restore(id: string): BotDto {
+    const row = this.#row(id);
+    if (!row) throw new HttpError(404, `unknown bot ${id}`);
+    if (!row.archived) return this.#toDto(row);
+
+    const now = new Date().toISOString();
+    this.db.query(`UPDATE bots SET archived = 0, archived_at = NULL, updated_at = ? WHERE id = ?`).run(now, id);
+    const restored = this.getDto(id);
+    this.events.append("bot", id, "bot.restored", restored);
+    return restored;
+  }
+
   agentId(id: string): AgentId {
     const r = this.#row(id);
     if (!r) throw new HttpError(404, `unknown bot ${id}`);

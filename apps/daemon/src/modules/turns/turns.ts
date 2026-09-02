@@ -25,6 +25,11 @@ interface TurnContext {
   abortReason?: string;
 }
 
+interface TerminalTurnWaiter {
+  resolve: (turn: TurnDto) => void;
+  timeout: ReturnType<typeof setTimeout>;
+}
+
 /** Local title from the first user message — no extra Agent call. */
 export function deriveTitle(text: string): string {
   const firstLine = text.trim().split("\n")[0]?.trim() ?? "";
@@ -44,6 +49,7 @@ function errorMessage(err: unknown): string {
 export class TurnService {
   #turns = new Map<string, TurnContext>(); // workerSessionId -> ctx
   #turnStarts = new Map<string, Promise<TurnContext>>();
+  #terminalWaiters = new Map<string, Set<TerminalTurnWaiter>>();
 
   constructor(
     private readonly db: Database,
@@ -71,6 +77,17 @@ export class TurnService {
       .query(`UPDATE turns SET status = ?${finished ? ", finished_at = ?" : ""}${reason !== undefined ? ", outcome_reason = ?" : ""} WHERE id = ?`)
       .run(...(finished && reason !== undefined ? [next, new Date().toISOString(), reason, turnId] : finished ? [next, new Date().toISOString(), turnId] : reason !== undefined ? [next, reason, turnId] : [next, turnId]));
     this.events.append("turn", turnId, "turn.status", { turnId, from, to: next, threadId: t.thread_id, botId: t.bot_id });
+    if (finished) {
+      const terminal = this.#turnDto(turnId);
+      const waiters = this.#terminalWaiters.get(turnId);
+      if (terminal !== undefined && waiters !== undefined) {
+        this.#terminalWaiters.delete(turnId);
+        for (const waiter of waiters) {
+          clearTimeout(waiter.timeout);
+          waiter.resolve(terminal);
+        }
+      }
+    }
   }
 
   /**
@@ -347,6 +364,30 @@ export class TurnService {
     this.threads.appendMessage(threadId, { author: { kind: "system" }, kind: "event", text });
   }
 
+  /**
+   * Resolve only after the persisted turn is terminal. Archive uses this
+   * barrier so a Bot cannot disappear while its native Agent is still working.
+   */
+  waitForTerminal(turnId: string, timeoutMs = 30_000): Promise<TurnDto> {
+    const current = this.#turnDto(turnId);
+    if (current === undefined) return Promise.reject(new HttpError(404, `unknown turn ${turnId}`));
+    if (isTerminalTurn(current.status)) return Promise.resolve(current);
+
+    return new Promise<TurnDto>((resolve, reject) => {
+      let waiter: TerminalTurnWaiter;
+      const timeout = setTimeout(() => {
+        const waiters = this.#terminalWaiters.get(turnId);
+        waiters?.delete(waiter);
+        if (waiters?.size === 0) this.#terminalWaiters.delete(turnId);
+        reject(new HttpError(502, `turn ${turnId} did not stop`));
+      }, timeoutMs);
+      waiter = { resolve, timeout };
+      const waiters = this.#terminalWaiters.get(turnId) ?? new Set<TerminalTurnWaiter>();
+      waiters.add(waiter);
+      this.#terminalWaiters.set(turnId, waiters);
+    });
+  }
+
   /** Explicit abort (archive-with-stop, tests). Terminal arrives via turn.cancelled. */
   async abortTurn(turnId: string, reason: string): Promise<void> {
     const t = this.threads.turnRow(turnId);
@@ -370,6 +411,12 @@ export class TurnService {
   parkForComputer(turnId: string): void {
     this.#setTurnStatus(turnId, "waiting_for_computer");
   }
+  resumeAfterComputer(turnId: string | undefined): void {
+    if (turnId === undefined) return;
+    const turn = this.threads.turnRow(turnId);
+    if (turn?.status === "waiting_for_computer") this.#setTurnStatus(turnId, "working");
+  }
+
 
   /** Computer lease handover: Take over parks the driving turn in waiting_for_input. */
   parkForHuman(turnId: string | undefined): void {

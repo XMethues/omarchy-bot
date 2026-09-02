@@ -9,7 +9,8 @@ export type QueryTag =
   | "messages"
   | "approvals"
   | "turns"
-  | "computer";
+  | "computer"
+  | "dictation";
 
 export type Invalidate = (tag: QueryTag, threadId?: string) => void;
 
@@ -38,6 +39,8 @@ function route(envelope: EventEnvelope, invalidate: Invalidate): void {
     case "bot.created":
     case "bot.updated":
     case "bot.activity":
+    case "bot.archived":
+    case "bot.restored":
     case "bot.read":
       invalidate("bots");
       return;
@@ -91,6 +94,9 @@ function route(envelope: EventEnvelope, invalidate: Invalidate): void {
     case "computer.action":
       invalidate("computer");
       invalidate("bots");
+      return;
+    case "dictation.state.changed":
+      invalidate("dictation");
       return;
     default:
       return;

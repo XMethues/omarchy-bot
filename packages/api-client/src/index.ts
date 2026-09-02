@@ -215,8 +215,8 @@ export class ApiClient {
   }
 
   // ----- computer -----
-  computerState(): Promise<ComputerViewDto> {
-    return this.req("/api/computer/state");
+  computerState(botId?: string): Promise<ComputerViewDto> {
+    return this.req(`/api/computer/state${botId === undefined ? "" : `?botId=${encodeURIComponent(botId)}`}`);
   }
   takeControl(): Promise<ComputerViewDto> {
     return this.req("/api/computer/take-control", { method: "POST" });
