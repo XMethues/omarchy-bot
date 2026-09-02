@@ -34,8 +34,6 @@ interface ChatPanelProps {
   bot?: BotViewDto;
   thread?: ThreadDto;
   messages: MessageDto[];
-  pendingApprovalIds: Set<string>;
-  onRespondApproval: (approvalId: string, decision: boolean) => void;
   onMessageSent: (threadId: string) => void;
   isAgentReady: boolean;
   dictation: DictationController;
@@ -67,7 +65,6 @@ function groupMessages(messages: MessageDto[]): Row[] {
   for (const message of messages) {
     const isActivity =
       message.kind === "tool" ||
-      message.kind === "approval" ||
       (message.kind === "event" && message.text === undefined);
     if (isActivity) {
       run.push(message);
@@ -165,8 +162,6 @@ export function ChatPanel({
   bot,
   thread,
   messages,
-  pendingApprovalIds,
-  onRespondApproval,
   onMessageSent,
   isAgentReady,
   dictation,
@@ -504,19 +499,13 @@ export function ChatPanel({
     for (const g of grouped) {
       if (g.kind === "activity") {
         const calls: ChatToolCallItem[] = g.items.map((message) => {
-          const tool = stringPayloadField(message.payload, "tool");
           const name = stringPayloadField(message.payload, "name");
           const capability = stringPayloadField(message.payload, "capability");
           const state = stringPayloadField(message.payload, "state");
-          const isApproval = message.kind === "approval";
           return {
             key: message.id,
-            name: isApproval
-              ? `Approval: ${tool ?? "tool"}`
-              : message.kind === "event"
-                ? capability ?? "Agent event"
-                : name ?? "Tool",
-            status: isApproval ? "pending" : state === "running" ? "running" : state === "error" ? "error" : "complete",
+            name: message.kind === "event" ? capability ?? "Agent event" : name ?? "Tool",
+            status: state === "running" ? "running" : state === "error" ? "error" : "complete",
             ...(message.payload !== undefined
               ? { resultDetail: <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{JSON.stringify(message.payload, null, 2)}</pre> }
               : {}),
@@ -527,25 +516,6 @@ export function ChatPanel({
             <div xstyle={styles.activityWrap}>
               <Collapsible trigger={`Activity (${g.items.length})`} defaultIsOpen={false} data-testid="activity">
                 <ChatToolCalls calls={calls} isExpanded />
-                {g.items.map((message) => {
-                  const approvalId = stringPayloadField(message.payload, "approvalId");
-                  if (message.kind !== "approval" || approvalId === undefined) return null;
-                  const tool = stringPayloadField(message.payload, "tool");
-                  const pending = pendingApprovalIds.has(approvalId);
-                  return (
-                    <div key={`${message.id}-approval`} xstyle={styles.approvalRow} data-testid="approval-card">
-                      <span>{`Approval requested: ${tool ?? "tool"}`}</span>
-                      {pending ? (
-                        <>
-                          <Button label="Allow" variant="primary" size="sm" onClick={() => onRespondApproval(approvalId, true)} data-testid="approval-allow" />
-                          <Button label="Deny" variant="secondary" size="sm" onClick={() => onRespondApproval(approvalId, false)} data-testid="approval-deny" />
-                        </>
-                      ) : (
-                        <span style={{ color: "var(--color-text-secondary)" }}>decided</span>
-                      )}
-                    </div>
-                  );
-                })}
               </Collapsible>
             </div>
           </ChatMessage>,
@@ -580,7 +550,7 @@ export function ChatPanel({
       );
     }
     return out;
-  }, [grouped, pendingApprovalIds, onRespondApproval, bot]);
+  }, [grouped, bot]);
 
   const voiceMessage =
     voiceState.state === "recording"

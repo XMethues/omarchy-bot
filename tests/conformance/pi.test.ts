@@ -1,13 +1,13 @@
 /**
- * Pi Bot conformance suite (agents-integration.md §6, ten steps) — the Gate 1
- * gatekeeper. Runs against the REAL pi worker (real model calls via the user's
+ * Pi Agent conformance suite (agents-integration.md §6, ten steps) — the Gate 1
+ * gatekeeper. Runs against the REAL Pi worker (real model calls via the user's
  * Pi credentials) and the REAL computer worker. On success it writes the
- * versioned conformance record that flips the pi Bot to `ready`.
+ * versioned conformance record that flips the Pi Agent to `ready`.
  *
  *   1. temp cwd + session            6. attachments (text file + 1×1 PNG)
  *   2. streamed fixed text           7. close → resume → history
  *   3. read-only tool lifecycle      8. worker exit leaves no orphans
- *   4. write tool deny + allow       9. capability inventory / event mapping
+ *   4. native write tool lifecycle    9. capability inventory / event mapping
  *   5. mid-turn cancel + steer      10. Computer fixture via the real broker
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
@@ -66,20 +66,10 @@ async function waitForEvent(before: number, pred: (e: { type: string; event: Rec
   }
 }
 
-async function awaitTerminal(before: number, timeoutMs: number, autoAnswer?: { allow: boolean }): Promise<{ type: string; event: Record<string, unknown> }[]> {
+async function awaitTerminal(before: number, timeoutMs: number): Promise<{ type: string; event: Record<string, unknown> }[]> {
   const deadline = Date.now() + timeoutMs;
-  const answered = new Set<string>();
   for (;;) {
     const recent = events.slice(before);
-    if (autoAnswer) {
-      for (const e of recent) {
-        if (e.type !== "permission.requested") continue;
-        const id = (e.event as { id?: string }).id!;
-        if (answered.has(id)) continue;
-        answered.add(id);
-        void pi.request({ type: "permission.respond", requestId: crypto.randomUUID(), sessionId: (e.event as { sessionId?: string }).sessionId!, permissionId: id, decision: { allow: autoAnswer.allow } }, 30_000);
-      }
-    }
     if (recent.some((e) => e.type === "turn.completed" || e.type === "turn.cancelled" || e.type === "error")) {
       return recent;
     }
@@ -125,7 +115,7 @@ describe("pi conformance (10 steps, real model)", () => {
       expect(sayRecent.some((e) => e.type === "turn.completed")).toBeTrue();
       console.log(`conformance: step 2 ok — streamed in ${deltaCount} deltas`);
 
-      // ---- Step 3: read-only tool, full lifecycle, no approval gate ----
+      // ---- Step 3: read-only native tool lifecycle ----
       const roFile = path.join(cwd, "conform-readonly.txt");
       writeFileSync(roFile, "READ-ONLY-CONFORM");
       const lsRecent = await turn(opened.sessionId, `Use the read tool (NOT bash) to read the file ${roFile}, then reply DONE.`);
@@ -133,26 +123,22 @@ describe("pi conformance (10 steps, real model)", () => {
       const lsDone = lsRecent.find((e) => e.type === "tool.completed");
       expect(lsDone).toBeDefined();
       expect((lsDone!.event as { isError?: boolean }).isError).toBeFalse();
-      expect(lsRecent.some((e) => e.type === "permission.requested")).toBeFalse();
-      console.log("conformance: step 3 ok — read-only tool lifecycle without approval");
+      console.log("conformance: step 3 ok — read-only native tool lifecycle");
 
-      // ---- Step 4: write tool — deny then allow ----
+      // ---- Step 4: native write tool lifecycle under Pi's own behavior ----
       const target = path.join(cwd, "conform-write-test.txt");
-      // Deny flow: send, auto-answer every permission with deny, then await completion.
-      const denyBefore = await send(opened.sessionId, `Create a file at exactly ${target} containing the single word OK. Use the bash tool.`);
-      const denyRecent = await awaitTerminal(denyBefore, 180_000, { allow: false });
-      expect(denyRecent.some((e) => e.type === "permission.requested")).toBeTrue();
-      expect(denyRecent.some((e) => e.type === "turn.completed")).toBeTrue();
-      await Bun.sleep(300);
-      expect(existsSync(target)).toBeFalse();
-      console.log("conformance: step 4a ok — write denied, no file created");
-
-      const allowBefore = await send(opened.sessionId, `Create a file at exactly ${target} containing the single word OK. Use the bash tool.`);
-      await awaitTerminal(allowBefore, 180_000, { allow: true });
+      const writeRecent = await turn(
+        opened.sessionId,
+        `Use the write tool to create a file at exactly ${target} containing the single word OK.`,
+        { timeoutMs: 180_000 },
+      );
+      expect(writeRecent.some((e) => e.type === "tool.started" && (e.event as { name?: string }).name === "write")).toBeTrue();
+      expect(writeRecent.some((e) => e.type === "tool.completed" && (e.event as { isError?: boolean }).isError === false)).toBeTrue();
+      expect(writeRecent.some((e) => e.type === "turn.completed")).toBeTrue();
       const deadline4 = Date.now() + 30_000;
       while (!existsSync(target) && Date.now() < deadline4) await Bun.sleep(200);
-      expect(existsSync(target)).toBeTrue();
-      console.log("conformance: step 4b ok — write allowed, file created");
+      expect((await Bun.file(target).text()).trim()).toBe("OK");
+      console.log("conformance: step 4 ok — native write tool completed");
 
       // ---- Step 5: cancel mid-turn; no late writes after cancel ----
       // Dedicated session: an aborted run must never pollute later turns.
@@ -306,7 +292,7 @@ describe("pi conformance (10 steps, real model)", () => {
       console.log("conformance: step 8 ok — worker restart clean (orphans checked in afterAll)");
 
       // ---- Step 9: capability inventory / event mapping ----
-      const REQUIRED_EVENT_TYPES = ["message.delta", "tool.started", "tool.updated", "tool.completed", "permission.requested", "turn.completed", "turn.cancelled"] as const;
+      const REQUIRED_EVENT_TYPES = ["message.delta", "tool.started", "tool.updated", "tool.completed", "turn.completed", "turn.cancelled"] as const;
       for (const t of REQUIRED_EVENT_TYPES) {
         expect(seenEventTypes.has(t)).toBeTrue();
       }
@@ -355,7 +341,7 @@ describe("pi conformance (10 steps, real model)", () => {
       console.log(`conformance: record written ${recordPath}`);
       const agent = await daemon.svc.agents.recheck("pi");
       expect(agent.status).toBe("ready");
-      console.log("conformance: pi bot is READY");
+      console.log("conformance: Pi Agent is READY");
     },
     600_000,
   );

@@ -2,7 +2,7 @@
 
 Status: accepted on 2026-09-02
 
-This document is the target product and interaction design for replacing the existing engineering dashboard. It supersedes conflicting UI and Bot-model assumptions in the older design documents; architecture details not contradicted here remain research inputs rather than product decisions.
+This document defines the accepted product and interaction design. Earlier architecture drafts remain research inputs only where they do not conflict with this specification.
 
 ## 1. Product model
 
@@ -65,10 +65,9 @@ Behavior:
 Desktop notifications are sent when a background Bot completes work or needs user action. They are suppressed while the user is already viewing that Bot in a focused window.
 
 ## 4. Bot creation and lifecycle
-
 ### Create Bot Sheet
 
-Use one simple Astryx Sheet rather than the existing four-step Wizard.
+Use one simple Astryx Sheet.
 
 Fields:
 
@@ -223,23 +222,6 @@ Bot-specific profile actions remain in the selected Bot's contextual menu rather
 
 Use Astryx components discovered through its CLI, especially SideNav, Layout, ChatMessageList, ChatComposer, Sheet/Dialog, SelectableCard, and Avatar. Extend composition and tokens where needed; do not recreate existing primitives by hand.
 
-## 13. Migration and implementation boundary
+## 13. Conformance boundary
 
-Implementation begins only after this design is confirmed.
-
-The migration must:
-
-- decouple Bot ID from Agent ID;
-- introduce a separate supported-Agent registry and user-created Bot records;
-- migrate existing Agent-shaped Bots and their Threads without data loss;
-- remove the target design's `ask`/`trusted` policy and Agent permission gate;
-- add Bot create/edit/archive/delete APIs;
-- add Thread history/title/search behavior;
-- implement managed attachments and window-scoped drafts;
-- implement Voxtype through the daemon bridge;
-- use native steering;
-- preserve the hidden Computer arbiter while replacing its engineering UI;
-- maintain per-Agent capability inventories and conformance evidence;
-- preserve unrelated user-authored and untracked repository files.
-
-Acceptance must cover migration, API contracts, responsive layout, accessibility, reduced motion, dictation outcomes, attachment lifecycle, native steering, background notifications, and Computer takeover states.
+The implementation preserves one public model across domain types, persistence, daemon APIs, worker adapters, and the web workspace. Migration coverage proves that existing conversations retain their Bot, Thread, message, attachment, profile, and native-session data while retired schema and replay events are removed. API, responsive layout, accessibility, reduced-motion, dictation, attachment, steering, background-attention, deletion, and Computer takeover suites defend the accepted behavior.

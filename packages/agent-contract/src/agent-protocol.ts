@@ -1,5 +1,4 @@
-import type { Decision } from "@omarchy-bot/domain";
-import type { Hello, OpenSessionOptionsLike, PermissionRequestDetailsLike } from "./shared.ts";
+import type { Hello, OpenSessionOptionsLike } from "./shared.ts";
 
 /**
  * Normalized agent events (agents-integration.md §2). Adapters may only emit a
@@ -10,20 +9,18 @@ export type AgentEvent =
   | { type: "tool.started"; sessionId: string; id: string; name: string; input: unknown }
   | { type: "tool.updated"; sessionId: string; id: string; output?: unknown }
   | { type: "tool.completed"; sessionId: string; id: string; output: unknown; isError: boolean }
-  | { type: "permission.requested"; sessionId: string; id: string; tool: string; details: PermissionRequestDetailsLike }
   | { type: "turn.completed"; sessionId: string; usage?: unknown }
   | { type: "turn.cancelled"; sessionId: string }
   | { type: "error"; sessionId?: string; message: string; retryable: boolean }
   | { type: "native"; sessionId?: string; agentId: string; capability: string; payload: unknown; sensitivity: "public" | "diagnostic" | "secret" };
 
-/** Protocol v2: sessions are owned by a Bot+Thread pair; steering is a first-class command. */
+/** Sessions are owned by a Bot+Thread pair; steering is a first-class command. */
 export type AgentCommand =
   | { type: "probe"; requestId: string }
   | { type: "session.open"; requestId: string; botId: string; threadId: string; options: OpenSessionOptionsLike }
   | { type: "session.resume"; requestId: string; botId: string; threadId: string; nativeSessionId: string; options: OpenSessionOptionsLike }
   | { type: "message.send"; requestId: string; sessionId: string; turnId: string; message: WorkerUserMessage }
   | { type: "message.steer"; requestId: string; sessionId: string; text: string }
-  | { type: "permission.respond"; requestId: string; sessionId: string; permissionId: string; decision: Decision }
   | { type: "turn.abort"; requestId: string; sessionId: string }
   | { type: "session.history"; requestId: string; sessionId: string }
   | { type: "session.close"; requestId: string; sessionId: string }

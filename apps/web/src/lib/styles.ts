@@ -78,13 +78,6 @@ const styles = stylex.create({
     whiteSpace: "pre-wrap",
   },
   activityWrap: { paddingInline: 8 },
-  approvalRow: {
-    display: "flex",
-    gap: 8,
-    alignItems: "center",
-    flexWrap: "wrap",
-    paddingInline: 8,
-  },
 });
 
 export default styles;

@@ -2,7 +2,6 @@ import { loadConfig } from "./config.ts";
 import { openDb, recoverOnStartup } from "../persistence/db.ts";
 import { EventLog } from "../modules/events/eventLog.ts";
 import { ThreadsService } from "../modules/threads/threads.ts";
-import { ApprovalsService } from "../modules/approvals/approvals.ts";
 import { AgentsRegistry } from "../modules/agents/registry.ts";
 import { BotsService } from "../modules/bots/bots.ts";
 import { BotDeletionService } from "../modules/bots/botDeletion.ts";
@@ -30,7 +29,6 @@ export async function main(): Promise<{ stop: () => Promise<void>; port: number;
   const events = new EventLog(db);
   const threads = new ThreadsService(db, events);
   const dictation = new DictationService(cfg.dictationDir, cfg.voxtypeBin ?? "voxtype", events);
-  const approvals = new ApprovalsService(db, events);
   const workersDir = process.env.OMARCHY_BOT_WORKERS_DIR ?? path.resolve(import.meta.dir, "../../../../workers");
   const agentsDir = path.resolve(workersDir);
   const supervisor = new Supervisor(
@@ -38,7 +36,7 @@ export async function main(): Promise<{ stop: () => Promise<void>; port: number;
       onAgentEvent: (agentId, event) => {
         if (!avatars.onAgentEvent(agentId, event)) turns.onAgentEvent(agentId, event);
       },
-      onWorkerCrash: (agentId, err) => events.append("bot", agentId, "agent.worker_crash", { agentId, message: err.message }),
+      onWorkerCrash: (agentId, err) => events.append("agent", agentId, "agent.worker_crash", { agentId, message: err.message }),
     },
     {
       agents: agentsDir,
@@ -51,7 +49,7 @@ export async function main(): Promise<{ stop: () => Promise<void>; port: number;
   attachments.gcStaged();
   const avatars = new AvatarService(bots, supervisor, cfg.avatarsDir);
   const botDeletions = new BotDeletionService(db, events, attachments, avatars, supervisor);
-  const turns = new TurnService(db, events, threads, approvals, agents, bots, attachments, supervisor, { turnTimeoutMs: cfg.turnTimeoutMs });
+  const turns = new TurnService(db, events, threads, agents, bots, attachments, supervisor, { turnTimeoutMs: cfg.turnTimeoutMs });
   const computer = new ComputerBroker(db, events, turns, supervisor, cfg);
 
   agents.init();
@@ -61,7 +59,7 @@ export async function main(): Promise<{ stop: () => Promise<void>; port: number;
     void agents.recheck(a.id).catch(() => {});
   }
 
-  const svc: DaemonServices = { cfg, db, events, agents, bots, botDeletions, threads, turns, approvals, avatars, attachments, dictation, computer, supervisor };
+  const svc: DaemonServices = { cfg, db, events, agents, bots, botDeletions, threads, turns, avatars, attachments, dictation, computer, supervisor };
   const http = startHttp(svc);
 
   // Periodic status file for the future bar widget (decoupled pattern from research.md §3).
@@ -70,7 +68,6 @@ export async function main(): Promise<{ stop: () => Promise<void>; port: number;
       writeStatusAtomic(cfg.statusPath, {
         ts: new Date().toISOString(),
         agents: agents.list().map((a) => ({ id: a.id, status: a.status })),
-        approvals: approvals.listPending().length,
         computer: computer.state(),
       });
     } catch {
@@ -87,7 +84,6 @@ export async function main(): Promise<{ stop: () => Promise<void>; port: number;
     stopping = true;
     // Safe shutdown order: stop new work before revoking shared resources.
     clearInterval(statusTimer);
-    approvals.failClosedAll(); // pending approvals resolve as unavailable
     await dictation.shutdown();
     computer.emergencyStop(); // revoke leases, stop input (also parks turns)
     await supervisor.stopAll(); // close workers

@@ -73,10 +73,6 @@ Token deltas update the projection directly and do not trigger query refetches.
 
 ## Rejected choices
 
-- Agent-as-Bot identity: replaced by user-created Bots referencing Agents.
-- Persistent global TopNav/dashboard: replaced by Sidebar + conversation layout.
-- Multi-step Bot Wizard and capability manifests: replaced by a simple creation Sheet and descriptive Agent inventory.
-- omarchy-bot `ask`/`trusted` permission layer: native Agent behavior is preserved.
 - Browser speech recognition/audio upload: Voxtype is the local speech-to-text provider.
 - Multiple design systems: Astryx is the sole component system.
 - TanStack Start: the Bun daemon already owns the server/API.

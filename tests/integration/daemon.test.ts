@@ -197,38 +197,23 @@ describe("integration: chat through a bot", () => {
     await until(async () => (await api<{ activeTurn?: unknown }>(h, "GET", `/api/threads/${sent.threadId}`)).activeTurn !== undefined);
     const res = await apiStatus(h, "POST", `/api/threads/${sent.threadId}/messages`, { text: "redirect" });
     expect(res.status).toBe(409);
-    // Abort to clean up the hanging turn.
-    await api(h, "POST", `/api/turns/${sent.turnId}/abort`);
+    // Internal cancellation remains available to archive/delete/timeout flows.
+    await h.svc.turns.abortTurn(sent.turnId, "test cleanup");
     await waitThreadIdle(h, sent.threadId);
     const msgs = await messages(sent.threadId);
     expect(msgs.some((m) => m.author.kind === "system" && (m.text ?? "").includes("steer unavailable"))).toBeTrue();
     expect(msgs.some((m) => m.author.kind === "system" && m.kind === "event" && (m.text ?? "").includes("cancel"))).toBeTrue();
   });
 
-  test("turn abort via /api/turns/:id/abort cancels", async () => {
-    const botId = await makeBot(h, "Abortable");
-    const sent = await sendToBot(h, botId, "hang");
-    await until(async () => (await api<{ activeTurn?: unknown }>(h, "GET", `/api/threads/${sent.threadId}`)).activeTurn !== undefined);
-    const thread = await api<{ activeTurn?: { id: string; status: string } }>(h, "GET", `/api/threads/${sent.threadId}`);
-    expect(thread.activeTurn).toBeDefined();
-    await api(h, "POST", `/api/turns/${sent.turnId}/abort`);
+  test("tool activity remains while approval and public abort routes are absent", async () => {
+    const botId = await makeBot(h, "Tool user");
+    const sent = await sendToBot(h, botId, "tool");
     await waitThreadIdle(h, sent.threadId);
     const msgs = await messages(sent.threadId);
-    expect(msgs.some((m) => m.author.kind === "system" && m.kind === "event" && (m.text ?? "").includes("cancel"))).toBeTrue();
-  });
-
-  test("approvals pass through and are decidable", async () => {
-    const botId = await makeBot(h, "Approver");
-    const sent = await sendToBot(h, botId, "ask");
-    await until(async () => (await api<{ status: string }[]>(h, "GET", "/api/approvals")).some((a) => a.status === "pending"));
-    const pending = (await api<{ id: string; status: string }[]>(h, "GET", "/api/approvals")).filter((a) => a.status === "pending");
-    expect(pending.length).toBe(1);
-    const decided = await api<{ status: string }>(h, "POST", `/api/approvals/${pending[0]!.id}/respond`, { decision: true });
-    expect(decided.status).toBe("allowed");
-    await waitThreadIdle(h, sent.threadId);
-    const msgs = await messages(sent.threadId);
-    expect(msgs.some((m) => m.kind === "approval")).toBeTrue();
     expect(msgs.some((m) => m.kind === "tool")).toBeTrue();
+    expect(msgs.some((m) => m.kind === "event")).toBeTrue();
+    expect((await apiStatus(h, "GET", "/api/approvals")).status).toBe(404);
+    expect((await apiStatus(h, "POST", `/api/turns/${sent.turnId}/abort`)).status).toBe(404);
   });
 });
 
@@ -264,7 +249,9 @@ describe("integration: legacy migration", () => {
     const db = new Database(path.join(legacyHome, "db.sqlite"), { create: true });
     db.exec("PRAGMA journal_mode = WAL");
     db.exec(`CREATE TABLE IF NOT EXISTS schema_migrations (name TEXT PRIMARY KEY, applied_at TEXT NOT NULL)`);
-    db.exec(MIGRATIONS[0]!.sql);
+    const initialMigration = MIGRATIONS.find((migration) => migration.name === "0001-initial");
+    if (initialMigration === undefined) throw new Error("0001 migration provenance is unavailable");
+    db.exec(initialMigration.sql);
     const now = "2026-09-01T00:00:00.000Z";
     // Legacy agent-shaped bots (id === agent id).
     db.query(`INSERT INTO bots (id, display_name, agent_version, status, enabled, created_at, updated_at) VALUES ('pi', 'Pi', '0.84.4', 'ready', 1, ?, ?)`).run(now, now);
@@ -277,6 +264,11 @@ describe("integration: legacy migration", () => {
     db.query(`INSERT INTO messages (id, thread_id, seq, author_kind, author_bot_id, author_role_id, kind, text, created_at) VALUES ('m-2', 'thr-1', 2, 'bot', 'pi', 'default', 'text', 'legacy reply', ?)`).run(now);
     db.query(`INSERT INTO messages (id, thread_id, seq, author_kind, author_bot_id, author_role_id, kind, text, created_at) VALUES ('m-3', 'thr-2', 1, 'user', NULL, NULL, 'text', 'second thread', ?)`).run(now);
     db.query(`INSERT INTO role_sessions (id, role_id, thread_id, native_session_id, created_at) VALUES ('rs-1', 'default', 'thr-1', 'fake://native-legacy', ?)`).run(now);
+    db.query(`INSERT INTO permissions (id, source, run_id, tool, status, created_at) VALUES ('perm-1', 'agent', NULL, 'bash', 'pending', ?)`).run(now);
+    db.query(
+      `INSERT INTO events (event_id, schema_version, occurred_at, aggregate_type, aggregate_id, type, payload)
+       VALUES ('legacy-event', 1, ?, 'bot', 'pi', 'permission.requested', '{"roleId":"default"}')`,
+    ).run(now);
     db.query(`INSERT INTO schema_migrations (name, applied_at) VALUES ('0001-initial', ?)`).run(now);
     db.close();
 
@@ -294,6 +286,8 @@ describe("integration: legacy migration", () => {
       expect(migratedPi.id).not.toBe("pi");
       expect(migratedPi.name).toBe("Pi");
       expect(migratedPi.instructions).toBe("be helpful");
+      expect("permissionPolicy" in migratedPi).toBeFalse();
+      expect("roleId" in migratedPi).toBeFalse();
 
       // Threads + messages preserved verbatim, re-pointed at the migrated bot.
       const threads = await api<{ id: string; botId: string; title: string }[]>(legacy, "GET", `/api/bots/${migratedPi.id}/threads`);
@@ -307,14 +301,44 @@ describe("integration: legacy migration", () => {
       expect(t1msgs[1]!.author.kind).toBe("bot");
       const t2msgs = await api<MessageView[]>(legacy, "GET", `/api/threads/thr-2/messages`);
       expect(t2msgs.length).toBe(1);
+      expect(t1msgs.every((message) => message.kind === "text")).toBeTrue();
+      expect(t1msgs.every((message) => !("authorBotId" in message) && !("authorRoleId" in message))).toBeTrue();
 
       // role_sessions -> thread_sessions survived.
       const t1 = await legacy.svc.threads.getThread("thr-1");
       expect(t1).toBeDefined();
       expect(legacy.svc.threads.getNativeSession("thr-1")).toBe("fake://native-legacy");
+      expect((await apiStatus(legacy, "GET", "/api/approvals")).status).toBe(404);
+      expect((await apiStatus(legacy, "POST", "/api/turns/legacy/abort")).status).toBe(404);
+      const oldestCursor = legacy.svc.events.oldestCursor();
+      const replay = legacy.svc.events.replay(Math.max(0, oldestCursor - 1), oldestCursor).events;
+      expect(replay.some((event) => event.eventId === "legacy-event")).toBeFalse();
+      expect(replay.filter((event) => event.type.startsWith("agent.")).every((event) => event.aggregateType === "agent")).toBeTrue();
 
-      // Second boot over the same home: nothing duplicates.
+      // The first boot physically contracts the schema before repeat boot.
+      const migratedBotIds = bots.map((bot) => bot.id).sort();
       await legacy.stop();
+      const inspected = new Database(path.join(legacyHome, "db.sqlite"));
+      const tables = (inspected.query(`SELECT name FROM sqlite_master WHERE type = 'table'`).all() as { name: string }[])
+        .map((row) => row.name);
+      for (const retired of ["roles", "tasks", "runs", "role_sessions", "permissions", "approvals", "settings"]) {
+        expect(tables).not.toContain(retired);
+      }
+      const messageColumns = (inspected.query(`PRAGMA table_info(messages)`).all() as { name: string }[]).map((row) => row.name);
+      const leaseColumns = (inspected.query(`PRAGMA table_info(computer_leases)`).all() as { name: string }[]).map((row) => row.name);
+      const botColumns = (inspected.query(`PRAGMA table_info(bots)`).all() as { name: string }[]).map((row) => row.name);
+      const threadColumns = (inspected.query(`PRAGMA table_info(threads)`).all() as { name: string }[]).map((row) => row.name);
+      expect(messageColumns).toEqual(["id", "thread_id", "seq", "author_kind", "kind", "text", "payload", "created_at"]);
+      expect(leaseColumns).toEqual(["id", "holder_is_human", "holder_bot_id", "turn_id", "token", "acquired_at", "expires_at"]);
+      expect(botColumns).not.toContain("permission_policy");
+      expect(threadColumns).not.toContain("role_id");
+      expect(threadColumns).not.toContain("kind");
+      const migrationRows = inspected.query(`SELECT name FROM schema_migrations WHERE name = '0004-contract-legacy-runtime'`).all();
+      expect(migrationRows.length).toBe(1);
+      expect((inspected.query(`SELECT COUNT(*) AS count FROM events WHERE event_id = 'legacy-event'`).get() as { count: number }).count).toBe(0);
+      inspected.close();
+
+      // Second boot over the same home: identities and owned data do not duplicate.
       const again = await startDaemon(legacyHome);
       try {
         const bots2 = await api<{ id: string }[]>(again, "GET", "/api/bots");
@@ -325,11 +349,76 @@ describe("integration: legacy migration", () => {
         expect(threads2.length).toBe(2);
         const t1msgs2 = await api<MessageView[]>(again, "GET", `/api/threads/thr-1/messages`);
         expect(t1msgs2.length).toBe(2);
+        expect(bots2.map((bot) => bot.id).sort()).toEqual(migratedBotIds);
+        expect((again.svc.db.query(`SELECT COUNT(*) AS count FROM schema_migrations WHERE name = '0004-contract-legacy-runtime'`).get() as { count: number }).count).toBe(1);
       } finally {
         await again.stop();
       }
     } finally {
       await legacy.stop();
+      rmSync(legacyHome, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  test("an already-0002 database settles blocked turns and removes stale replay data once", async () => {
+    const legacyHome = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-expanded-"));
+    const db = new Database(path.join(legacyHome, "db.sqlite"), { create: true });
+    db.exec(`CREATE TABLE schema_migrations (name TEXT PRIMARY KEY, applied_at TEXT NOT NULL)`);
+    const initialMigration = MIGRATIONS.find((migration) => migration.name === "0001-initial");
+    const expandedMigration = MIGRATIONS.find((migration) => migration.name === "0002-user-created-bots");
+    if (initialMigration === undefined || expandedMigration === undefined) throw new Error("legacy migration provenance is unavailable");
+    db.exec(initialMigration.sql);
+    db.query(`INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?)`).run(initialMigration.name, "2026-09-01T00:00:00.000Z");
+    db.exec(expandedMigration.sql);
+    db.query(`INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?)`).run(expandedMigration.name, "2026-09-01T00:01:00.000Z");
+    const now = "2026-09-01T00:02:00.000Z";
+    db.query(`INSERT OR IGNORE INTO agents (id, display_name, status, updated_at) VALUES ('pi', 'Pi', 'ready', ?)`).run(now);
+    db.query(
+      `INSERT INTO bots (id, name, instructions, agent_id, avatar_kind, avatar_recipe, created_at, updated_at)
+       VALUES ('bot_11111111111111111111111111111111', 'Existing', '', 'pi', 'generated', '{"rendererVersion":"9.4.3","style":"shapes","seed":"bot_11111111111111111111111111111111","options":{}}', ?, ?)`,
+    ).run(now, now);
+    db.query(`INSERT INTO threads (id, bot_id, title, created_at, updated_at) VALUES ('thread_existing', 'bot_11111111111111111111111111111111', 'Existing', ?, ?)`).run(now, now);
+    db.query(
+      `INSERT INTO turns (id, thread_id, bot_id, status, native_session_id, started_at)
+       VALUES ('turn_waiting', 'thread_existing', 'bot_11111111111111111111111111111111', 'waiting_for_approval', 'native-existing', ?)`,
+    ).run(now);
+    db.query(
+      `INSERT INTO messages (id, thread_id, seq, author_kind, kind, text, payload, created_at)
+       VALUES ('message_text', 'thread_existing', 1, 'user', 'text', 'keep me', NULL, ?),
+              ('message_approval', 'thread_existing', 2, 'system', 'approval', NULL, '{}', ?)`,
+    ).run(now, now);
+    db.query(
+      `INSERT INTO approvals (id, turn_id, tool, status, created_at)
+       VALUES ('approval_existing', 'turn_waiting', 'bash', 'pending', ?)`,
+    ).run(now);
+    db.query(`INSERT INTO settings (key, value) VALUES ('themeMode', 'dark')`).run();
+    db.query(
+      `INSERT INTO computer_leases (id, holder_is_human, holder_bot_id, holder_role_id, run_id, token, acquired_at, expires_at)
+       VALUES (1, 0, 'bot_11111111111111111111111111111111', 'default', 'turn_waiting', 'legacy-token', ?, ?)`,
+    ).run(now, "2026-09-01T01:02:00.000Z");
+    db.query(
+      `INSERT INTO events (event_id, schema_version, occurred_at, aggregate_type, aggregate_id, type, payload)
+       VALUES ('expanded-legacy-event', 1, ?, 'approval', 'approval_existing', 'approval.requested', '{}')`,
+    ).run(now);
+    db.close();
+
+    const contracted = await startDaemon(legacyHome);
+    try {
+      const turn = contracted.svc.db.query(`SELECT status, finished_at, outcome_reason FROM turns WHERE id = 'turn_waiting'`).get() as {
+        status: string;
+        finished_at: string | null;
+        outcome_reason: string | null;
+      };
+      expect(turn.status).toBe("failed");
+      expect(turn.finished_at).toBeString();
+      expect(turn.outcome_reason).toBe("blocked turn could not resume after runtime contract migration");
+      const messages = await api<MessageView[]>(contracted, "GET", "/api/threads/thread_existing/messages");
+      expect(messages.map((message) => message.id)).toEqual(["message_text"]);
+      const oldestCursor = contracted.svc.events.oldestCursor();
+      expect(contracted.svc.events.replay(Math.max(0, oldestCursor - 1), oldestCursor).events.some((event) => event.eventId === "expanded-legacy-event")).toBeFalse();
+      expect((contracted.svc.db.query(`SELECT COUNT(*) AS count FROM schema_migrations WHERE name = '0004-contract-legacy-runtime'`).get() as { count: number }).count).toBe(1);
+    } finally {
+      await contracted.stop();
       rmSync(legacyHome, { recursive: true, force: true });
     }
   }, 60_000);
@@ -364,7 +453,7 @@ describe("integration: daemon restart", () => {
     const db = openDb({ dbPath: `${h.home}/db.sqlite` } as never);
     const now = Date.now();
     db.query(
-      `INSERT OR REPLACE INTO computer_leases (id, holder_is_human, holder_bot_id, run_id, token, acquired_at, expires_at)
+      `INSERT OR REPLACE INTO computer_leases (id, holder_is_human, holder_bot_id, turn_id, token, acquired_at, expires_at)
        VALUES (1, 0, 'bot_restart', NULL, 'tok', ?, ?)`,
     ).run(new Date(now).toISOString(), new Date(now + 60_000).toISOString());
     db.close();

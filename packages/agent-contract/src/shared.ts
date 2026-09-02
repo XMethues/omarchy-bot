@@ -12,9 +12,3 @@ export interface OpenSessionOptionsLike {
   model?: string;
 }
 
-export interface PermissionRequestDetailsLike {
-  /** Human-readable summary for the approval card. */
-  summary?: string;
-  /** Arbitrary tool-specific detail (command, path, diff...). */
-  [k: string]: unknown;
-}

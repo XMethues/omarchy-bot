@@ -32,7 +32,7 @@ Steer, fork, compact, rename, native delete, subagents, plans, usage, and other 
 
 | Agent | Primary official surface | Adapter state | Notes |
 | --- | --- | --- | --- |
-| Pi | `@earendil-works/pi-coding-agent` TypeScript SDK | Implemented; target-model migration required | Native sessions, streaming, tools, abort, history, attachments, and SDK steering are available. |
+| Pi | `@earendil-works/pi-coding-agent` TypeScript SDK | Implemented | Native sessions, streaming, tools, internal abort, history, attachments, SDK steering, and native session deletion are available. |
 | OMP | `@oh-my-pi/pi-coding-agent` Bun SDK | Pending | Use the in-process SDK behind an isolated Bun worker; preserve extensions, skills, tools, and session events. |
 | Codex | `codex app-server --stdio` | Pending | Use `thread/start|resume`, `turn/start|interrupt`, generated protocol types, and structured server events. |
 | Claude Code | `@anthropic-ai/claude-agent-sdk` | Pending | Use `query()`, async multi-turn input, resume, interrupt, hooks, partial messages, and native tool decisions. |
@@ -81,14 +81,14 @@ Vendor SDKs and protocols run behind supervised local workers. The daemon/worker
 ```ts
 type AgentCommand =
   | { type: "probe"; requestId: string }
-  | { type: "session.open"; requestId: string; actor: ActorRef; options: OpenOptions }
-  | { type: "session.resume"; requestId: string; actor: ActorRef; nativeSessionId: string; options: OpenOptions }
-  | { type: "message.send"; requestId: string; sessionId: string; message: UserMessage }
-  | { type: "message.steer"; requestId: string; sessionId: string; message: UserMessage }
+  | { type: "session.open"; requestId: string; botId: string; threadId: string; options: OpenSessionOptions }
+  | { type: "session.resume"; requestId: string; botId: string; threadId: string; nativeSessionId: string; options: OpenSessionOptions }
+  | { type: "message.send"; requestId: string; sessionId: string; turnId: string; message: UserMessage }
+  | { type: "message.steer"; requestId: string; sessionId: string; text: string }
   | { type: "turn.abort"; requestId: string; sessionId: string }
   | { type: "session.history"; requestId: string; sessionId: string }
   | { type: "session.close"; requestId: string; sessionId: string }
-  | { type: "native.command"; requestId: string; sessionId: string; capability: string; payload: unknown };
+  | { type: "session.delete"; requestId: string; nativeSessionId: string };
 ```
 
 The exact accepted commands are versioned. An adapter may report an operation unavailable; it may not silently route it through a weaker headless or PTY transport.
@@ -99,7 +99,7 @@ Native events carry `agentId`, capability name, payload, and sensitivity. Secret
 
 ### Pi
 
-Use `createAgentSession`, `DefaultResourceLoader`, `SessionManager.create/open`, and the SDK event subscription. Load the user's native Pi resources. Use `session.steer(...)` for messages sent during active work and `session.abort()` only for explicit cancellation such as archiving an active Bot. Do not install the legacy omarchy-bot permission extension.
+Use `createAgentSession`, `DefaultResourceLoader`, `SessionManager.create/open`, and the SDK event subscription. Load the user's native Pi resources. Use `session.steer(...)` for messages sent during active work and `session.abort()` only for internal cancellation such as archiving or deleting an active Bot.
 
 ### Codex
 

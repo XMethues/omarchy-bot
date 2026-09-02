@@ -26,10 +26,10 @@ OpenAI's computer-use guide requires a human handoff for selected sensitive step
 
 The current implementation reflects that limitation:
 
-- `apps/daemon/src/modules/computer/broker.ts` grants one global input lease and queues other runs.
-- `apps/web/src/components/ComputerPanel.tsx` permanently exposes the holder, expiry, queue depth, Take over, I'm done, and Emergency stop.
-- The panel displays snapshots; it is not currently an interactive remote-desktop stream.
-- No implemented service detects physical keyboard or pointer activity and automatically transfers control.
+- `apps/daemon/src/modules/computer/broker.ts` serializes global input and keeps its lease and queue mechanics internal.
+- `apps/web/src/components/ComputerSheet.tsx` exposes only contextual state, preview, **Take control**, and **Return to Bot**.
+- `apps/web/src/components/EmergencyComputerControl.tsx` provides the separate global fail-safe.
+- No implemented service claims to detect physical keyboard or pointer activity and transfer control automatically.
 
 Removing coordination now would allow focus changes, typing, and clicks from separate Bots to interleave on one real desktop. Claiming seamless automatic takeover now would also exceed what the current input backend can verify.
 
@@ -37,7 +37,6 @@ Removing coordination now would allow focus changes, typing, and clicks from sep
 
 | Option | Safety | UX | Current feasibility |
 | --- | --- | --- | --- |
-| Keep the current visible global lease panel | Strong | Engineering-oriented; permanently noisy | Already implemented |
 | Remove all arbitration | Weak; input can interleave | Superficially simple | Easy but incorrect |
 | Automatic takeover on any human input | Potentially strong | Closest to invisible handoff | No reliable input-activity source today |
 | Invisible arbiter with contextual takeover | Strong | Quiet in normal use | Feasible now |
@@ -55,7 +54,7 @@ Keep the global input arbiter internally because all Bots currently target one r
 4. While the user has control, replace it with **Return to Bot**. Re-observe before resuming the Bot.
 5. If another Bot is waiting, show **Waiting for computer** on that Bot only; do not expose queue mechanics.
 6. Keep **Emergency stop** as a global fail-safe in an overflow/settings menu or system shortcut. Surface a persistent warning and **Resume** only while the stop is active.
-7. Let a direct **Stop** chat action abort the current Bot turn. Do not conflate stopping a task with taking control of the desktop.
+7. A new message steers active Bot work; archive, delete, timeout, and emergency flows retain internal cancellation.
 8. Preserve the selected Agent's native capabilities and native approvals. The arbiter serializes desktop input; it does not add a separate omarchy-bot authorization policy.
 
 This provides the quiet Grok-like normal state while remaining honest about the current single-screen backend.
@@ -68,4 +67,4 @@ Treat per-Bot screens as a separate architecture investigation. It must decide h
 
 ## Conclusion
 
-The best current solution is **not** the current control-heavy panel and **not** removing coordination. It is an internal global input arbiter with a quiet Computer Sheet and takeover controls rendered only when the state requires them. Grok's exact parallel model becomes appropriate only after omarchy-bot has genuine per-Bot screens.
+The implemented solution is an internal global input arbiter with a quiet Computer Sheet and takeover controls rendered only when the state requires them. Grok's exact parallel model becomes appropriate only after omarchy-bot has genuine per-Bot screens.

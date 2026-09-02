@@ -14,7 +14,7 @@ The accepted product specification is [`docs/workspace-redesign.md`](docs/worksp
 
 ## Status
 
-The repository is being migrated from the original Agent-as-Bot engineering dashboard to the accepted user-created-Bot workspace. Legacy design drafts have been removed rather than retained as a compatibility design.
+The repository implements the accepted user-created-Bot workspace and its contracted public model.
 
 The current vertical slice uses Pi and includes a Bun daemon, React web client, SQLite persistence, worker protocol, and computer worker. Other Agents become selectable only after their adapter and versioned conformance inventory pass.
 

@@ -4,9 +4,11 @@ import { isInputAction, leaseExpired } from "./computer.ts";
 import { isBotId } from "./ids.ts";
 
 describe("turn state machine", () => {
-  test("happy path", () => {
-    expect(canTransitionTurn("working", "waiting_for_approval")).toBeTrue();
-    expect(canTransitionTurn("waiting_for_approval", "working")).toBeTrue();
+  test("working can pause for current input and computer states before completion", () => {
+    expect(canTransitionTurn("working", "waiting_for_input")).toBeTrue();
+    expect(canTransitionTurn("waiting_for_input", "working")).toBeTrue();
+    expect(canTransitionTurn("working", "waiting_for_computer")).toBeTrue();
+    expect(canTransitionTurn("waiting_for_computer", "working")).toBeTrue();
     expect(canTransitionTurn("working", "completed")).toBeTrue();
   });
   test("terminals are absorbing", () => {

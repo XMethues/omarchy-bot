@@ -8,7 +8,7 @@ import type { TurnService } from "../turns/turns.ts";
 import type { Supervisor } from "../../supervision/supervisor.ts";
 import type { Config } from "../../bootstrap/config.ts";
 
-interface LeaseRow { holder_is_human: number; holder_bot_id: string | null; run_id: string | null; token: string; acquired_at: string; expires_at: string }
+interface LeaseRow { holder_is_human: number; holder_bot_id: string | null; turn_id: string | null; token: string; acquired_at: string; expires_at: string }
 interface ParkedBot {
   actor: { botId: string };
   turnId?: string;
@@ -25,8 +25,8 @@ export interface ComputerBrokerState {
 /**
  * ComputerBroker: the only grantor/revoker of the exclusive input lease and
  * the only path from agents to the desktop. Observation is never lease-gated;
- * every input action is audited; all failures are fail closed. (ADR 0004:
- * arbitration stays internal — no approval gate sits on this path.)
+ * input actions are serialized and failures are fail closed. (ADR 0004:
+ * arbitration stays internal and never filters Agent capabilities.)
  */
 export class ComputerBroker {
   #queue: ParkedBot[] = [];
@@ -56,17 +56,17 @@ export class ComputerBroker {
       return;
     }
     this.db
-      .query(`INSERT INTO computer_leases (id, holder_is_human, holder_bot_id, run_id, token, acquired_at, expires_at)
+      .query(`INSERT INTO computer_leases (id, holder_is_human, holder_bot_id, turn_id, token, acquired_at, expires_at)
               VALUES (1, ?, ?, ?, ?, ?, ?)
               ON CONFLICT(id) DO UPDATE SET holder_is_human=excluded.holder_is_human, holder_bot_id=excluded.holder_bot_id,
-                run_id=excluded.run_id, token=excluded.token,
+                turn_id=excluded.turn_id, token=excluded.token,
                 acquired_at=excluded.acquired_at, expires_at=excluded.expires_at`)
-      .run(l.holder_is_human, l.holder_bot_id, l.run_id, l.token, l.acquired_at, l.expires_at);
+      .run(l.holder_is_human, l.holder_bot_id, l.turn_id, l.token, l.acquired_at, l.expires_at);
   }
 
   #leaseMatchesActor(l: LeaseRow, actor: { botId: string }, turnId?: string): boolean {
     if (l.holder_is_human) return false;
-    return l.holder_bot_id === actor.botId && (turnId === undefined || l.run_id === turnId);
+    return l.holder_bot_id === actor.botId && (turnId === undefined || l.turn_id === turnId);
   }
 
   state(): ComputerBrokerState {
@@ -80,7 +80,7 @@ export class ComputerBroker {
       lease: l
         ? {
             holder: l.holder_is_human ? ("human" as const) : { botId: l.holder_bot_id! },
-            ...(l.run_id !== null ? { turnId: l.run_id } : {}),
+            ...(l.turn_id !== null ? { turnId: l.turn_id } : {}),
             acquiredAt: l.acquired_at,
             expiresAt: l.expires_at,
           }
@@ -101,16 +101,16 @@ export class ComputerBroker {
       const token = randomUUID();
       const now = new Date();
       this.#writeLease({
-        holder_is_human: 0, holder_bot_id: actor.botId, run_id: turnId ?? null,
+        holder_is_human: 0, holder_bot_id: actor.botId, turn_id: turnId ?? null,
         token, acquired_at: now.toISOString(), expires_at: new Date(now.getTime() + ttlMs).toISOString(),
       });
-      this.events.append("computer", "lease", "computer.lease.granted", { holder: actor, turnId, expiresAt: ttlMs });
+      this.events.append("computer", "state", "computer.state.changed", { botId: actor.botId });
       return { granted: true, token, queued: false };
     }
     if (this.#leaseMatchesActor(l, actor, turnId)) return { granted: true, token: l.token, queued: false };
     if (!this.#queue.some((q) => q.actor.botId === actor.botId && q.turnId === turnId)) {
       this.#queue.push({ actor, ...(turnId !== undefined ? { turnId } : {}) });
-      this.events.append("computer", "lease", "computer.lease.queued", { holder: actor, turnId: turnId ?? null, depth: this.#queue.length });
+      this.events.append("computer", "state", "computer.state.changed", { botId: actor.botId });
       if (turnId !== undefined) this.turns.parkForComputer(turnId);
     }
     return { granted: false, queued: true };
@@ -134,7 +134,7 @@ export class ComputerBroker {
       return;
     }
     this.#writeLease(undefined);
-    this.events.append("computer", "lease", "computer.lease.released", { holder: actor });
+    this.events.append("computer", "state", "computer.state.changed", actor === "human" ? {} : { botId: actor.botId });
     void this.#grantNext();
   }
 
@@ -143,31 +143,31 @@ export class ComputerBroker {
     const l = this.#lease();
     if (l && !l.holder_is_human) {
       const parkedBotId = l.holder_bot_id!;
-      const parkedTurn = l.run_id ?? undefined;
+      const parkedTurn = l.turn_id ?? undefined;
       this.#parkedForHuman = {
         actor: { botId: parkedBotId },
         ...(parkedTurn !== undefined ? { turnId: parkedTurn } : {}),
       };
       this.#writeLease(undefined);
-      this.events.append("computer", "lease", "computer.take_over", { from: { botId: parkedBotId }, turnId: parkedTurn });
       this.turns.parkForHuman(parkedTurn);
       this.#writeLease({
-        holder_is_human: 1, holder_bot_id: null, run_id: null,
+        holder_is_human: 1, holder_bot_id: null, turn_id: null,
         token: randomUUID(), acquired_at: new Date().toISOString(), expires_at: new Date(Date.now() + 24 * 3600_000).toISOString(),
       });
+      this.events.append("computer", "state", "computer.state.changed", { botId: parkedBotId });
     } else if (!l) {
       this.#parkedForHuman = undefined;
       this.#writeLease({
-        holder_is_human: 1, holder_bot_id: null, run_id: null,
+        holder_is_human: 1, holder_bot_id: null, turn_id: null,
         token: randomUUID(), acquired_at: new Date().toISOString(), expires_at: new Date(Date.now() + 24 * 3600_000).toISOString(),
       });
-      this.events.append("computer", "lease", "computer.take_over", { from: null });
+      this.events.append("computer", "state", "computer.state.changed", {});
     }
     return { ok: true, lease: this.state().lease };
   }
 
   /** User is done: re-observe successfully, then restore the parked Bot before any queued Bot. */
-  async imDone(note?: string): Promise<{ observation?: string | null }> {
+  async imDone(): Promise<{ observation?: string | null }> {
     const l = this.#lease();
     if (!l || !l.holder_is_human) return {};
 
@@ -176,7 +176,6 @@ export class ComputerBroker {
       15_000,
     )) as { text?: string } | undefined;
     const observation = result?.text;
-    this.events.append("computer", "lease", "computer.im_done", { note: note ?? null, observation: observation ?? null });
 
     const parked = this.#parkedForHuman;
     this.#parkedForHuman = undefined;
@@ -187,6 +186,7 @@ export class ComputerBroker {
     } else {
       await this.#grantNext();
     }
+    this.events.append("computer", "state", "computer.state.changed", parked === undefined ? {} : { botId: parked.actor.botId });
     return observation !== undefined ? { observation } : {};
   }
 
@@ -204,7 +204,7 @@ export class ComputerBroker {
       l !== undefined && !l.holder_is_human
         ? {
             actor: { botId: l.holder_bot_id! },
-            ...(l.run_id !== null ? { turnId: l.run_id } : {}),
+            ...(l.turn_id !== null ? { turnId: l.turn_id } : {}),
           }
         : undefined;
     if (this.#parkedForEmergency?.turnId !== undefined) {
@@ -212,7 +212,7 @@ export class ComputerBroker {
     }
     this.#parkedForHuman = undefined;
     this.#writeLease(undefined);
-    this.events.append("computer", "lease", "computer.emergency_stop", {});
+    this.events.append("computer", "state", "computer.state.changed", {});
   }
 
   async resumeAfterEmergencyStop(): Promise<void> {
@@ -229,13 +229,12 @@ export class ComputerBroker {
     } else {
       await this.#grantNext();
     }
-    this.events.append("computer", "lease", "computer.resumed", {});
+    this.events.append("computer", "state", "computer.state.changed", parked === undefined ? {} : { botId: parked.actor.botId });
   }
 
   /**
    * The single path for desktop actions. Input actions require a live lease;
-   * everything is audited. No capability/approval filter — the Agent follows
-   * its own native behavior (ADR 0003).
+   * the Agent follows its own native behavior (ADR 0003).
    */
   async act(actor: { botId: string } | "human", turnId: string | undefined, action: ComputerAction): Promise<{ text?: string; imageRef?: string; windowList?: unknown }> {
     if (this.#emergencyStopped && isInputAction(action.name)) throw new Error("computer input is emergency-stopped");
@@ -249,12 +248,11 @@ export class ComputerBroker {
       }
     }
 
-    this.events.append("computer", "lease", "computer.action", { actor, turnId: turnId ?? null, action: action.name, args: action.args, input: isInputAction(action.name) });
     const cmd: { type: "act"; action: ComputerAction; lease?: { holder: { botId: string } | "human"; turnId?: string; token: string } } = { type: "act", action };
     if (l && isInputAction(action.name)) {
       cmd.lease = {
         holder: l.holder_is_human ? ("human" as const) : { botId: l.holder_bot_id! },
-        ...(l.run_id !== null ? { turnId: l.run_id } : {}),
+        ...(l.turn_id !== null ? { turnId: l.turn_id } : {}),
         token: l.token,
       };
     }
@@ -274,6 +272,7 @@ export class ComputerBroker {
       imageRef = id;
       this.#lastImageAt = new Date().toISOString();
     }
+    this.events.append("computer", "state", "computer.state.changed", actor === "human" ? {} : { botId: actor.botId });
     return {
       ...(r?.text !== undefined ? { text: r.text } : {}),
       ...(imageRef !== undefined ? { imageRef } : {}),

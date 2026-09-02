@@ -1,9 +1,8 @@
 #!/usr/bin/env bun
 /**
  * Real Pi worker (agents-integration.md §4): LF-JSONL over stdio, `hello` first.
- * Each omarchy-bot thread maps to one native pi AgentSession with its own
- * session file; events are normalized. Pi keeps its native approval behavior —
- * NO omarchy-bot permission gate sits on this path (ADR 0003).
+ * Each omarchy-bot thread maps to one native Pi AgentSession with its own
+ * session file; normalized events preserve Pi's native runtime behavior.
  */
 import {
   createAgentSession,
@@ -90,8 +89,7 @@ async function openSession(
 ): Promise<void> {
   const sessionId = `s_${crypto.randomUUID()}`;
 
-  // Bot Job/Instructions are injected into the system prompt; pi itself keeps
-  // deciding when to ask for approvals.
+  // Bot Job/Instructions are injected into Pi's native system prompt.
   const loader = new DefaultResourceLoader({
     cwd: options.cwd,
     agentDir: getAgentDir(),
@@ -222,11 +220,6 @@ async function handleMessage(cmd: AgentCommand): Promise<void> {
         await entry.session.steer(cmd.text);
         reply({ requestId: cmd.requestId, ok: true, payload: { steered: true } });
         return;
-      }
-      case "permission.respond": {
-        // Pi's native approvals surface through permission.requested only when
-        // the adapter has them; without a gate there is nothing to forward.
-        throw new Error("pi does not route omarchy-bot permission decisions");
       }
       case "turn.abort": {
         const entry = sessionEntry(cmd.sessionId);

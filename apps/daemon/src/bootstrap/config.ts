@@ -18,7 +18,6 @@ export interface Config {
   port: number;
   /** TTL for bot-held computer leases; human leases never auto-expire. */
   leaseTtlMs: number;
-  approvalTimeoutMs: number;
   turnTimeoutMs: number;
 }
 
@@ -40,7 +39,6 @@ export function loadConfig(): Config {
     ...(voxtypeBin !== undefined ? { voxtypeBin } : {}),
     port: Number(process.env.OMARCHY_BOT_PORT ?? 7321),
     leaseTtlMs: Number(process.env.OMARCHY_BOT_LEASE_TTL_MS ?? 120_000),
-    approvalTimeoutMs: Number(process.env.OMARCHY_BOT_APPROVAL_TIMEOUT_MS ?? 300_000),
     turnTimeoutMs: Number(process.env.OMARCHY_BOT_TURN_TIMEOUT_MS ?? 600_000),
   };
   mkdirSync(dataDir, { recursive: true });

@@ -4,7 +4,6 @@ import type { AgentEvent, WorkerUserMessage } from "@omarchy-bot/agent-contract"
 import type { MessageDto, SendResultDto, TurnDto } from "@omarchy-bot/protocol";
 import { canTransitionTurn, isTerminalTurn, type AgentId, type TurnStatus } from "@omarchy-bot/domain";
 import type { ThreadsService } from "../threads/threads.ts";
-import type { ApprovalsService } from "../approvals/approvals.ts";
 import type { AgentsRegistry } from "../agents/registry.ts";
 import type { BotsService } from "../bots/bots.ts";
 import type { EventLog } from "../events/eventLog.ts";
@@ -20,8 +19,6 @@ interface TurnContext {
   workerSessionId: string;
   assistantBuf: string;
   turnTimeout: ReturnType<typeof setTimeout>;
-  /** daemon approval id -> worker-side permission id (p_…) */
-  approvalWorkerIds: Map<string, string>;
   /** Present only when cancellation came from the explicit abort path. */
   abortReason?: string;
 }
@@ -56,7 +53,6 @@ export class TurnService {
     private readonly db: Database,
     private readonly events: EventLog,
     private readonly threads: ThreadsService,
-    private readonly approvals: ApprovalsService,
     private readonly agents: AgentsRegistry,
     private readonly bots: BotsService,
     private readonly attachments: AttachmentsService,
@@ -204,7 +200,7 @@ export class TurnService {
 
     const ctx: TurnContext = {
       turnId, threadId, botId, agentId, workerSessionId: opened.sessionId,
-      assistantBuf: "", turnTimeout, approvalWorkerIds: new Map(),
+      assistantBuf: "", turnTimeout,
     };
     this.#turns.set(opened.sessionId, ctx);
     this.#setTurnStatus(turnId, "working");
@@ -264,14 +260,14 @@ export class TurnService {
     return { threadId: turn.threadId, messageId: userMsg.id, turnId: turn.id, action: "steered" };
   }
 
-  /** Central agent-event router: worker events become messages, approvals, turn transitions. */
+  /** Central agent-event router: worker events become transcript activity and turn transitions. */
   onAgentEvent(agentId: AgentId, event: AgentEvent): void {
     const sessionId = (event as { sessionId?: string }).sessionId;
     if (event.type !== "error" || sessionId !== undefined) {
       const ctx = sessionId !== undefined ? this.#turns.get(sessionId) : undefined;
       if (ctx) return this.#routeTurnEvent(ctx, event);
     }
-    if (event.type === "error") this.events.append("bot", agentId, "agent.error", { agentId, message: event.message, retryable: event.retryable });
+    if (event.type === "error") this.events.append("agent", agentId, "agent.error", { agentId, message: event.message, retryable: event.retryable });
   }
 
   #routeTurnEvent(ctx: TurnContext, event: AgentEvent): void {
@@ -305,27 +301,6 @@ export class TurnService {
           output: event.output,
           isError,
           final: isComplete,
-        });
-        break;
-      }
-      case "permission.requested": {
-        this.#setTurnStatus(ctx.turnId, "waiting_for_approval");
-        const approval = this.approvals.create({
-          tool: event.tool,
-          details: event.details,
-          turnId: ctx.turnId,
-          workerSessionId: ctx.workerSessionId,
-          timeoutMs: this.cfg.turnTimeoutMs,
-          threadId: ctx.threadId,
-        });
-        ctx.approvalWorkerIds.set(approval.id, event.id);
-        this.threads.appendMessage(ctx.threadId, {
-          author: { kind: "system" },
-          kind: "approval",
-          payload: { approvalId: approval.id, tool: event.tool, details: event.details },
-        });
-        void this.#awaitApproval(ctx, approval.id).catch((err: unknown) => {
-          this.#emitSystemNote(ctx.threadId, `approval forward failed: ${String(err)}`);
         });
         break;
       }
@@ -365,15 +340,6 @@ export class TurnService {
     }
   }
 
-  async #awaitApproval(ctx: TurnContext, approvalId: string): Promise<void> {
-    const allowed = await new Promise<boolean>((resolve) => this.approvals.registerWaiter(approvalId, resolve));
-    const t = this.threads.turnRow(ctx.turnId);
-    if (t && t.status === "waiting_for_approval") this.#setTurnStatus(ctx.turnId, "working");
-    const workerPermissionId = ctx.approvalWorkerIds.get(approvalId);
-    if (!workerPermissionId) throw new Error(`no worker permission id recorded for approval ${approvalId}`);
-    const w = await this.supervisor.agentWorker(ctx.agentId);
-    await w.request({ type: "permission.respond", sessionId: ctx.workerSessionId, permissionId: workerPermissionId, decision: { allow: allowed } }, 30_000);
-  }
 
   #finishTurn(ctx: TurnContext, outcome: "completed" | "cancelled" | "failed", reason?: string): void {
     clearTimeout(ctx.turnTimeout);
@@ -421,7 +387,7 @@ export class TurnService {
     });
   }
 
-  /** Explicit abort (archive-with-stop, tests). Terminal arrives via turn.cancelled. */
+  /** Internal cancellation for lifecycle services and timeout recovery. */
   async abortTurn(turnId: string, reason: string): Promise<void> {
     const t = this.threads.turnRow(turnId);
     if (!t || isTerminalTurn(t.status as TurnStatus)) return;

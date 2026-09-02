@@ -4,10 +4,7 @@
  * directives embedded in the message text:
  *
  *   say: <text>      stream deltas, assistant text, turn.completed
- *   ask              tool.started(bash) + permission.requested, waits for a
- *                    decision, then tool.completed + turn.completed
- *   deny-tool        like ask but only proceeds if the decision is allowed
- *   tool             tool.started + tool.completed (no approval)
+ *   tool             tool.started + native activity + tool.completed
  *   hang             streams a delta then waits for turn.abort; steering
  *                    during hang returns an error (failure path is testable)
  *   steer-echo       long atomic tool action; message.steer is acknowledged
@@ -39,7 +36,6 @@ interface FakeSession {
   streaming: boolean;
   directive?: string | undefined;
   steerReply?: ((text: string) => void) | undefined;
-  permissionReply?: ((allowed: boolean) => void) | undefined;
 }
 const sessions = new Map<string, FakeSession>();
 
@@ -112,8 +108,7 @@ readJsonl(Bun.stdin.stream(), (raw) => {
           respond(msg.requestId!, { accepted: true });
           return;
         }
-        if (text.startsWith("tool") || text.startsWith("ask") || text.startsWith("deny-tool")) {
-          const needApproval = text.startsWith("ask") || text.startsWith("deny-tool");
+        if (text.startsWith("tool")) {
           write({ type: "event", event: { type: "tool.started", sessionId, id: "t1", name: "bash", input: { command: "echo fake" } } });
           write({
             type: "event",
@@ -126,28 +121,6 @@ readJsonl(Bun.stdin.stream(), (raw) => {
               sensitivity: "public",
             },
           });
-          if (needApproval) {
-            const allowed = await new Promise<boolean>((resolve) => {
-              s.permissionReply = (a) => resolve(a);
-              write({
-                type: "event",
-                event: {
-                  type: "permission.requested",
-                  sessionId,
-                  id: "p1",
-                  tool: "bash",
-                  details: { summary: "fake bash request", command: "echo fake" },
-                },
-              });
-            });
-            write({ type: "event", event: { type: "tool.updated", sessionId, id: "t1", output: `decision: ${allowed}` } });
-            if (text.startsWith("deny-tool") && !allowed) {
-              write({ type: "event", event: { type: "tool.completed", sessionId, id: "t1", output: "denied", isError: false } });
-              write({ type: "event", event: { type: "turn.completed", sessionId } });
-              respond(msg.requestId!, { accepted: true });
-              return;
-            }
-          }
           write({ type: "event", event: { type: "tool.completed", sessionId, id: "t1", output: "fake output", isError: false } });
           write({ type: "event", event: { type: "message.delta", sessionId, text: "tool finished" } });
           await Bun.sleep(150);
@@ -229,13 +202,6 @@ readJsonl(Bun.stdin.stream(), (raw) => {
       }
       s.steerReply(text);
       respond(msg.requestId!, { steered: true });
-      break;
-    }
-    case "permission.respond": {
-      const { sessionId, decision } = msg as unknown as { sessionId: string; decision: { allow: boolean } };
-      const s = sessions.get(sessionId);
-      s?.permissionReply?.(decision.allow);
-      respond(msg.requestId!, {});
       break;
     }
     case "turn.abort": {

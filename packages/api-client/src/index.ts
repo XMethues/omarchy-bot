@@ -1,6 +1,5 @@
 import type {
   AgentDto,
-  ApprovalDto,
   AttachmentDto,
   ArchiveBodyDto,
   AvatarRecipeBodyDto,
@@ -18,14 +17,10 @@ import type {
   PatchBotBodyDto,
   PatchThreadBodyDto,
   PinBodyDto,
-  RespondApprovalBodyDto,
   SendMessageBodyDto,
   SendResultDto,
   ServerToClient,
-  SettingsDto,
-  SettingsPatchBodyDto,
   ThreadDto,
-  TurnDto,
 } from "@omarchy-bot/protocol";
 import { DeleteBotResultDto as DeleteBotResultSchema } from "@omarchy-bot/protocol";
 
@@ -165,10 +160,6 @@ export class ApiClient {
     return this.req(`/api/threads/${threadId}/messages`, { method: "POST", body: JSON.stringify(body) });
   }
 
-  // ----- turns -----
-  abortTurn(id: string): Promise<void> {
-    return this.req(`/api/turns/${id}/abort`, { method: "POST" });
-  }
 
   // ----- attachments -----
   async stageAttachment(botId: string, file: File): Promise<AttachmentDto> {
@@ -198,13 +189,6 @@ export class ApiClient {
     return `${this.base}/api/attachments/${id}`;
   }
 
-  // ----- approvals -----
-  listApprovals(): Promise<ApprovalDto[]> {
-    return this.req("/api/approvals");
-  }
-  respondApproval(id: string, body: RespondApprovalBodyDto): Promise<ApprovalDto> {
-    return this.req(`/api/approvals/${id}/respond`, { method: "POST", body: JSON.stringify(body) });
-  }
 
   // ----- dictation -----
   dictation(): Promise<DictationDto> {
@@ -220,13 +204,6 @@ export class ApiClient {
     return this.req("/api/dictation/cancel", { method: "POST" });
   }
 
-  // ----- settings -----
-  getSettings(): Promise<SettingsDto> {
-    return this.req("/api/settings");
-  }
-  patchSettings(body: SettingsPatchBodyDto): Promise<SettingsDto> {
-    return this.req("/api/settings", { method: "PATCH", body: JSON.stringify(body) });
-  }
 
   // ----- computer -----
   computerState(botId?: string): Promise<ComputerViewDto> {

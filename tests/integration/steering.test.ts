@@ -5,7 +5,7 @@ interface MessageView {
   id: string;
   seq: number;
   author: { kind: "user" | "bot" | "system" };
-  kind: "text" | "tool" | "approval" | "event";
+  kind: "text" | "tool" | "event";
   text?: string;
   payload?: Record<string, unknown>;
 }
@@ -55,11 +55,7 @@ async function messages(threadId: string): Promise<MessageView[]> {
 }
 
 async function abort(turnId: string): Promise<void> {
-  const response = await fetch(`${h.baseUrl}/api/turns/${turnId}/abort`, {
-    method: "POST",
-    headers: { "x-command-id": crypto.randomUUID() },
-  });
-  expect(response.status).toBe(202);
+  await h.svc.turns.abortTurn(turnId, "test cleanup");
 }
 
 describe("integration: native turn steering", () => {
@@ -179,21 +175,4 @@ describe("integration: native turn steering", () => {
     await waitThreadIdle(h, sent.threadId);
   });
 
-  test("explicit abort is a separate cancellation path", async () => {
-    const botId = await makeBot(h, "Explicit abort");
-    const sent = await sendToBot(h, botId, "hang");
-    await until(() => (rowForTurn(sent.turnId).worker_session_id?.length ?? 0) > 0);
-
-    await abort(sent.turnId);
-    await waitThreadIdle(h, sent.threadId);
-
-    const cancelled = rowForTurn(sent.turnId);
-    expect(cancelled.status).toBe("cancelled");
-    expect(cancelled.outcome_reason).toBe("user abort");
-    expect(cancelled.steer_count).toBe(0);
-    const transcript = await messages(sent.threadId);
-    expect(transcript.some((message) => message.author.kind === "system" && message.text === "turn cancelled: user abort")).toBeTrue();
-    expect(transcript.some((message) => message.author.kind === "system" && message.text?.startsWith("steer unavailable:"))).toBeFalse();
-    expect(transcript.filter((message) => message.author.kind === "user").map((message) => message.text)).toEqual(["hang"]);
-  });
 });

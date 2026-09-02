@@ -7,7 +7,6 @@ import type { BotsService } from "../modules/bots/bots.ts";
 import type { BotDeletionService } from "../modules/bots/botDeletion.ts";
 import type { ThreadsService } from "../modules/threads/threads.ts";
 import type { TurnService } from "../modules/turns/turns.ts";
-import type { ApprovalsService } from "../modules/approvals/approvals.ts";
 import type { ComputerBroker } from "../modules/computer/broker.ts";
 import type { AvatarService } from "../modules/avatars/avatarService.ts";
 import type { DictationService } from "../modules/dictation/dictationService.ts";
@@ -23,7 +22,7 @@ import { handleAttachmentRequest } from "./attachmentRoutes.ts";
 import type { Supervisor } from "../supervision/supervisor.ts";
 import { existsSync } from "node:fs";
 import path from "node:path";
-import { CreateBotBody, PatchBotBody, RespondApprovalBody, SendMessageBody } from "@omarchy-bot/protocol";
+import { CreateBotBody, PatchBotBody, SendMessageBody } from "@omarchy-bot/protocol";
 import { HttpError } from "../modules/bots/bots.ts";
 
 export interface DaemonServices {
@@ -35,7 +34,6 @@ export interface DaemonServices {
   botDeletions: BotDeletionService;
   threads: ThreadsService;
   turns: TurnService;
-  approvals: ApprovalsService;
   avatars: AvatarService;
   attachments: AttachmentsService;
   dictation: DictationService;
@@ -152,23 +150,6 @@ export function startHttp(svc: DaemonServices): { stop: () => Promise<void>; por
       return json(result, 202);
     }
 
-    const turnAbort = m(/^\/api\/turns\/([\w-]+)\/abort$/);
-    if (turnAbort && req.method === "POST") {
-      await svc.turns.abortTurn(turnAbort[1]!, "user abort");
-      return new Response(null, { status: 202 });
-    }
-
-    if (pathname === "/api/approvals" && req.method === "GET") return json(svc.approvals.list());
-    const approvalRespond = m(/^\/api\/approvals\/([\w-]+)\/respond$/);
-    if (approvalRespond && req.method === "POST") {
-      const body = await parseBody(req, RespondApprovalBody);
-      const updated = svc.approvals.respond(approvalRespond[1]!, {
-        decision: body.decision,
-        ...(body.note !== undefined ? { note: body.note } : {}),
-      });
-      if (!updated) return notFound("unknown approval");
-      return json(updated);
-    }
 
     const dictationResponse = await handleDictationRequest(req, svc.dictation, pathname);
     if (dictationResponse) return dictationResponse;

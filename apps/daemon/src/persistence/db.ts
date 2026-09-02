@@ -296,6 +296,59 @@ CREATE TABLE bot_native_session_deletions (
 );
 `,
   },
+  {
+    // Final expand-contract cutover. Historical tables above remain only as
+    // migration provenance; every live database converges on the current model.
+    name: "0004-contract-legacy-runtime",
+    sql: `
+UPDATE turns
+SET status = 'failed',
+    finished_at = COALESCE(finished_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    outcome_reason = 'blocked turn could not resume after runtime contract migration'
+WHERE status = 'waiting_for_approval';
+
+CREATE TABLE messages_new (
+  id TEXT PRIMARY KEY,
+  thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+  seq INTEGER NOT NULL,
+  author_kind TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  text TEXT,
+  payload TEXT,
+  created_at TEXT NOT NULL,
+  UNIQUE(thread_id, seq)
+);
+INSERT INTO messages_new (id, thread_id, seq, author_kind, kind, text, payload, created_at)
+SELECT id, thread_id, seq, author_kind, kind, text, payload, created_at
+FROM messages
+WHERE kind <> 'approval';
+DROP TABLE messages;
+ALTER TABLE messages_new RENAME TO messages;
+CREATE INDEX idx_messages_thread ON messages(thread_id, seq);
+
+CREATE TABLE computer_leases_new (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  holder_is_human INTEGER NOT NULL DEFAULT 0,
+  holder_bot_id TEXT,
+  turn_id TEXT,
+  token TEXT NOT NULL,
+  acquired_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL
+);
+INSERT INTO computer_leases_new (id, holder_is_human, holder_bot_id, turn_id, token, acquired_at, expires_at)
+SELECT id, holder_is_human, holder_bot_id, run_id, token, acquired_at, expires_at
+FROM computer_leases;
+DROP TABLE computer_leases;
+ALTER TABLE computer_leases_new RENAME TO computer_leases;
+
+DROP TABLE IF EXISTS approvals;
+DROP TABLE IF EXISTS settings;
+
+-- Replay begins at the contracted public model; no old aggregate identities,
+-- approval payloads, or lease diagnostics can cross the WebSocket boundary.
+DELETE FROM events;
+`,
+  },
 ];
 
 export function openDb(cfg: Config): Database {

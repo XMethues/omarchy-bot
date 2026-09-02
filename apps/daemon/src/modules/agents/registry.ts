@@ -57,7 +57,7 @@ export class AgentsRegistry {
     this.db
       .query(`UPDATE agents SET status = ?, reason = ?, agent_version = COALESCE(?, agent_version), updated_at = ? WHERE id = ?`)
       .run(status, reason ?? null, agentVersion ?? null, new Date().toISOString(), id);
-    this.events.append("bot", id, "agent.status", { agentId: id, status, ...(reason !== undefined ? { reason } : {}) });
+    this.events.append("agent", id, "agent.status", { agentId: id, status, ...(reason !== undefined ? { reason } : {}) });
   }
 
   toDto(row: AgentRow): AgentDto {

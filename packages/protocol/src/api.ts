@@ -67,7 +67,6 @@ export type BotViewDto = z.infer<typeof BotViewDto>;
 export const TurnStatusSchema = z.enum([
   "working",
   "waiting_for_input",
-  "waiting_for_approval",
   "waiting_for_computer",
   "completed",
   "cancelled",
@@ -116,7 +115,7 @@ export const AttachmentDto = z.object({
 });
 export type AttachmentDto = z.infer<typeof AttachmentDto>;
 
-export const MessageKindSchema = z.enum(["text", "tool", "approval", "event"]);
+export const MessageKindSchema = z.enum(["text", "tool", "event"]);
 export type MessageKindDto = z.infer<typeof MessageKindSchema>;
 
 export const MessageDto = z.object({
@@ -132,17 +131,6 @@ export const MessageDto = z.object({
 });
 export type MessageDto = z.infer<typeof MessageDto>;
 
-// ----- Approvals -----
-
-export const ApprovalDto = z.object({
-  id: z.string(),
-  turnId: z.string().optional(),
-  tool: z.string(),
-  details: z.unknown().optional(),
-  status: z.enum(["pending", "allowed", "denied", "expired"]),
-  createdAt: z.string(),
-});
-export type ApprovalDto = z.infer<typeof ApprovalDto>;
 
 // ----- Dictation -----
 
@@ -159,13 +147,6 @@ export const DictationResultDto = z.object({
 });
 export type DictationResultDto = z.infer<typeof DictationResultDto>;
 
-// ----- Settings -----
-
-export const SettingsDto = z.object({
-  autoSendVoice: z.boolean(),
-  themeMode: z.enum(["system", "light", "dark"]),
-});
-export type SettingsDto = z.infer<typeof SettingsDto>;
 
 // ----- Computer -----
 
@@ -241,14 +222,6 @@ export type SendMessageBodyDto = z.infer<typeof SendMessageBody>;
 export const PatchThreadBody = z.object({ title: z.string().trim().min(1).max(120) });
 export type PatchThreadBodyDto = z.infer<typeof PatchThreadBody>;
 
-export const SettingsPatchBody = z.object({
-  autoSendVoice: z.boolean().optional(),
-  themeMode: z.enum(["system", "light", "dark"]).optional(),
-});
-export type SettingsPatchBodyDto = z.infer<typeof SettingsPatchBody>;
-
-export const RespondApprovalBody = z.object({ decision: z.boolean(), note: z.string().optional() });
-export type RespondApprovalBodyDto = z.infer<typeof RespondApprovalBody>;
 
 // ----- turn send result -----
 

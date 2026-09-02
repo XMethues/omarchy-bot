@@ -176,12 +176,8 @@ export class BotDeletionService {
           `DELETE FROM events WHERE
              (aggregate_type = 'bot' AND aggregate_id = ?)
              OR (aggregate_type = 'thread' AND aggregate_id IN (SELECT id FROM threads WHERE bot_id = ?))
-             OR (aggregate_type = 'turn' AND aggregate_id IN (SELECT id FROM turns WHERE bot_id = ?))
-             OR (aggregate_type = 'approval' AND aggregate_id IN (
-               SELECT id FROM approvals WHERE turn_id IN (SELECT id FROM turns WHERE bot_id = ?)
-             ))`,
-        ).run(botId, botId, botId, botId);
-        this.db.query(`DELETE FROM approvals WHERE turn_id IN (SELECT id FROM turns WHERE bot_id = ?)`).run(botId);
+             OR (aggregate_type = 'turn' AND aggregate_id IN (SELECT id FROM turns WHERE bot_id = ?))`,
+        ).run(botId, botId, botId);
         this.db.query(`DELETE FROM messages WHERE thread_id IN (SELECT id FROM threads WHERE bot_id = ?)`).run(botId);
         this.db.query(`DELETE FROM attachments WHERE bot_id = ?`).run(botId);
         this.db.query(`DELETE FROM thread_sessions WHERE thread_id IN (SELECT id FROM threads WHERE bot_id = ?)`).run(botId);

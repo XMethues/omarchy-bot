@@ -36,7 +36,6 @@ const QUERY_KEYS: Tags = {
   threads: ["threads"],
   messages: ["messages"],
   dictation: ["dictation"],
-  approvals: ["approvals"],
   turns: ["turns"],
   computer: ["computer"],
 };
@@ -76,7 +75,6 @@ function HomeScreen(): JSX.Element {
   const agents = useQuery({ queryKey: ["agents"], queryFn: () => api.listAgents(), refetchInterval: 30_000 });
   const bots = useQuery({ queryKey: ["bots"], queryFn: () => api.listBots(), refetchInterval: 30_000 });
   botNamesRef.current = Object.fromEntries((bots.data ?? []).map((candidate) => [candidate.id, candidate.name]));
-  const approvals = useQuery({ queryKey: ["approvals"], queryFn: () => api.listApprovals(), refetchInterval: 15_000 });
   const allBots = useQuery({
     queryKey: ["bots", "all"],
     queryFn: () => api.listBots(true),
@@ -170,19 +168,6 @@ function HomeScreen(): JSX.Element {
     refetchInterval: 15_000,
   });
 
-  const respondApproval = useMutation({
-    mutationFn: ({ id, decision }: { id: string; decision: boolean }) => api.respondApproval(id, { decision }),
-    onSuccess: () => {
-      invalidate("approvals");
-      invalidate("turns");
-      invalidate("messages", thread?.id);
-    },
-  });
-
-  const pendingApprovalIds = useMemo(
-    () => new Set((approvals.data ?? []).filter((a) => a.status === "pending").map((a) => a.id)),
-    [approvals.data],
-  );
 
   const selectBot = useCallback(
     (botId: string): void => {
@@ -259,8 +244,6 @@ function HomeScreen(): JSX.Element {
           bot={bot}
           thread={thread}
           messages={messages.data ?? []}
-          pendingApprovalIds={pendingApprovalIds}
-          onRespondApproval={(id, decision) => respondApproval.mutate({ id, decision })}
           dictation={dictationController}
           autoSendVoice={autoSendVoice}
           onVoiceAutoSend={async (target, text) => {

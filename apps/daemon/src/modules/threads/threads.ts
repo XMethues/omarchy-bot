@@ -178,7 +178,7 @@ export class ThreadsService {
     const id = randomUUID();
     const now = new Date().toISOString();
     this.db
-      .query(`INSERT INTO messages (id, thread_id, seq, author_kind, author_bot_id, author_role_id, kind, text, payload, created_at) VALUES (?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?)`)
+      .query(`INSERT INTO messages (id, thread_id, seq, author_kind, kind, text, payload, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(id, threadId, seq, m.author.kind, m.kind, m.text ?? null, m.payload === undefined ? null : JSON.stringify(m.payload), now);
     this.touch(threadId);
     return this.getMessage(id)!;

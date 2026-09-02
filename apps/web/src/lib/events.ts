@@ -7,7 +7,6 @@ export type QueryTag =
   | "bots"
   | "threads"
   | "messages"
-  | "approvals"
   | "turns"
   | "computer"
   | "dictation";
@@ -148,21 +147,7 @@ function route(envelope: EventEnvelope, invalidate: Invalidate): void {
       invalidate("threads");
       invalidate("bots");
       return;
-    case "approval.requested":
-    case "approval.decided":
-    case "approval.expired":
-      invalidate("approvals");
-      invalidate("turns");
-      invalidate("messages", threadIdOf(envelope));
-      return;
-    case "computer.lease.granted":
-    case "computer.lease.released":
-    case "computer.lease.queued":
-    case "computer.take_over":
-    case "computer.im_done":
-    case "computer.emergency_stop":
-    case "computer.resumed":
-    case "computer.action":
+    case "computer.state.changed":
       invalidate("computer");
       invalidate("bots");
       return;

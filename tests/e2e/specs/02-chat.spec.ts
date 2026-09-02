@@ -57,7 +57,7 @@ test.describe("chat through a bot", () => {
     const threadId = await waitForPersistedThread(page);
     await expect(page.getByTestId("streaming-message")).toContainText(/hel|hello streaming/);
     await expect(page.getByTestId("assistant-message").last()).toContainText("hello streaming", { timeout: 15_000 });
-    await expect(page.getByTestId("thread-title")).toHaveText("say: hello streaming");
+    await expect(page.getByTestId("thread-history-trigger")).toHaveText("say: hello streaming");
 
     await page.reload();
     await expect(page).toHaveURL(new RegExp(`bot=${botId}.*thread=${threadId}`));
@@ -108,15 +108,15 @@ test.describe("chat through a bot", () => {
     await expect(page.getByTestId("conversation-header")).toContainText("Steering Bot");
     await expect(page.getByTestId("transcript")).toBeVisible();
     await expect(page.getByTestId("top-nav")).toHaveCount(0);
-    await expect(page.getByRole("button", { name: /stop/i })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: /^Stop$/i })).toHaveCount(0);
 
     await send(page, "steer-echo");
     await waitForPersistedThread(page);
-    await expect(page.getByTestId("streaming-message")).toContainText("working");
+    await expect(page.getByTestId("streaming-message")).toBeVisible();
     await expect(composerInput(page)).toBeEnabled();
 
     await send(page, "redirect e2e");
     await expect(page.getByTestId("assistant-message").last()).toContainText("steered: redirect e2e", { timeout: 15_000 });
-    await expect(page.getByRole("button", { name: /stop/i })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: /^Stop$/i })).toHaveCount(0);
   });
 });

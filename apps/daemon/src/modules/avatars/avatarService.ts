@@ -205,9 +205,6 @@ export class AvatarService {
       case "turn.cancelled":
         this.#settleRecipe(sessionId, new Error("avatar recipe agent cancelled"));
         return true;
-      case "permission.requested":
-        this.#settleRecipe(sessionId, new Error("avatar recipe agent requested an interactive permission"));
-        return true;
       case "error":
         this.#settleRecipe(sessionId, new Error(event.message));
         return true;

@@ -10,7 +10,7 @@ export interface Thread {
 /** The thread owns the Bot; messages carry no per-author Bot/Role identity. */
 export type Author = { kind: "user" } | { kind: "bot" } | { kind: "system" };
 
-export type MessageKind = "text" | "tool" | "approval" | "event";
+export type MessageKind = "text" | "tool" | "event";
 
 export interface Message {
   id: string;
@@ -19,7 +19,7 @@ export interface Message {
   author: Author;
   kind: MessageKind;
   text?: string;
-  /** For tool/approval cards; opaque to domain, shaped by protocol. */
+  /** Opaque structured data for tool and native event activity. */
   payload?: unknown;
   createdAt: string;
 }

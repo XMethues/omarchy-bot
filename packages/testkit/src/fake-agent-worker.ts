@@ -5,7 +5,7 @@ import type { AgentCommand, WorkerOutbound } from "@omarchy-bot/agent-contract";
 
 const scenario = (process.argv[2] ?? "echo").replace(/^--scenario=/, "");
 let sessionCounter = 0;
-const sessions = new Map<string, { nativeSessionId: string; turnActive: boolean; aborted: boolean; pendingPermission: { id: string; sessionId: string; resolve: () => void } | undefined }>();
+const sessions = new Map<string, { nativeSessionId: string; turnActive: boolean; aborted: boolean }>();
 let msgCounter = 0;
 
 const out = (m: WorkerOutbound) => writeJsonl(m);
@@ -20,7 +20,7 @@ function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-/** Stream a scripted turn: text deltas, a read tool, then (optionally) a write tool needing approval. */
+/** Stream a scripted turn with text and native tool activity. */
 async function runTurn(sessionId: string, turnId: string, text: string): Promise<void> {
   const s = sessions.get(sessionId)!;
   s.turnActive = true;
@@ -37,11 +37,6 @@ async function runTurn(sessionId: string, turnId: string, text: string): Promise
     out({ type: "event", event: { type: "tool.completed", sessionId, id: toolId, output: "fake file content", isError: false } });
 
     if (text.includes("!write")) {
-      const permId = `perm-${++msgCounter}`;
-      const gate = new Promise<void>((resolve) => (s.pendingPermission = { id: permId, sessionId, resolve }));
-      out({ type: "event", event: { type: "permission.requested", sessionId, id: permId, tool: "write_file", details: { summary: "write /tmp/fake-out.txt", path: "/tmp/fake-out.txt" } } });
-      await gate;
-      if (s.aborted) throw new Error("aborted");
       const wId = `tool-${++msgCounter}`;
       out({ type: "event", event: { type: "tool.started", sessionId, id: wId, name: "write_file", input: {} } });
       await sleep(20);
@@ -80,7 +75,7 @@ readJsonl(Bun.stdin.stream(), async (raw) => {
     case "session.open":
     case "session.resume": {
       const id = `s-${++sessionCounter}`;
-      sessions.set(id, { nativeSessionId: cmd.type === "session.resume" ? cmd.nativeSessionId : `native-${id}`, turnActive: false, aborted: false, pendingPermission: undefined });
+      sessions.set(id, { nativeSessionId: cmd.type === "session.resume" ? cmd.nativeSessionId : `native-${id}`, turnActive: false, aborted: false });
       result(cmd.requestId, true, { sessionId: id, nativeSessionId: sessions.get(id)!.nativeSessionId });
       break;
     }
@@ -97,12 +92,6 @@ readJsonl(Bun.stdin.stream(), async (raw) => {
       const s = sessions.get(cmd.sessionId);
       if (!s || !s.turnActive) return result(cmd.requestId, false, "cannot steer: session is not streaming");
       result(cmd.requestId, true, { steered: true });
-      break;
-    }
-    case "permission.respond": {
-      const s = sessions.get(cmd.sessionId);
-      if (s?.pendingPermission && s.pendingPermission.id === cmd.permissionId) s.pendingPermission.resolve();
-      result(cmd.requestId, true, { done: true });
       break;
     }
     case "turn.abort": {

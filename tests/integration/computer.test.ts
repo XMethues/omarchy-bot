@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import type { EventEnvelope } from "../../packages/protocol/src/index.ts";
 import { handleComputerRequest } from "../../apps/daemon/src/api/computerRoutes.ts";
 import { api, makeBot, sendToBot, startDaemon, type Harness } from "./helpers/harness.ts";
 
@@ -9,6 +10,24 @@ async function computerRequest<T>(h: Harness, method: string, path: string): Pro
     response,
     body: (contentType?.startsWith("application/json") ? await response.json() : await response.arrayBuffer()) as T,
   };
+}
+
+function isResumeEvent(event: EventEnvelope, turnId: string): boolean {
+  const payload = event.payload;
+  return event.type === "turn.status"
+    && payload !== null
+    && typeof payload === "object"
+    && "turnId" in payload
+    && payload.turnId === turnId
+    && "to" in payload
+    && payload.to === "working";
+}
+
+function hasContextualComputerPayload(event: EventEnvelope): boolean {
+  const payload = event.payload;
+  return payload !== null
+    && typeof payload === "object"
+    && Object.keys(payload).every((key) => key === "botId");
 }
 
 async function waitForTurnStatus(h: Harness, turnId: string, status: string): Promise<void> {
@@ -99,18 +118,13 @@ describe("contextual computer control", () => {
     await waitForTurnStatus(h, turn.turnId, "working");
 
     const events = h.svc.events.replay(0, h.svc.events.oldestCursor()).events;
-    const observed = events.find((event) => event.type === "computer.im_done");
-    const resumed = events.find(
-      (event) =>
-        event.cursor > (observed?.cursor ?? Number.MAX_SAFE_INTEGER) &&
-        event.type === "turn.status" &&
-        (event.payload as { turnId?: string; to?: string }).turnId === turn.turnId &&
-        (event.payload as { to?: string }).to === "working",
-    );
-    expect(observed).toBeDefined();
-    expect((observed?.payload as { observation?: string }).observation).toMatch(/^fake-observe#/);
+    const resumed = events.find((event) => isResumeEvent(event, turn.turnId));
+    const stateChanges = events.filter((event) => event.aggregateType === "computer");
     expect(resumed).toBeDefined();
-    expect(observed!.cursor).toBeLessThan(resumed!.cursor);
+    expect(stateChanges.length).toBeGreaterThan(0);
+    expect(stateChanges.every((event) => event.aggregateId === "state" && event.type === "computer.state.changed")).toBeTrue();
+    expect(stateChanges.every(hasContextualComputerPayload)).toBeTrue();
+    expect(stateChanges.some((event) => event.cursor < resumed!.cursor)).toBeTrue();
   });
 
   test("input leases serialize bots while observation remains ownership-free", async () => {
@@ -143,15 +157,16 @@ describe("contextual computer control", () => {
     });
   });
 
-  test("open_url needs only the active lease and never creates an omarchy-bot approval", async () => {
-    const botId = await makeBot(h, "Native Approval Bot");
+  test("open_url needs only the active lease and reports contextual state", async () => {
+    const botId = await makeBot(h, "Computer user");
     const lease = await h.svc.computer.acquire({ botId }, undefined);
 
     await expect(h.svc.computer.act({ botId }, undefined, { name: "open_url", args: { url: "https://example.com" } })).resolves.toMatchObject({
       text: expect.stringMatching(/^fake-open_url#/),
     });
-    expect(h.svc.approvals.list()).toEqual([]);
     expect(lease.granted).toBeTrue();
+    expect((await computerRequest<{ state: string; botId?: string }>(h, "GET", `/api/computer/state?botId=${botId}`)).body)
+      .toMatchObject({ state: "bot-using", botId });
   });
 
   test("emergency stop revokes input globally while leaving observation available until resume", async () => {
