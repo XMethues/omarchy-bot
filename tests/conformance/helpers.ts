@@ -26,6 +26,7 @@ export async function startConformanceDaemon(): Promise<ConformanceDaemon> {
   process.env.OMARCHY_BOT_PORT = "0";
   delete process.env.OMARCHY_BOT_WORKERS_DIR; // real workers
 
+  // Dynamic import: the harness mutates process.env above; importing main.ts fresh keeps that contract explicit.
   const { main } = await import("../../apps/daemon/src/bootstrap/main.ts");
   const { stop, port, svc } = await main();
   return { baseUrl: `http://127.0.0.1:${port}`, port, home, svc, stop };

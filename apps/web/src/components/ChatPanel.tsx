@@ -1,205 +1,242 @@
+import type { JSX, ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { ChatComposer } from "@astryxdesign/core/Chat";
+import { ChatMessage } from "@astryxdesign/core/Chat";
+import { ChatMessageBubble } from "@astryxdesign/core/Chat";
+import { ChatMessageList } from "@astryxdesign/core/Chat";
+import { ChatSystemMessage } from "@astryxdesign/core/Chat";
+import { ChatToolCalls, type ChatToolCallItem } from "@astryxdesign/core/Chat";
+import { ChatLayout } from "@astryxdesign/core/Chat";
+import { Collapsible } from "@astryxdesign/core/Collapsible";
 import { Button } from "@astryxdesign/core/Button";
-import { Card } from "@astryxdesign/core/Card";
-import { Text } from "@astryxdesign/core/Text";
-import { VStack } from "@astryxdesign/core/VStack";
-import { HStack } from "@astryxdesign/core/HStack";
-import { TextArea } from "@astryxdesign/core/TextArea";
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { api } from "../lib/api.ts";
+import type { BotViewDto, MessageDto, ThreadDto } from "@omarchy-bot/protocol";
 import { getDelta, subscribeDeltas } from "../lib/live.ts";
+import { api, apiErrorMessage, trimSendText } from "../lib/api.ts";
+import { AvatarView } from "./AvatarView.tsx";
 import styles from "../lib/styles.ts";
-import { TASK_STATUS_VARIANT } from "./StatusBadge.tsx";
-import { Badge } from "@astryxdesign/core/Badge";
-import type { BotDto, MessageDto, TaskDto, ThreadDto } from "@omarchy-bot/protocol";
 
-const TERMINAL_TASK = new Set(["completed", "cancelled", "failed"]);
-
-function ToolCard({ message }: { message: MessageDto }) {
-  const p = (message.payload ?? {}) as { toolId?: string; name?: string; state?: string; input?: unknown };
-  return (
-    <Card padding={2}>
-      <VStack gap={1}>
-        <HStack gap={2}>
-          <Text type="label">tool: {p.name ?? "?"}</Text>
-          <Text type="supporting" size="2xs">
-            {p.state ?? ""}
-          </Text>
-        </HStack>
-        {p.input !== undefined && (
-          <Text type="code" size="2xs" as="div">
-            {JSON.stringify(p.input).slice(0, 300)}
-          </Text>
-        )}
-      </VStack>
-    </Card>
-  );
-}
-
-function ApprovalCard({
-  message,
-  pendingIds,
-  onRespond,
-}: {
-  message: MessageDto;
-  pendingIds: Set<string>;
-  onRespond: (permissionId: string, decision: boolean) => void;
-}) {
-  const p = (message.payload ?? {}) as { permissionId?: string; tool?: string; details?: { summary?: string } };
-  const permissionId = p.permissionId ?? "";
-  const isPending = pendingIds.has(permissionId);
-  return (
-    <Card padding={2}>
-      <VStack gap={1.5}>
-        <Text type="label">Permission needed: {p.tool ?? "unknown tool"}</Text>
-        {p.details?.summary !== undefined && (
-          <Text type="supporting">{String(p.details.summary).slice(0, 400)}</Text>
-        )}
-        {isPending ? (
-          <HStack gap={2}>
-            <Button label="Allow" variant="primary" size="sm" onClick={() => onRespond(permissionId, true)} />
-            <Button label="Deny" variant="destructive" size="sm" onClick={() => onRespond(permissionId, false)} />
-          </HStack>
-        ) : (
-          <Text type="supporting" size="2xs">
-            decided
-          </Text>
-        )}
-      </VStack>
-    </Card>
-  );
-}
-
-function MessageRow({ message }: { message: MessageDto }) {
-  if (message.kind === "tool") return <ToolCard message={message} />;
-  if (message.kind === "approval") return null; // rendered separately with live pending state
-  if (message.kind === "event") {
-    return (
-      <Text type="supporting" size="2xs" as="p">
-        {message.text}
-      </Text>
-    );
-  }
-  const isUser = message.author.kind === "user";
-  return (
-    <VStack gap={0.5} xstyle={isUser ? styles.messageEnd : styles.messageStart}>
-      <Text type="supporting" size="2xs">
-        {isUser ? "you" : message.author.kind === "bot" ? message.author.botId : "system"} ·{" "}
-        {new Date(message.createdAt).toLocaleTimeString()}
-      </Text>
-      <Card padding={2}>{message.text ?? ""}</Card>
-    </VStack>
-  );
-}
-
-export function ChatPanel({
-  thread,
-  bot,
-  messages,
-  tasks,
-  pendingPermissionIds,
-  onRespond,
-  onSnapshotRequired,
-}: {
-  thread: ThreadDto;
-  bot: BotDto;
+interface ChatPanelProps {
+  bot?: BotViewDto;
+  thread?: ThreadDto;
   messages: MessageDto[];
-  tasks: TaskDto[];
-  pendingPermissionIds: Set<string>;
-  onRespond: (permissionId: string, decision: boolean) => void;
-  onSnapshotRequired: () => void;
-}) {
-  const [draft, setDraft] = useState("");
-  const [sending, setSending] = useState(false);
-  const bottomRef = useRef<HTMLDivElement>(null);
-  const delta = useSyncExternalStore(
-    subscribeDeltas,
-    () => getDelta(thread.id),
-    () => "",
-  );
+  pendingApprovalIds: Set<string>;
+  onRespondApproval: (approvalId: string, decision: boolean) => void;
+  onMessageSent: (threadId: string) => void;
+  isAgentReady: boolean;
+}
 
-  const activeTask = useMemo(
-    () => tasks.find((t) => t.threadId === thread.id && !TERMINAL_TASK.has(t.status)),
-    [tasks, thread.id],
-  );
+function stringPayloadField(payload: unknown, field: string): string | undefined {
+  if (payload === null || typeof payload !== "object" || !(field in payload)) return undefined;
+  const value = payload[field];
+  return typeof value === "string" ? value : undefined;
+}
 
-  const approvals = messages.filter((m) => m.kind === "approval");
+type Row = { kind: "message"; message: MessageDto } | { kind: "activity"; key: string; items: MessageDto[] };
 
-  useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [messages.length, delta, activeTask?.status]);
-
-  const send = async (): Promise<void> => {
-    const text = draft.trim();
-    if (!text || sending) return;
-    setSending(true);
-    try {
-      await api.sendMessage(thread.id, { text, clientTag: crypto.randomUUID() });
-      setDraft("");
-    } catch (err) {
-      // busy or failed — surface as a note; events pump keeps state fresh
-      console.error(err);
-    } finally {
-      setSending(false);
+/**
+ * Consecutive non-text transcript records collapse into one Activity block.
+ * Plain-language system notes remain inline so failures are never hidden.
+ */
+function groupMessages(messages: MessageDto[]): Row[] {
+  const out: Row[] = [];
+  let run: MessageDto[] = [];
+  const flushRun = (): void => {
+    if (run.length > 0) {
+      out.push({ kind: "activity", key: run[0]!.id, items: run });
+      run = [];
     }
   };
+  for (const message of messages) {
+    const isActivity =
+      message.kind === "tool" ||
+      message.kind === "approval" ||
+      (message.kind === "event" && message.text === undefined);
+    if (isActivity) {
+      run.push(message);
+      continue;
+    }
+    flushRun();
+    out.push({ kind: "message", message });
+  }
+  flushRun();
+  return out;
+}
 
-  const runningTask = activeTask ?? tasks.filter((t) => t.threadId === thread.id).at(-1);
+/** Window-scoped drafts: unsent text belongs to one bot+thread per window. */
+function draftKey(botId: string, threadId?: string): string {
+  return `draft:v1:${botId}:${threadId ?? "blank"}`;
+}
+
+export function ChatPanel({ bot, thread, messages, pendingApprovalIds, onRespondApproval, onMessageSent, isAgentReady }: ChatPanelProps): JSX.Element {
+  const [draft, setDraft] = useState("");
+  const [submitError, setSubmitError] = useState<string | undefined>(undefined);
+  const key = bot !== undefined ? draftKey(bot.id, thread?.id) : undefined;
+
+  // Restore the window-local draft for this bot+thread; hide (not move) others.
+  useEffect(() => {
+    setSubmitError(undefined);
+    if (key === undefined) {
+      setDraft("");
+      return;
+    }
+    try {
+      setDraft(sessionStorage.getItem(key) ?? "");
+    } catch {
+      setDraft("");
+    }
+  }, [key]);
+
+  const onDraftChange = useCallback(
+    (value: string) => {
+      setDraft(value);
+      if (key !== undefined) {
+        try {
+          if (value !== "") sessionStorage.setItem(key, value);
+          else sessionStorage.removeItem(key);
+        } catch {
+          /* storage unavailable — draft lives in memory only */
+        }
+      }
+    },
+    [key],
+  );
+
+  const delta = useSyncExternalStore(
+    subscribeDeltas,
+    () => (thread !== undefined ? getDelta(thread.id) : ""),
+    () => "",
+  );
+  const isStreaming = thread !== undefined && delta.length > 0;
+
+  const grouped = useMemo(() => groupMessages(messages), [messages]);
+
+  const send = useCallback(
+    async (text: string): Promise<void> => {
+      const trimmed = trimSendText(text);
+      if (trimmed.length === 0 || bot === undefined) return;
+      setSubmitError(undefined);
+      try {
+        if (thread !== undefined) {
+          const res = await api.sendMessage(thread.id, { text: trimmed, clientTag: crypto.randomUUID() });
+          onMessageSent(res.threadId);
+        } else {
+          const res = await api.sendBotMessage(bot.id, { text: trimmed, clientTag: crypto.randomUUID() });
+          onMessageSent(res.threadId);
+        }
+        onDraftChange("");
+      } catch (error) {
+        setSubmitError(apiErrorMessage(error, "Message could not be sent."));
+      }
+    },
+    [bot, thread, onMessageSent, onDraftChange],
+  );
+
+  const rows = useMemo(() => {
+    const out: ReactNode[] = [];
+    for (const g of grouped) {
+      if (g.kind === "activity") {
+        const calls: ChatToolCallItem[] = g.items.map((message) => {
+          const tool = stringPayloadField(message.payload, "tool");
+          const name = stringPayloadField(message.payload, "name");
+          const capability = stringPayloadField(message.payload, "capability");
+          const state = stringPayloadField(message.payload, "state");
+          const isApproval = message.kind === "approval";
+          return {
+            key: message.id,
+            name: isApproval
+              ? `Approval: ${tool ?? "tool"}`
+              : message.kind === "event"
+                ? capability ?? "Agent event"
+                : name ?? "Tool",
+            status: isApproval ? "pending" : state === "running" ? "running" : state === "error" ? "error" : "complete",
+            ...(message.payload !== undefined
+              ? { resultDetail: <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{JSON.stringify(message.payload, null, 2)}</pre> }
+              : {}),
+          };
+        });
+        out.push(
+          <ChatMessage key={g.key} sender="system">
+            <div xstyle={styles.activityWrap}>
+              <Collapsible trigger={`Activity (${g.items.length})`} defaultIsOpen={false} data-testid="activity">
+                <ChatToolCalls calls={calls} isExpanded />
+                {g.items.map((message) => {
+                  const approvalId = stringPayloadField(message.payload, "approvalId");
+                  if (message.kind !== "approval" || approvalId === undefined) return null;
+                  const tool = stringPayloadField(message.payload, "tool");
+                  const pending = pendingApprovalIds.has(approvalId);
+                  return (
+                    <div key={`${message.id}-approval`} xstyle={styles.approvalRow} data-testid="approval-card">
+                      <span>{`Approval requested: ${tool ?? "tool"}`}</span>
+                      {pending ? (
+                        <>
+                          <Button label="Allow" variant="primary" size="sm" onClick={() => onRespondApproval(approvalId, true)} data-testid="approval-allow" />
+                          <Button label="Deny" variant="secondary" size="sm" onClick={() => onRespondApproval(approvalId, false)} data-testid="approval-deny" />
+                        </>
+                      ) : (
+                        <span style={{ color: "var(--color-text-secondary)" }}>decided</span>
+                      )}
+                    </div>
+                  );
+                })}
+              </Collapsible>
+            </div>
+          </ChatMessage>,
+        );
+        continue;
+      }
+      const m = g.message;
+      if (m.author.kind === "system") {
+        out.push(<ChatSystemMessage key={m.id}>{m.text ?? ""}</ChatSystemMessage>);
+        continue;
+      }
+
+      const sender = m.author.kind === "user" ? "user" : "assistant";
+      out.push(
+        <ChatMessage
+          key={m.id}
+          sender={sender}
+          avatar={sender === "assistant" && bot !== undefined ? <AvatarView avatar={bot.avatar} name={bot.name} size="sm" /> : undefined}
+          data-testid={sender === "assistant" ? "assistant-message" : "user-message"}
+        >
+          <ChatMessageBubble variant="filled">{m.text ?? ""}</ChatMessageBubble>
+        </ChatMessage>,
+      );
+    }
+    return out;
+  }, [grouped, pendingApprovalIds, onRespondApproval, bot]);
+
+  const composerStatus =
+    bot !== undefined && !isAgentReady
+      ? { type: "warning" as const, message: "The bot's agent is not ready." }
+      : submitError !== undefined
+        ? { type: "error" as const, message: submitError }
+        : undefined;
+  const composer = (
+    <div xstyle={styles.composerWrap}>
+      <ChatComposer
+        value={draft}
+        onChange={onDraftChange}
+        onSubmit={(value) => void send(value)}
+        placeholder={bot === undefined ? "Select or create a bot" : isAgentReady ? "Message…" : "The bot's agent is not ready"}
+        isDisabled={bot === undefined || !isAgentReady}
+        data-testid="composer"
+        {...(composerStatus !== undefined ? { status: composerStatus } : {})}
+      />
+    </div>
+  );
 
   return (
-    <VStack gap={0} height="fill">
-      <VStack gap={1} padding={2}>
-        <HStack gap={2}>
-          <Text type="label">{thread.title}</Text>
-          <Text type="supporting" size="2xs">
-            {bot.displayName} · {thread.cwd ?? bot.defaultCwd}
-          </Text>
-        </HStack>
-        {runningTask && (
-          <HStack gap={2}>
-            <Badge
-              variant={TASK_STATUS_VARIANT[runningTask.status] ?? "neutral"}
-              label={`task: ${runningTask.status.replaceAll("_", " ")}`}
-            />
-            {activeTask && (
-              <Button
-                label="Stop"
-                variant="destructive"
-                size="sm"
-                onClick={() => void api.abortTask(activeTask.id)}
-              />
-            )}
-          </HStack>
-        )}
-      </VStack>
-
-      <VStack gap={2} padding={2} xstyle={styles.scrollArea}>
-        {messages.map((m) => (
-          <MessageRow key={m.id} message={m} />
-        ))}
-        {approvals.map((m) => (
-          <ApprovalCard key={m.id} message={m} pendingIds={pendingPermissionIds} onRespond={onRespond} />
-        ))}
-        {delta !== "" && (
-          <VStack gap={0.5} xstyle={styles.messageStart}>
-            <Text type="supporting" size="2xs">
-              {bot.displayName} · typing…
-            </Text>
-            <Card padding={2}>{delta}</Card>
-          </VStack>
-        )}
-        <div ref={bottomRef} />
-      </VStack>
-
-      <HStack gap={2} padding={2} xstyle={styles.composer}>
-        <TextArea
-          label="Message"
-          isLabelHidden
-          value={draft}
-          onChange={setDraft}
-          placeholder={`Message ${bot.displayName}…`}
-        />
-        <Button label={sending ? "Sending…" : "Send"} variant="primary" isLoading={sending} onClick={() => void send()} />
-      </HStack>
-    </VStack>
+    <div xstyle={styles.fillColumn} data-testid="chat-panel">
+      <ChatLayout composer={composer}>
+        <ChatMessageList isStreaming={isStreaming} data-testid="transcript">
+          {rows}
+          {isStreaming && bot !== undefined ? (
+            <ChatMessage sender="assistant" avatar={<AvatarView avatar={bot.avatar} name={bot.name} size="sm" />} data-testid="streaming-message">
+              <ChatMessageBubble variant="filled">{delta}</ChatMessageBubble>
+            </ChatMessage>
+          ) : null}
+        </ChatMessageList>
+      </ChatLayout>
+    </div>
   );
 }

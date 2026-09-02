@@ -5,7 +5,7 @@ import type { AgentCommand, WorkerOutbound } from "@omarchy-bot/agent-contract";
 
 const scenario = (process.argv[2] ?? "echo").replace(/^--scenario=/, "");
 let sessionCounter = 0;
-const sessions = new Map<string, { nativeSessionId: string; actor: unknown; turnActive: boolean; aborted: boolean; pendingPermission: { id: string; sessionId: string; resolve: () => void } | undefined }>();
+const sessions = new Map<string, { nativeSessionId: string; turnActive: boolean; aborted: boolean; pendingPermission: { id: string; sessionId: string; resolve: () => void } | undefined }>();
 let msgCounter = 0;
 
 const out = (m: WorkerOutbound) => writeJsonl(m);
@@ -21,7 +21,7 @@ function sleep(ms: number) {
 }
 
 /** Stream a scripted turn: text deltas, a read tool, then (optionally) a write tool needing approval. */
-async function runTurn(sessionId: string, runId: string, text: string): Promise<void> {
+async function runTurn(sessionId: string, turnId: string, text: string): Promise<void> {
   const s = sessions.get(sessionId)!;
   s.turnActive = true;
   s.aborted = false;
@@ -48,7 +48,7 @@ async function runTurn(sessionId: string, runId: string, text: string): Promise<
       out({ type: "event", event: { type: "tool.completed", sessionId, id: wId, output: "written", isError: false } });
     }
     if (s.aborted) throw new Error("aborted");
-    out({ type: "event", event: { type: "turn.completed", sessionId, usage: { runId, tokens: 42 } } });
+    out({ type: "event", event: { type: "turn.completed", sessionId, usage: { turnId, tokens: 42 } } });
   } catch (err) {
     if (String((err as Error).message).includes("aborted")) {
       out({ type: "event", event: { type: "turn.cancelled", sessionId } });
@@ -57,7 +57,6 @@ async function runTurn(sessionId: string, runId: string, text: string): Promise<
     }
   } finally {
     s.turnActive = false;
-    
   }
 }
 
@@ -75,7 +74,7 @@ readJsonl(Bun.stdin.stream(), async (raw) => {
     case "session.open":
     case "session.resume": {
       const id = `s-${++sessionCounter}`;
-      sessions.set(id, { nativeSessionId: cmd.type === "session.resume" ? cmd.nativeSessionId : `native-${id}`, actor: cmd.actor, turnActive: false, aborted: false, pendingPermission: undefined });
+      sessions.set(id, { nativeSessionId: cmd.type === "session.resume" ? cmd.nativeSessionId : `native-${id}`, turnActive: false, aborted: false, pendingPermission: undefined });
       result(cmd.requestId, true, { sessionId: id, nativeSessionId: sessions.get(id)!.nativeSessionId });
       break;
     }
@@ -85,7 +84,13 @@ readJsonl(Bun.stdin.stream(), async (raw) => {
       result(cmd.requestId, true, { accepted: true });
       if (scenario === "crash") process.exit(9);
       if (scenario === "hang") return; // no terminal event; daemon timeout must fire
-      void runTurn(cmd.sessionId, cmd.runId, cmd.message.text);
+      void runTurn(cmd.sessionId, cmd.turnId, cmd.message.text);
+      break;
+    }
+    case "message.steer": {
+      const s = sessions.get(cmd.sessionId);
+      if (!s || !s.turnActive) return result(cmd.requestId, false, "cannot steer: session is not streaming");
+      result(cmd.requestId, true, { steered: true });
       break;
     }
     case "permission.respond": {
@@ -106,6 +111,9 @@ readJsonl(Bun.stdin.stream(), async (raw) => {
     case "session.close":
       sessions.delete(cmd.sessionId);
       result(cmd.requestId, true, { done: true });
+      break;
+    case "session.delete":
+      result(cmd.requestId, true, { deleted: true });
       break;
     default:
       out({ type: "event", event: { type: "error", message: `unknown command`, retryable: false } });

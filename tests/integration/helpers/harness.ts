@@ -5,11 +5,13 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import type { DaemonServices } from "../../../apps/daemon/src/api/http.ts";
 
 export interface Harness {
   baseUrl: string;
   port: number;
   home: string;
+  svc: DaemonServices;
   stop: () => Promise<void>;
 }
 
@@ -28,16 +30,17 @@ export async function startDaemon(existingHome?: string): Promise<Harness> {
   process.env.OMARCHY_BOT_PORT = "0";
   process.env.OMARCHY_BOT_WORKERS_DIR = path.resolve(import.meta.dir, "../fake-workers");
 
+  // Dynamic import keeps the harness the single boot seam for fresh and legacy homes.
   const { main } = await import("../../../apps/daemon/src/bootstrap/main.ts");
-  const { stop, port } = await main();
-  const base: Harness = { baseUrl: `http://127.0.0.1:${port}`, port, home, stop };
-  // wait until the fake pi bot finishes its probe and reports ready
+  const { stop, port, svc } = await main();
+  const base: Harness = { baseUrl: `http://127.0.0.1:${port}`, port, home, svc, stop };
+  // Wait until the fake pi agent finishes its probe and reports ready.
   const deadline = Date.now() + 20_000;
   for (;;) {
-    const bots = await fetch(`${base.baseUrl}/api/bots`).then((r) => r.json()) as { id: string; status: string }[];
-    const pi = bots.find((b) => b.id === "pi");
+    const agents = (await fetch(`${base.baseUrl}/api/agents`).then((r) => r.json())) as { id: string; status: string }[];
+    const pi = agents.find((a) => a.id === "pi");
     if (pi?.status === "ready") break;
-    if (Date.now() > deadline) throw new Error(`pi bot never became ready (status: ${pi?.status ?? "none"})`);
+    if (Date.now() > deadline) throw new Error(`pi agent never became ready (status: ${pi?.status ?? "none"})`);
     await Bun.sleep(150);
   }
   return base;
@@ -56,9 +59,45 @@ export async function api<T>(h: Harness, method: string, p: string, body?: unkno
   return (await res.json()) as T;
 }
 
-/** Create a thread on the (only) enabled bot and return its id. */
-export async function makeThread(h: Harness, title = "t"): Promise<string> {
-  const bots = await api<{ id: string }[]>(h, "GET", "/api/bots");
-  const t = await api<{ id: string }>(h, "POST", "/api/threads", { botId: bots[0]!.id, title });
-  return t.id;
+export async function apiStatus(h: Harness, method: string, p: string, body?: unknown): Promise<{ status: number; body: unknown }> {
+  const res = await fetch(`${h.baseUrl}${p}`, {
+    method,
+    ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+    headers: { "content-type": "application/json", "x-command-id": crypto.randomUUID() },
+  });
+  const text = await res.text();
+  let bodyJson: unknown = text;
+  try {
+    bodyJson = JSON.parse(text);
+  } catch {
+    /* keep text */
+  }
+  return { status: res.status, body: bodyJson };
+}
+
+/** Create a Bot on the ready pi agent and return its id. */
+export async function makeBot(h: Harness, name = "Test Bot", instructions = ""): Promise<string> {
+  const bot = await api<{ id: string }>(h, "POST", "/api/bots", { name, instructions, agentId: "pi" });
+  return bot.id;
+}
+
+/** First send against a Bot: atomically creates the thread. */
+export async function sendToBot(h: Harness, botId: string, text: string): Promise<{ threadId: string; messageId: string; turnId: string; action: string }> {
+  return api(h, "POST", `/api/bots/${botId}/messages`, { text });
+}
+
+/** Send into an existing thread (send when idle, steer when a turn is active). */
+export async function sendToThread(h: Harness, threadId: string, text: string): Promise<{ threadId: string; messageId: string; turnId: string; action: string }> {
+  return api(h, "POST", `/api/threads/${threadId}/messages`, { text });
+}
+
+/** Poll a thread until it has no active turn. */
+export async function waitThreadIdle(h: Harness, threadId: string, timeoutMs = 15_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const thread = await api<{ activeTurn?: unknown }>(h, "GET", `/api/threads/${threadId}`);
+    if (thread.activeTurn === undefined) return;
+    if (Date.now() > deadline) throw new Error(`thread ${threadId} still has an active turn after ${timeoutMs}ms`);
+    await Bun.sleep(100);
+  }
 }

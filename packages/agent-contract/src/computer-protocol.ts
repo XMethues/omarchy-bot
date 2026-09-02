@@ -1,4 +1,4 @@
-import type { ActorRef, ComputerAction } from "@omarchy-bot/domain";
+import type { ComputerAction } from "@omarchy-bot/domain";
 import type { Hello } from "./shared.ts";
 
 export type ComputerCommand =
@@ -8,7 +8,7 @@ export type ComputerCommand =
       requestId: string;
       action: ComputerAction;
       /** Set for input actions. Worker refuses input without it (defense in depth). */
-      lease?: { holder: ActorRef | "human"; runId?: string; token: string };
+      lease?: { holder: { botId: string } | "human"; turnId?: string; token: string };
     }
   | { type: "shutdown"; requestId: string };
 

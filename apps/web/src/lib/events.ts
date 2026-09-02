@@ -3,11 +3,12 @@ import { api } from "./api.ts";
 import { clearDelta, pushDelta } from "./live.ts";
 
 export type QueryTag =
+  | "agents"
   | "bots"
   | "threads"
   | "messages"
   | "approvals"
-  | "tasks"
+  | "turns"
   | "computer";
 
 export type Invalidate = (tag: QueryTag, threadId?: string) => void;
@@ -28,41 +29,57 @@ function threadIdOf(envelope: EventEnvelope): string | undefined {
 function route(envelope: EventEnvelope, invalidate: Invalidate): void {
   const p = payloadOf(envelope);
   switch (envelope.type) {
-    case "bot.status":
-    case "bot.enabled":
-    case "bot.error":
-    case "bot.worker_crash":
+    case "agent.status":
+    case "agent.error":
+    case "agent.worker_crash":
+      invalidate("agents");
+      invalidate("bots");
+      return;
+    case "bot.created":
+    case "bot.updated":
+    case "bot.activity":
+    case "bot.read":
       invalidate("bots");
       return;
     case "thread.created":
       invalidate("threads");
+      invalidate("bots");
       return;
     case "message.appended": {
-      const tid = threadIdOf(envelope);
-      clearDelta(tid ?? "");
-      invalidate("messages", tid);
+      clearDelta(threadIdOf(envelope) ?? "");
+      invalidate("messages", threadIdOf(envelope));
       invalidate("threads");
+      invalidate("bots");
       return;
     }
     case "message.delta": {
-      const tid = threadIdOf(envelope);
-      if (typeof p.text === "string" && tid) pushDelta(tid, p.text);
-      else if (tid) invalidate("messages", tid);
+      if (typeof p.text === "string") {
+        pushDelta(threadIdOf(envelope) ?? "", p.text);
+      } else if (typeof p.messageId === "string") {
+        clearDelta(threadIdOf(envelope) ?? "");
+        invalidate("messages", threadIdOf(envelope));
+      }
       return;
     }
     case "tool.updated":
       invalidate("messages", threadIdOf(envelope));
       return;
-    case "permission.requested":
-    case "permission.decided":
-    case "permission.expired":
-      invalidate("approvals");
-      invalidate("tasks");
+    case "agent.native":
       invalidate("messages", threadIdOf(envelope));
       return;
-    case "task.created":
-    case "task.status":
-      invalidate("tasks");
+    case "turn.created":
+    case "turn.status":
+    case "turn.steered":
+      invalidate("turns");
+      invalidate("threads");
+      invalidate("bots");
+      return;
+    case "approval.requested":
+    case "approval.decided":
+    case "approval.expired":
+      invalidate("approvals");
+      invalidate("turns");
+      invalidate("messages", threadIdOf(envelope));
       return;
     case "computer.lease.granted":
     case "computer.lease.released":
@@ -90,19 +107,22 @@ export function startEventPump(invalidate: Invalidate, onSnapshotRequired: () =>
   let retries = 0;
 
   const connect = (): void => {
-    socket = api.connectEvents(cursor, (envelope) => {
-      cursor = envelope.cursor;
-      retries = 0;
-      route(envelope, invalidate);
-    }, {
-      onOpen: () => {
-        retries = 0;
+    socket = api.connectEvents(
+      cursor,
+      (envelope) => {
+        cursor = envelope.cursor;
+        route(envelope, invalidate);
       },
-      snapshotRequired: () => {
-        cursor = undefined;
-        onSnapshotRequired();
+      {
+        snapshotRequired: () => {
+          cursor = undefined;
+          onSnapshotRequired();
+        },
+        onOpen: () => {
+          retries = 0;
+        },
       },
-    });
+    );
     socket.onclose = () => {
       retries += 1;
       if (retries > 5) {

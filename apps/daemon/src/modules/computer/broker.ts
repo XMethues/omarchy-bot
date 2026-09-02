@@ -2,24 +2,22 @@ import { randomUUID } from "node:crypto";
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { Database } from "bun:sqlite";
-import type { ActorRef, AgentId, ComputerAction } from "@omarchy-bot/domain";
-import { isInputAction, isSensitiveAction } from "@omarchy-bot/domain";
+import { isInputAction, type ComputerAction } from "@omarchy-bot/domain";
 import type { EventLog } from "../events/eventLog.ts";
-import type { PermissionsService } from "../permissions/permissions.ts";
-import type { TaskRunner } from "../tasks/runner.ts";
+import type { TurnService } from "../turns/turns.ts";
 import type { Supervisor } from "../../supervision/supervisor.ts";
 import type { Config } from "../../bootstrap/config.ts";
 
-interface LeaseRow { holder_is_human: number; holder_bot_id: string | null; holder_role_id: string | null; run_id: string | null; token: string; acquired_at: string; expires_at: string }
+interface LeaseRow { holder_is_human: number; holder_bot_id: string | null; run_id: string | null; token: string; acquired_at: string; expires_at: string }
 
 /**
  * ComputerBroker: the only grantor/revoker of the exclusive input lease and
  * the only path from agents to the desktop. Observation is never lease-gated;
- * every input action is audited; sensitive actions need Action needed even
- * under `trusted`; all failures are fail closed.
+ * every input action is audited; all failures are fail closed. (ADR 0004:
+ * arbitration stays internal — no approval gate sits on this path.)
  */
 export class ComputerBroker {
-  #queue: { actor: ActorRef; runId?: string }[] = [];
+  #queue: { actor: { botId: string }; turnId?: string }[] = [];
   #emergencyStopped = false;
   #lastSnapshotAt = 0;
   #snapshotCache?: { mediaType: string; bytes: Uint8Array };
@@ -28,9 +26,8 @@ export class ComputerBroker {
   constructor(
     private readonly db: Database,
     private readonly events: EventLog,
-    private readonly permissions: PermissionsService,
+    private readonly turns: TurnService,
     private readonly supervisor: Supervisor,
-    private readonly runner: TaskRunner,
     private readonly cfg: Config,
   ) {}
 
@@ -45,26 +42,26 @@ export class ComputerBroker {
       return;
     }
     this.db
-      .query(`INSERT INTO computer_leases (id, holder_is_human, holder_bot_id, holder_role_id, run_id, token, acquired_at, expires_at)
-              VALUES (1, ?, ?, ?, ?, ?, ?, ?)
+      .query(`INSERT INTO computer_leases (id, holder_is_human, holder_bot_id, run_id, token, acquired_at, expires_at)
+              VALUES (1, ?, ?, ?, ?, ?, ?)
               ON CONFLICT(id) DO UPDATE SET holder_is_human=excluded.holder_is_human, holder_bot_id=excluded.holder_bot_id,
-                holder_role_id=excluded.holder_role_id, run_id=excluded.run_id, token=excluded.token,
+                run_id=excluded.run_id, token=excluded.token,
                 acquired_at=excluded.acquired_at, expires_at=excluded.expires_at`)
-      .run(l.holder_is_human, l.holder_bot_id, l.holder_role_id, l.run_id, l.token, l.acquired_at, l.expires_at);
+      .run(l.holder_is_human, l.holder_bot_id, l.run_id, l.token, l.acquired_at, l.expires_at);
   }
 
-  #leaseMatchesActor(l: LeaseRow, actor: ActorRef, runId?: string): boolean {
+  #leaseMatchesActor(l: LeaseRow, actor: { botId: string }, turnId?: string): boolean {
     if (l.holder_is_human) return false;
-    return l.holder_bot_id === actor.botId && l.holder_role_id === actor.roleId && (runId === undefined || l.run_id === runId);
+    return l.holder_bot_id === actor.botId && (turnId === undefined || l.run_id === turnId);
   }
 
-  state(): { lease: { holder: ActorRef | "human"; runId?: string; acquiredAt: string; expiresAt: string } | null; queueDepth: number; emergencyStopped: boolean; lastImageAt?: string } {
+  state(): { lease: { holder: { botId: string } | "human"; turnId?: string; acquiredAt: string; expiresAt: string } | null; queueDepth: number; emergencyStopped: boolean; lastImageAt?: string } {
     const l = this.#lease();
     return {
       lease: l
         ? {
-            holder: l.holder_is_human ? ("human" as const) : { botId: l.holder_bot_id as AgentId, roleId: l.holder_role_id! },
-            ...(l.run_id !== null ? { runId: l.run_id } : {}),
+            holder: l.holder_is_human ? ("human" as const) : { botId: l.holder_bot_id! },
+            ...(l.run_id !== null ? { turnId: l.run_id } : {}),
             acquiredAt: l.acquired_at,
             expiresAt: l.expires_at,
           }
@@ -76,7 +73,7 @@ export class ComputerBroker {
   }
 
   /** Bot requests the exclusive input lease. Queues as waiting_for_computer when held. */
-  async acquire(actor: ActorRef, runId: string | undefined, ttlMs = this.cfg.leaseTtlMs): Promise<{ granted: boolean; token?: string; queued: boolean }> {
+  async acquire(actor: { botId: string }, turnId: string | undefined, ttlMs = this.cfg.leaseTtlMs): Promise<{ granted: boolean; token?: string; queued: boolean }> {
     if (this.#emergencyStopped) return { granted: false, queued: false };
     const l = this.#lease();
     const expired = l !== undefined && new Date(l.expires_at).getTime() <= Date.now();
@@ -84,30 +81,30 @@ export class ComputerBroker {
       const token = randomUUID();
       const now = new Date();
       this.#writeLease({
-        holder_is_human: 0, holder_bot_id: actor.botId, holder_role_id: actor.roleId, run_id: runId ?? null,
+        holder_is_human: 0, holder_bot_id: actor.botId, run_id: turnId ?? null,
         token, acquired_at: now.toISOString(), expires_at: new Date(now.getTime() + ttlMs).toISOString(),
       });
-      this.events.append("computer", "lease", "computer.lease.granted", { holder: actor, runId, expiresAt: ttlMs });
+      this.events.append("computer", "lease", "computer.lease.granted", { holder: actor, turnId, expiresAt: ttlMs });
       return { granted: true, token, queued: false };
     }
-    if (this.#leaseMatchesActor(l, actor, runId)) return { granted: true, token: l.token, queued: false };
-    if (!this.#queue.some((q) => q.actor.botId === actor.botId && q.actor.roleId === actor.roleId && q.runId === runId)) {
-      this.#queue.push({ actor, ...(runId !== undefined ? { runId } : {}) });
-      this.events.append("computer", "lease", "computer.lease.queued", { holder: actor, runId: runId ?? null, depth: this.#queue.length });
-      if (runId) this.runner.parkForComputer(runId);
+    if (this.#leaseMatchesActor(l, actor, turnId)) return { granted: true, token: l.token, queued: false };
+    if (!this.#queue.some((q) => q.actor.botId === actor.botId && q.turnId === turnId)) {
+      this.#queue.push({ actor, ...(turnId !== undefined ? { turnId } : {}) });
+      this.events.append("computer", "lease", "computer.lease.queued", { holder: actor, turnId: turnId ?? null, depth: this.#queue.length });
+      if (turnId !== undefined) this.turns.parkForComputer(turnId);
     }
     return { granted: false, queued: true };
   }
 
-  renew(actor: ActorRef, runId: string | undefined, ttlMs = this.cfg.leaseTtlMs): boolean {
+  renew(actor: { botId: string }, turnId: string | undefined, ttlMs = this.cfg.leaseTtlMs): boolean {
     const l = this.#lease();
-    if (!l || !this.#leaseMatchesActor(l, actor, runId)) return false;
+    if (!l || !this.#leaseMatchesActor(l, actor, turnId)) return false;
     l.expires_at = new Date(Date.now() + ttlMs).toISOString();
     this.#writeLease(l);
     return true;
   }
 
-  release(actor: ActorRef | "human", token: string): void {
+  release(actor: { botId: string } | "human", token: string): void {
     const l = this.#lease();
     if (!l) return;
     if (actor === "human") {
@@ -117,26 +114,26 @@ export class ComputerBroker {
       return;
     }
     this.#writeLease(undefined);
-    this.events.append("computer", "lease", "computer.lease.released", { holder: actor === "human" ? "human" : actor });
+    this.events.append("computer", "lease", "computer.lease.released", { holder: actor });
     void this.#grantNext();
   }
 
-  /** Contextual takeover: stop Bot input, hand the shared screen to the user, and park the run. */
+  /** Contextual takeover: stop Bot input, hand the shared screen to the user, and park the turn. */
   takeOver(): { ok: boolean; lease: ReturnType<ComputerBroker["state"]>["lease"] } {
     const l = this.#lease();
     if (l && !l.holder_is_human) {
       const parkedBotId = l.holder_bot_id!;
-      const parkedRun = l.run_id ?? undefined;
+      const parkedTurn = l.run_id ?? undefined;
       this.#writeLease(undefined);
-      this.events.append("computer", "lease", "computer.take_over", { from: { botId: parkedBotId }, runId: parkedRun });
-      this.runner.parkForHuman(parkedBotId, parkedRun);
+      this.events.append("computer", "lease", "computer.take_over", { from: { botId: parkedBotId }, turnId: parkedTurn });
+      this.turns.parkForHuman(parkedTurn);
       this.#writeLease({
-        holder_is_human: 1, holder_bot_id: null, holder_role_id: null, run_id: null,
+        holder_is_human: 1, holder_bot_id: null, run_id: null,
         token: randomUUID(), acquired_at: new Date().toISOString(), expires_at: new Date(Date.now() + 24 * 3600_000).toISOString(),
       });
     } else if (!l) {
       this.#writeLease({
-        holder_is_human: 1, holder_bot_id: null, holder_role_id: null, run_id: null,
+        holder_is_human: 1, holder_bot_id: null, run_id: null,
         token: randomUUID(), acquired_at: new Date().toISOString(), expires_at: new Date(Date.now() + 24 * 3600_000).toISOString(),
       });
       this.events.append("computer", "lease", "computer.take_over", { from: null });
@@ -144,13 +141,13 @@ export class ComputerBroker {
     return { ok: true, lease: this.state().lease };
   }
 
-  /** User I'm done: re-observe, then hand the lease to the next waiting run. */
+  /** User I'm done: re-observe, then hand the lease to the next waiting turn. */
   async imDone(note?: string): Promise<{ observation?: string | null }> {
     const l = this.#lease();
     if (!l || !l.holder_is_human) return {};
     let observation: string | undefined;
     try {
-      const r = await this.supervisor.computerCommand({ type: "act", action: { name: "observe", args: {} } }, 15_000);
+      const r = (await this.supervisor.computerCommand({ type: "act", action: { name: "observe", args: {} } }, 15_000)) as { text?: string } | undefined;
       observation = r?.text;
     } catch {
       observation = undefined; // fail open for observation only
@@ -164,18 +161,17 @@ export class ComputerBroker {
   async #grantNext(): Promise<void> {
     const next = this.#queue.shift();
     if (!next) return;
-    const res = await this.acquire(next.actor, next.runId);
-    if (res.granted) this.runner.resumeAfterHuman(next.runId);
+    const res = await this.acquire(next.actor, next.turnId);
+    if (res.granted) this.turns.resumeAfterHuman(next.turnId);
   }
 
   emergencyStop(): void {
     this.#emergencyStopped = true;
     const l = this.#lease();
     if (l && !l.holder_is_human) {
-      const botId = l.holder_bot_id!;
-      const runId = l.run_id ?? undefined;
+      const turnId = l.run_id ?? undefined;
       this.#writeLease(undefined);
-      this.runner.parkForHuman(botId, runId);
+      this.turns.parkForHuman(turnId);
     }
     this.#queue = [];
     this.events.append("computer", "lease", "computer.emergency_stop", {});
@@ -188,41 +184,35 @@ export class ComputerBroker {
 
   /**
    * The single path for desktop actions. Input actions require a live lease;
-   * sensitive actions require an approval decision even under `trusted`.
+   * everything is audited. No capability/approval filter — the Agent follows
+   * its own native behavior (ADR 0003).
    */
-  async act(actor: ActorRef | "human", runId: string | undefined, action: ComputerAction): Promise<{ text?: string; imageRef?: string; windowList?: unknown }> {
+  async act(actor: { botId: string } | "human", turnId: string | undefined, action: ComputerAction): Promise<{ text?: string; imageRef?: string; windowList?: unknown }> {
     if (this.#emergencyStopped && isInputAction(action.name)) throw new Error("computer input is emergency-stopped");
     const l = this.#lease();
     if (isInputAction(action.name)) {
       if (!l) throw new Error("no active input lease");
       if (actor === "human") {
         if (!l.holder_is_human) throw new Error("input lease is not held by human");
-      } else if (!this.#leaseMatchesActor(l, actor, runId)) {
-        throw new Error(`input lease held by ${l.holder_is_human ? "human" : `${l.holder_bot_id}/${l.holder_role_id}`}`);
+      } else if (!this.#leaseMatchesActor(l, actor, turnId)) {
+        throw new Error(`input lease held by ${l.holder_is_human ? "human" : l.holder_bot_id}`);
       }
     }
-    if (isSensitiveAction(action.name) && actor !== "human") {
-      const approval = this.permissions.create({
-        source: "computer",
-        tool: action.name,
-        details: action.args,
-        ...(runId !== undefined ? { runId } : {}),
-        timeoutMs: this.cfg.approvalTimeoutMs,
-      });
-      const allowed = await new Promise<boolean>((resolve) => this.permissions.registerWaiter(approval.id, resolve));
-      if (!allowed) throw new Error(`action ${action.name} not approved`);
-    }
 
-    this.events.append("computer", "lease", "computer.action", { actor, runId: runId ?? null, action: action.name, args: action.args, input: isInputAction(action.name) });
-    const cmd: { type: "act"; action: ComputerAction; lease?: { holder: ActorRef | "human"; runId?: string; token: string } } = { type: "act", action };
+    this.events.append("computer", "lease", "computer.action", { actor, turnId: turnId ?? null, action: action.name, args: action.args, input: isInputAction(action.name) });
+    const cmd: { type: "act"; action: ComputerAction; lease?: { holder: { botId: string } | "human"; turnId?: string; token: string } } = { type: "act", action };
     if (l && isInputAction(action.name)) {
       cmd.lease = {
-        holder: l.holder_is_human ? ("human" as const) : { botId: l.holder_bot_id as AgentId, roleId: l.holder_role_id! },
-        ...(l.run_id !== null ? { runId: l.run_id } : {}),
+        holder: l.holder_is_human ? ("human" as const) : { botId: l.holder_bot_id! },
+        ...(l.run_id !== null ? { turnId: l.run_id } : {}),
         token: l.token,
       };
     }
-    const r = await this.supervisor.computerCommand(cmd, 30_000);
+    const r = (await this.supervisor.computerCommand(cmd, 30_000)) as {
+      text?: string;
+      image?: { mediaType: "image/png" | "image/jpeg"; base64: string };
+      windowList?: unknown;
+    } | undefined;
 
     let imageRef: string | undefined;
     if (r?.image?.base64) {
@@ -244,7 +234,9 @@ export class ComputerBroker {
   /** Rate-limited observation for the web panel; never lease-gated. */
   async snapshot(): Promise<{ bytes: Uint8Array; mediaType: string } | undefined> {
     if (Date.now() - this.#lastSnapshotAt < 400) return this.#snapshotCache;
-    const r = await this.supervisor.computerCommand({ type: "act", action: { name: "screenshot", args: {} } }, 15_000).catch(() => undefined);
+    const r = (await this.supervisor.computerCommand({ type: "act", action: { name: "screenshot", args: {} } }, 15_000).catch(() => undefined)) as
+      | { image?: { mediaType: string; base64: string } }
+      | undefined;
     if (!r?.image?.base64) return this.#snapshotCache;
     this.#lastSnapshotAt = Date.now();
     this.#snapshotCache = { mediaType: r.image.mediaType, bytes: Buffer.from(r.image.base64, "base64") };

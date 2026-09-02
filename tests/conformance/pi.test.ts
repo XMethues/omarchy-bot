@@ -52,7 +52,7 @@ afterAll(async () => {
 /** Drive one turn and collect streamed output. */
 async function send(sessionId: string, text: string, attachments?: { id: string; name: string; path: string; mediaType: string }[]): Promise<number> {
   const before = events.length;
-  await pi.request({ type: "message.send", requestId: crypto.randomUUID(), sessionId, runId: crypto.randomUUID(), message: { text, ...(attachments ? { attachments } : {}) } }, 15_000);
+  await pi.request({ type: "message.send", requestId: crypto.randomUUID(), sessionId, turnId: crypto.randomUUID(), message: { text, ...(attachments ? { attachments } : {}) } }, 15_000);
   return before;
 }
 
@@ -108,8 +108,7 @@ describe("pi conformance (10 steps, real model)", () => {
       // ---- Step 1: temp cwd + session ----
       const cwd = mkdtempSync(path.join(os.tmpdir(), "pi-conform-"));
       tempDirs.push(cwd);
-      const actor = { botId: "pi" as const, roleId: "default" };
-      const opened = (await pi.request({ type: "session.open", requestId: crypto.randomUUID(), actor, options: { cwd, permissionPolicy: "ask" } }, 30_000)) as {
+      const opened = (await pi.request({ type: "session.open", requestId: crypto.randomUUID(), botId: "bot_conformance", threadId: "thread_conformance", options: { cwd, instructions: "" } }, 30_000)) as {
         sessionId: string;
         nativeSessionId: string;
       };
@@ -157,9 +156,9 @@ describe("pi conformance (10 steps, real model)", () => {
 
       // ---- Step 5: cancel mid-turn; no late writes after cancel ----
       // Dedicated session: an aborted run must never pollute later turns.
-      const countSession = (await pi.request({ type: "session.open", requestId: crypto.randomUUID(), actor, options: { cwd, permissionPolicy: "ask" } }, 30_000)) as { sessionId: string };
+      const countSession = (await pi.request({ type: "session.open", requestId: crypto.randomUUID(), botId: "bot_conformance", threadId: "thread_conformance_count", options: { cwd, instructions: "" } }, 30_000)) as { sessionId: string };
       const before = events.length;
-      await pi.request({ type: "message.send", requestId: crypto.randomUUID(), sessionId: countSession.sessionId, runId: crypto.randomUUID(), message: { text: "Count from 1 to 400, one number per line, no commentary." } }, 15_000);
+      await pi.request({ type: "message.send", requestId: crypto.randomUUID(), sessionId: countSession.sessionId, turnId: crypto.randomUUID(), message: { text: "Count from 1 to 400, one number per line, no commentary." } }, 15_000);
       const deadline5 = Date.now() + 60_000;
       let sawDeltas = 0;
       while (Date.now() < deadline5) {
@@ -200,7 +199,7 @@ describe("pi conformance (10 steps, real model)", () => {
       let imageNote = "no vision-capable model configured";
       let attachReply = "";
       for (const spec of visionModels) {
-        const vs = (await pi.request({ type: "session.open", requestId: crypto.randomUUID(), actor, options: { cwd, permissionPolicy: "ask", model: spec } }, 30_000)) as { sessionId: string };
+        const vs = (await pi.request({ type: "session.open", requestId: crypto.randomUUID(), botId: "bot_conformance", threadId: "thread_conformance_vision", options: { cwd, instructions: "", model: spec } }, 30_000)) as { sessionId: string };
         const recent = await turn(
           vs.sessionId,
           "A text attachment contains a secret phrase and an image attachment is a solid color. Reply in one line: the secret phrase, then the color word.",
@@ -229,7 +228,7 @@ describe("pi conformance (10 steps, real model)", () => {
       const textAttachRecent = attachReply.includes("CONFORM-TEXT-42")
         ? null
         : await (async () => {
-            const ts = (await pi.request({ type: "session.open", requestId: crypto.randomUUID(), actor, options: { cwd, permissionPolicy: "ask" } }, 30_000)) as { sessionId: string };
+            const ts = (await pi.request({ type: "session.open", requestId: crypto.randomUUID(), botId: "bot_conformance", threadId: "thread_conformance_text", options: { cwd, instructions: "" } }, 30_000)) as { sessionId: string };
             return turn(ts.sessionId, "The attachment names a secret phrase. Reply with just the secret phrase.", { attachments: [{ id: "a1", name: "secret.txt", path: textPath, mediaType: "text/plain" }] });
           })();
       if (textAttachRecent) attachReply = assistantText(textAttachRecent);
@@ -239,7 +238,7 @@ describe("pi conformance (10 steps, real model)", () => {
       // ---- Step 7: close → resume → history ----
       await pi.request({ type: "session.close", requestId: crypto.randomUUID(), sessionId: opened.sessionId }, 15_000);
       const resumed = (await pi.request(
-        { type: "session.resume", requestId: crypto.randomUUID(), actor, nativeSessionId: opened.nativeSessionId, options: { cwd, permissionPolicy: "ask" } },
+        { type: "session.resume", requestId: crypto.randomUUID(), botId: "bot_conformance", threadId: "thread_conformance", nativeSessionId: opened.nativeSessionId, options: { cwd, instructions: "" } },
         30_000,
       )) as { sessionId: string };
       const history = (await pi.request({ type: "session.history", requestId: crypto.randomUUID(), sessionId: resumed.sessionId }, 30_000)) as {
@@ -279,7 +278,7 @@ describe("pi conformance (10 steps, real model)", () => {
 
       // ---- Step 10: Computer fixture via the REAL broker + REAL computer worker ----
       const broker = daemon.svc.computer;
-      const botActor = { botId: "pi" as const, roleId: "default" };
+      const botActor = { botId: "bot_conformance" };
       // observe without lease
       const obs = await broker.act(botActor, undefined, { name: "observe", args: {} });
       expect((obs.text ?? "").length).toBeGreaterThan(0);
@@ -318,8 +317,8 @@ describe("pi conformance (10 steps, real model)", () => {
       mkdirSync(testConfDir, { recursive: true });
       writeFileSync(path.join(testConfDir, `pi-${agentVersion}.json`), record);
       console.log(`conformance: record written ${recordPath}`);
-      const bot = await daemon.svc.bots.recheck("pi");
-      expect(bot.status).toBe("ready");
+      const agent = await daemon.svc.agents.recheck("pi");
+      expect(agent.status).toBe("ready");
       console.log("conformance: pi bot is READY");
     },
     600_000,

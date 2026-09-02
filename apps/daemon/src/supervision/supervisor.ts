@@ -1,49 +1,54 @@
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import type { AgentEvent } from "@omarchy-bot/agent-contract";
-import type { ComputerAction } from "@omarchy-bot/domain";
+import type { AgentEvent, ComputerCommand } from "@omarchy-bot/agent-contract";
+import type { AgentId } from "@omarchy-bot/domain";
 import { WorkerClient, sanitizedEnv } from "./workerClient.ts";
 
 export interface SupervisorHooks {
-  onAgentEvent: (botId: string, event: AgentEvent) => void;
-  onWorkerCrash: (botId: string, error: Error) => void;
+  onAgentEvent: (agentId: AgentId, event: AgentEvent) => void;
+  onWorkerCrash: (agentId: AgentId, error: Error) => void;
 }
 
 /**
- * Starts agent workers on demand (never nine resident workers), restarts them
- * with bounded backoff, and owns the single computer worker.
+ * Starts agent workers on demand per Agent (one worker per Agent, shared by
+ * all its Bots), restarts them with bounded backoff, and owns the single
+ * computer worker.
  */
 export class Supervisor {
-  #agentWorkers = new Map<string, WorkerClient>();
+  #agentWorkers = new Map<AgentId, WorkerClient>();
   #computerWorker?: WorkerClient;
-  #restartTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  #restartTimers = new Map<AgentId, ReturnType<typeof setTimeout>>();
 
   constructor(
     private readonly hooks: SupervisorHooks,
     private readonly workerDirs: { agents: string; computer: string },
   ) {}
 
-  async agentWorker(botId: string): Promise<WorkerClient> {
-    let w = this.#agentWorkers.get(botId);
+  get agentsDir(): string {
+    return this.workerDirs.agents;
+  }
+
+  async agentWorker(agentId: AgentId): Promise<WorkerClient> {
+    let w = this.#agentWorkers.get(agentId);
     if (w?.alive) return w;
     if (w) await this.#killQuietly(w);
     w = new WorkerClient({
-      name: `agent:${botId}`,
-      script: path.join(this.workerDirs.agents, botId, "src", "worker.ts"),
+      name: `agent:${agentId}`,
+      script: path.join(this.workerDirs.agents, agentId, "src", "worker.ts"),
       env: sanitizedEnv(),
-      onEvent: (e) => this.hooks.onAgentEvent(botId, e),
+      onEvent: (e) => this.hooks.onAgentEvent(agentId, e),
       onExit: () => {
         // Restart with backoff unless it was an explicit stop; sessions get recovered by callers.
-        if (!this.#restartTimers.has(botId)) {
+        if (!this.#restartTimers.has(agentId)) {
           const t = setTimeout(() => {
-            this.#restartTimers.delete(botId);
-            void this.agentWorker(botId).catch((err) => this.hooks.onWorkerCrash(botId, err));
+            this.#restartTimers.delete(agentId);
+            void this.agentWorker(agentId).catch((err) => this.hooks.onWorkerCrash(agentId, err));
           }, 1000);
-          this.#restartTimers.set(botId, t);
+          this.#restartTimers.set(agentId, t);
         }
       },
     });
-    this.#agentWorkers.set(botId, w);
+    this.#agentWorkers.set(agentId, w);
     await w.start();
     return w;
   }
@@ -62,7 +67,7 @@ export class Supervisor {
     return w;
   }
 
-  computerCommand(cmd: { type: "probe" } | { type: "act"; action: ComputerAction; lease?: { holder: import("@omarchy-bot/domain").ActorRef | "human"; runId?: string; token: string } } | { type: "shutdown" }, timeoutMs: number): Promise<any> {
+  computerCommand(cmd: Omit<Extract<ComputerCommand, { type: "act" }>, "requestId">, timeoutMs: number): Promise<unknown> {
     return this.computerWorker().then((w) => w.request({ ...cmd, requestId: randomUUID() }, timeoutMs));
   }
 

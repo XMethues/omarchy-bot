@@ -1,0 +1,48 @@
+import { describe, expect, test } from "bun:test";
+import { assertTransitionTurn, assertTurnTerminalOnce, canTransitionTurn, isTerminalTurn } from "./turn.ts";
+import { isInputAction, leaseExpired } from "./computer.ts";
+import { isBotId } from "./ids.ts";
+
+describe("turn state machine", () => {
+  test("happy path", () => {
+    expect(canTransitionTurn("working", "waiting_for_approval")).toBeTrue();
+    expect(canTransitionTurn("waiting_for_approval", "working")).toBeTrue();
+    expect(canTransitionTurn("working", "completed")).toBeTrue();
+  });
+  test("terminals are absorbing", () => {
+    for (const t of ["completed", "cancelled", "failed"] as const) {
+      expect(isTerminalTurn(t)).toBeTrue();
+      expect(canTransitionTurn(t, "working")).toBeFalse();
+    }
+  });
+  test("no queued/blocked states remain", () => {
+    expect(canTransitionTurn("waiting_for_input", "completed")).toBeFalse();
+    expect(() => assertTransitionTurn("waiting_for_input", "completed")).toThrow();
+  });
+  test("illegal transitions throw", () => {
+    expect(() => assertTransitionTurn("completed", "working")).toThrow();
+  });
+  test("turn terminal only once", () => {
+    expect(() => assertTurnTerminalOnce("completed", "failed")).toThrow();
+    expect(() => assertTurnTerminalOnce(undefined, "completed")).not.toThrow();
+  });
+});
+
+describe("computer actions", () => {
+  test("input vs observation", () => {
+    expect(isInputAction("click")).toBeTrue();
+    expect(isInputAction("screenshot")).toBeFalse();
+  });
+  test("lease expiry", () => {
+    const lease = { holder: "human" as const, acquiredAt: "2026-01-01T00:00:00Z", expiresAt: "2026-01-01T00:01:00Z" };
+    expect(leaseExpired(lease, new Date("2026-01-01T00:02:00Z"))).toBeTrue();
+    expect(leaseExpired(lease, new Date("2026-01-01T00:00:30Z"))).toBeFalse();
+  });
+});
+
+describe("bot ids", () => {
+  test("bot ids never alias agent ids", () => {
+    expect(isBotId("bot_0123456789abcdef0123456789abcdef")).toBeTrue();
+    expect(isBotId("pi")).toBeFalse();
+  });
+});

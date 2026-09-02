@@ -1,23 +1,16 @@
-import type { ActorRef } from "./ids.ts";
-
-export type ThreadKind = "direct" | "channel";
-
 export interface Thread {
   id: string;
-  kind: ThreadKind;
+  botId: string;
   title: string;
-  participants: ActorRef[];
   cwd?: string;
   createdAt: string;
   updatedAt: string;
 }
 
-export type Author =
-  | { kind: "user" }
-  | { kind: "bot"; botId: string; roleId: string }
-  | { kind: "system" };
+/** The thread owns the Bot; messages carry no per-author Bot/Role identity. */
+export type Author = { kind: "user" } | { kind: "bot" } | { kind: "system" };
 
-export type MessageKind = "text" | "tool" | "approval" | "task" | "event";
+export type MessageKind = "text" | "tool" | "approval" | "event";
 
 export interface Message {
   id: string;
@@ -26,7 +19,7 @@ export interface Message {
   author: Author;
   kind: MessageKind;
   text?: string;
-  /** For tool/approval/task cards; opaque to domain, shaped by protocol. */
+  /** For tool/approval cards; opaque to domain, shaped by protocol. */
   payload?: unknown;
   createdAt: string;
 }

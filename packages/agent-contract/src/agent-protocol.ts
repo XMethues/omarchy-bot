@@ -1,4 +1,4 @@
-import type { ActorRef, Decision } from "@omarchy-bot/domain";
+import type { Decision } from "@omarchy-bot/domain";
 import type { Hello, OpenSessionOptionsLike, PermissionRequestDetailsLike } from "./shared.ts";
 
 /**
@@ -16,15 +16,18 @@ export type AgentEvent =
   | { type: "error"; sessionId?: string; message: string; retryable: boolean }
   | { type: "native"; sessionId?: string; agentId: string; capability: string; payload: unknown; sensitivity: "public" | "diagnostic" | "secret" };
 
+/** Protocol v2: sessions are owned by a Bot+Thread pair; steering is a first-class command. */
 export type AgentCommand =
   | { type: "probe"; requestId: string }
-  | { type: "session.open"; requestId: string; actor: ActorRef; options: OpenSessionOptionsLike }
-  | { type: "session.resume"; requestId: string; actor: ActorRef; nativeSessionId: string; options: OpenSessionOptionsLike }
-  | { type: "message.send"; requestId: string; sessionId: string; runId: string; message: WorkerUserMessage }
+  | { type: "session.open"; requestId: string; botId: string; threadId: string; options: OpenSessionOptionsLike }
+  | { type: "session.resume"; requestId: string; botId: string; threadId: string; nativeSessionId: string; options: OpenSessionOptionsLike }
+  | { type: "message.send"; requestId: string; sessionId: string; turnId: string; message: WorkerUserMessage }
+  | { type: "message.steer"; requestId: string; sessionId: string; text: string }
   | { type: "permission.respond"; requestId: string; sessionId: string; permissionId: string; decision: Decision }
   | { type: "turn.abort"; requestId: string; sessionId: string }
   | { type: "session.history"; requestId: string; sessionId: string }
-  | { type: "session.close"; requestId: string; sessionId: string };
+  | { type: "session.close"; requestId: string; sessionId: string }
+  | { type: "session.delete"; requestId: string; nativeSessionId: string };
 
 export interface WorkerUserMessage {
   text: string;

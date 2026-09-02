@@ -1,52 +1,47 @@
 import type { AgentId, BotId } from "./ids.ts";
 
-export type PermissionPolicy = "ask" | "trusted";
+/** Agent installation/readiness as reported by the Agent registry. */
+export type AgentStatus = "ready" | "missing" | "unconfigured" | "incompatible" | "checking" | "offline";
 
-export type BotStatus =
-  | "missing"
-  | "unconfigured"
-  | "checking"
-  | "ready"
-  | "working"
-  | "waiting_for_input"
-  | "waiting_for_computer"
-  | "blocked"
-  | "incompatible"
-  | "offline";
+export interface AgentReadiness {
+  id: AgentId;
+  displayName: string;
+  version: string;
+  status: AgentStatus;
+  reason?: string;
+  /** Plain-language setup guidance shown when the Agent is not ready. */
+  guidance?: string;
+}
 
+/** Bot activity as derived from its active turn + Agent readiness. */
+export type BotActivityStatus = "idle" | "working" | "waiting" | "needs_you" | "error" | "unavailable";
+
+export interface AvatarRecipe {
+  rendererVersion: string;
+  style: string;
+  seed: string;
+  options: Record<string, string | number | boolean>;
+}
+
+export type Avatar =
+  | { kind: "generated" | "recipe"; recipe: AvatarRecipe }
+  | { kind: "upload"; file: string };
+
+/** A user-created teammate. References exactly one Agent; immutable reference. */
 export interface Bot {
   id: BotId;
-  displayName: string;
-  agentVersion: string;
-  status: BotStatus;
-  defaultCwd: string;
-  defaultModel?: string;
-  permissionPolicy: PermissionPolicy;
-  enabled: boolean;
-  createdAt: string;
-  updatedAt: string;
-}
-
-export interface BotRole {
-  id: string;
-  botId: BotId;
   name: string;
   instructions: string;
-  defaultCwd?: string;
-  defaultModel?: string;
-  permissionPolicy?: PermissionPolicy;
-  memoryScopeId: string;
+  agentId: AgentId;
+  avatar: Avatar;
+  pinned: boolean;
+  archived: boolean;
+  archivedAt?: string;
   createdAt: string;
   updatedAt: string;
 }
 
-export interface RoleSession {
-  roleId: string;
-  threadId: string;
-  nativeSessionId: string;
-}
-
-/** Probe result from an Agent worker. Only `ready` Bots get a chat entry. */
+/** Probe result from an Agent worker. Only `ready` Agents can back new Bots. */
 export interface ProbeResult {
   agentId: AgentId;
   installed: boolean;

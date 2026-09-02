@@ -7,8 +7,9 @@ export interface Hello {
 
 export interface OpenSessionOptionsLike {
   cwd: string;
+  /** Bot Job/Instructions; the adapter injects them into the system prompt. Empty = none. */
+  instructions: string;
   model?: string;
-  permissionPolicy: "ask" | "trusted";
 }
 
 export interface PermissionRequestDetailsLike {

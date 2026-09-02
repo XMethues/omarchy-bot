@@ -1,107 +1,186 @@
 import { randomUUID } from "node:crypto";
 import type { Database } from "bun:sqlite";
-import type { MessageDto, ThreadDto } from "@omarchy-bot/protocol";
+import type { MessageDto, ThreadDto, TurnDto } from "@omarchy-bot/protocol";
 import type { EventLog } from "../events/eventLog.ts";
 
 interface ThreadRow {
-  id: string; kind: string; title: string; bot_id: string; role_id: string; cwd: string | null; created_at: string; updated_at: string;
+  id: string; bot_id: string; title: string; cwd: string | null; created_at: string; updated_at: string;
 }
 interface MessageRow {
-  id: string; thread_id: string; seq: number; author_kind: string; author_bot_id: string | null; author_role_id: string | null; kind: string; text: string | null; payload: string | null; created_at: string;
+  id: string; thread_id: string; seq: number; author_kind: string; kind: string; text: string | null; payload: string | null; created_at: string;
+}
+interface TurnRow {
+  id: string; thread_id: string; bot_id: string; status: string; worker_session_id: string | null; native_session_id: string; steer_count: number; started_at: string; finished_at: string | null; outcome_reason: string | null;
 }
 
-/** Threads, roles and the message index. Direct threads own a per-thread role session mapping. */
+/** Threads are created lazily on first send; the message index is the source of truth. */
 export class ThreadsService {
   constructor(
     private readonly db: Database,
     private readonly events: EventLog,
   ) {}
 
-  ensureRole(botId: string, roleId?: string, name?: string): { id: string; name: string } {
-    const id = roleId ?? "default";
-    const existing = this.db.query(`SELECT id, name FROM roles WHERE bot_id = ? AND id = ?`).get(botId, id) as { id: string; name: string } | null;
-    if (existing) return existing;
+  /** Insert without events — used inside multi-row transactions. */
+  insertThreadRow(threadId: string, botId: string, title: string, cwd?: string): void {
     const now = new Date().toISOString();
     this.db
-      .query(`INSERT INTO roles (id, bot_id, name, instructions, memory_scope_id, created_at, updated_at) VALUES (?, ?, ?, '', ?, ?, ?)`)
-      .run(id, botId, name ?? "Default", `role:${botId}:${id}`, now, now);
-    this.events.append("role", id, "role.created", { botId, roleId: id });
-    return { id, name: name ?? "Default" };
+      .query(`INSERT INTO threads (id, bot_id, title, cwd, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`)
+      .run(threadId, botId, title, cwd ?? null, now, now);
   }
 
-  createDirectThread(botId: string, opts: { roleId?: string; title?: string; cwd?: string }): ThreadDto {
-    const role = this.ensureRole(botId, opts.roleId);
+  createThread(botId: string, opts: { title?: string; cwd?: string }): ThreadDto {
     const id = randomUUID();
-    const now = new Date().toISOString();
-    this.db
-      .query(`INSERT INTO threads (id, kind, title, bot_id, role_id, cwd, created_at, updated_at) VALUES (?, 'direct', ?, ?, ?, ?, ?, ?)`)
-      .run(id, opts.title ?? `${botId} bot`, botId, role.id, opts.cwd ?? null, now, now);
-    this.events.append("thread", id, "thread.created", { botId, roleId: role.id, kind: "direct" });
+    this.insertThreadRow(id, botId, opts.title ?? "New conversation", opts.cwd);
+    this.events.append("thread", id, "thread.created", { botId });
     return this.getThread(id)!;
   }
 
   getThread(id: string): ThreadDto | undefined {
     const r = this.db.query(`SELECT * FROM threads WHERE id = ?`).get(id) as ThreadRow | undefined;
     if (!r) return undefined;
-    return { id: r.id, kind: r.kind as "direct", title: r.title, botId: r.bot_id, roleId: r.role_id, cwd: r.cwd ?? undefined, createdAt: r.created_at, updatedAt: r.updated_at };
+    const active = this.activeTurn(id);
+    return {
+      id: r.id, botId: r.bot_id, title: r.title,
+      ...(r.cwd !== null ? { cwd: r.cwd } : {}),
+      createdAt: r.created_at, updatedAt: r.updated_at,
+      ...(active !== undefined ? { activeTurn: active } : {}),
+    };
   }
 
-  listThreads(): ThreadDto[] {
-    const rows = this.db.query(`SELECT * FROM threads ORDER BY updated_at DESC`).all() as ThreadRow[];
-    return rows.map((r) => ({ id: r.id, kind: r.kind as "direct", title: r.title, botId: r.bot_id, roleId: r.role_id, cwd: r.cwd ?? undefined, createdAt: r.created_at, updatedAt: r.updated_at }));
+  listThreads(botId?: string): ThreadDto[] {
+    const rows = (
+      botId !== undefined
+        ? this.db.query(`SELECT * FROM threads WHERE bot_id = ? ORDER BY updated_at DESC`).all(botId)
+        : this.db.query(`SELECT * FROM threads ORDER BY updated_at DESC`).all()
+    ) as ThreadRow[];
+    return rows.map((r) => {
+      const active = this.activeTurn(r.id);
+      return {
+        id: r.id, botId: r.bot_id, title: r.title,
+        ...(r.cwd !== null ? { cwd: r.cwd } : {}),
+        createdAt: r.created_at, updatedAt: r.updated_at,
+        ...(active !== undefined ? { activeTurn: active } : {}),
+      };
+    });
+  }
+
+  listThreadsForBot(botId: string, q?: string): ThreadDto[] {
+    const all = this.listThreads(botId);
+    if (!q) return all;
+    const needle = q.toLowerCase();
+    return all.filter((t) => t.title.toLowerCase().includes(needle));
   }
 
   touch(id: string): void {
     this.db.query(`UPDATE threads SET updated_at = ? WHERE id = ?`).run(new Date().toISOString(), id);
   }
 
-  private toDto(m: MessageRow): MessageDto {
-    const author =
-      m.author_kind === "user" ? ({ kind: "user" } as const)
-      : m.author_kind === "bot" ? ({ kind: "bot", botId: m.author_bot_id!, roleId: m.author_role_id! } as const)
-      : ({ kind: "system" } as const);
+  private toMessageDto(m: MessageRow): MessageDto {
     return {
-      id: m.id, threadId: m.thread_id, seq: m.seq, author,
+      id: m.id, threadId: m.thread_id, seq: m.seq,
+      author: m.author_kind === "user" ? { kind: "user" } : m.author_kind === "bot" ? { kind: "bot" } : { kind: "system" },
       kind: m.kind as MessageDto["kind"],
-      text: m.text ?? undefined,
-      payload: m.payload ? JSON.parse(m.payload) : undefined,
+      ...(m.text !== null ? { text: m.text } : {}),
+      ...(m.payload !== null ? { payload: JSON.parse(m.payload) } : {}),
       createdAt: m.created_at,
     };
   }
 
-  appendMessage(threadId: string, m: { author: MessageDto["author"]; kind: MessageDto["kind"]; text?: string; payload?: unknown }): MessageDto {
+  /**
+   * Append without emitting an event — callers inside a turn own the event
+   * shape (delta flush, tool cards). Used by TurnService.
+   */
+  appendMessageQuiet(threadId: string, m: { author: MessageDto["author"]; kind: MessageDto["kind"]; text?: string; payload?: unknown }): MessageDto {
     const seq = (this.db.query(`SELECT COALESCE(MAX(seq), 0) AS s FROM messages WHERE thread_id = ?`).get(threadId) as { s: number }).s + 1;
     const id = randomUUID();
     const now = new Date().toISOString();
     this.db
-      .query(`INSERT INTO messages (id, thread_id, seq, author_kind, author_bot_id, author_role_id, kind, text, payload, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(id, threadId, seq, m.author.kind, m.author.kind === "bot" ? m.author.botId : null, m.author.kind === "bot" ? m.author.roleId : null, m.kind, m.text ?? null, m.payload === undefined ? null : JSON.stringify(m.payload), now);
+      .query(`INSERT INTO messages (id, thread_id, seq, author_kind, author_bot_id, author_role_id, kind, text, payload, created_at) VALUES (?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?)`)
+      .run(id, threadId, seq, m.author.kind, m.kind, m.text ?? null, m.payload === undefined ? null : JSON.stringify(m.payload), now);
     this.touch(threadId);
-    const dto = this.getMessage(id)!;
+    return this.getMessage(id)!;
+  }
+
+  appendMessage(threadId: string, m: { author: MessageDto["author"]; kind: MessageDto["kind"]; text?: string; payload?: unknown }): MessageDto {
+    const dto = this.appendMessageQuiet(threadId, m);
     this.events.append("thread", threadId, "message.appended", dto);
     return dto;
   }
 
+  updateToolMessage(
+    threadId: string,
+    toolId: string,
+    update: { state: "running" | "complete" | "error"; output?: unknown; isError?: boolean },
+  ): MessageDto | undefined {
+    const row = this.db
+      .query(
+        `SELECT id, payload FROM messages
+         WHERE thread_id = ? AND kind = 'tool' AND json_extract(payload, '$.toolId') = ?
+         ORDER BY seq DESC LIMIT 1`,
+      )
+      .get(threadId, toolId) as { id: string; payload: string } | undefined;
+    if (row === undefined) return undefined;
+    const stored: unknown = JSON.parse(row.payload);
+    if (stored === null || typeof stored !== "object" || Array.isArray(stored)) return undefined;
+    this.db.query(`UPDATE messages SET payload = ? WHERE id = ?`).run(JSON.stringify({ ...stored, ...update }), row.id);
+    return this.getMessage(row.id);
+  }
+
   getMessage(id: string): MessageDto | undefined {
     const m = this.db.query(`SELECT * FROM messages WHERE id = ?`).get(id) as MessageRow | undefined;
-    return m ? this.toDto(m) : undefined;
+    return m ? this.toMessageDto(m) : undefined;
   }
 
   listMessages(threadId: string): MessageDto[] {
     const rows = this.db.query(`SELECT * FROM messages WHERE thread_id = ? ORDER BY seq ASC`).all(threadId) as MessageRow[];
-    return rows.map((r) => this.toDto(r));
+    return rows.map((r) => this.toMessageDto(r));
   }
 
-  getNativeSession(roleId: string, threadId: string): string | undefined {
-    const r = this.db.query(`SELECT native_session_id FROM role_sessions WHERE role_id = ? AND thread_id = ?`).get(roleId, threadId) as { native_session_id: string } | undefined;
+  getNativeSession(threadId: string): string | undefined {
+    const r = this.db.query(`SELECT native_session_id FROM thread_sessions WHERE thread_id = ?`).get(threadId) as { native_session_id: string } | undefined;
     return r?.native_session_id;
   }
 
-  setNativeSession(roleId: string, threadId: string, nativeSessionId: string): void {
+  setNativeSession(threadId: string, nativeSessionId: string): void {
     const now = new Date().toISOString();
     this.db
-      .query(`INSERT INTO role_sessions (id, role_id, thread_id, native_session_id, created_at) VALUES (?, ?, ?, ?, ?)
-              ON CONFLICT(role_id, thread_id) DO UPDATE SET native_session_id = excluded.native_session_id`)
-      .run(randomUUID(), roleId, threadId, nativeSessionId, now);
+      .query(`INSERT INTO thread_sessions (thread_id, native_session_id, updated_at) VALUES (?, ?, ?)
+              ON CONFLICT(thread_id) DO UPDATE SET native_session_id = excluded.native_session_id, updated_at = excluded.updated_at`)
+      .run(threadId, nativeSessionId, now);
+  }
+
+  // ----- turns -----
+
+  insertTurnRow(turn: { id: string; threadId: string; botId: string; nativeSessionId: string }): void {
+    this.db
+      .query(`INSERT INTO turns (id, thread_id, bot_id, status, native_session_id, started_at) VALUES (?, ?, ?, 'working', ?, ?)`)
+      .run(turn.id, turn.threadId, turn.botId, turn.nativeSessionId, new Date().toISOString());
+  }
+
+  turnRow(id: string): TurnRow | undefined {
+    return this.db.query(`SELECT * FROM turns WHERE id = ?`).get(id) as TurnRow | undefined;
+  }
+
+  activeTurn(threadId: string): TurnDto | undefined {
+    const r = this.db
+      .query(`SELECT * FROM turns WHERE thread_id = ? AND status NOT IN ('completed','cancelled','failed') ORDER BY started_at DESC LIMIT 1`)
+      .get(threadId) as TurnRow | undefined;
+    return r ? this.turnToDto(r) : undefined;
+  }
+
+  activeTurnForBot(botId: string): TurnDto | undefined {
+    const r = this.db
+      .query(`SELECT * FROM turns WHERE bot_id = ? AND status NOT IN ('completed','cancelled','failed') ORDER BY started_at DESC LIMIT 1`)
+      .get(botId) as TurnRow | undefined;
+    return r ? this.turnToDto(r) : undefined;
+  }
+
+  turnToDto(r: TurnRow): TurnDto {
+    return {
+      id: r.id, threadId: r.thread_id, botId: r.bot_id, status: r.status as TurnDto["status"],
+      steerCount: r.steer_count, startedAt: r.started_at,
+      ...(r.finished_at !== null ? { finishedAt: r.finished_at } : {}),
+      ...(r.outcome_reason !== null ? { reason: r.outcome_reason } : {}),
+    };
   }
 }

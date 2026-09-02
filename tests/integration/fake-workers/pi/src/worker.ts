@@ -1,6 +1,6 @@
 /**
  * Scripted fake agent worker for integration tests. Speaks the LF-JSONL
- * worker protocol from packages/agent-contract and behaves according to
+ * worker protocol v2 from packages/agent-contract and behaves according to
  * directives embedded in the message text:
  *
  *   say: <text>      stream deltas, assistant text, turn.completed
@@ -8,7 +8,10 @@
  *                    decision, then tool.completed + turn.completed
  *   deny-tool        like ask but only proceeds if the decision is allowed
  *   tool             tool.started + tool.completed (no approval)
- *   hang             streams a delta then waits for turn.abort
+ *   hang             streams a delta then waits for turn.abort; steering
+ *                    during hang returns an error (failure path is testable)
+ *   steer-echo       long turn; on message.steer emits a delta containing the
+ *                    steered text, then completes
  *
  * Stays alive until stdin closes (daemon lifecycle contract).
  */
@@ -19,12 +22,24 @@ const write = (msg: unknown): void => {
 };
 
 write({ type: "hello", v: 1, worker: "agent:pi", pid: process.pid });
+const heartbeat = setInterval(() => write({ type: "heartbeat" }), 5_000);
+heartbeat.unref?.();
 
 let sessionCounter = 0;
-const sessions = new Map<string, { aborted: boolean; permissionReply?: (allowed: boolean) => void }>();
+interface FakeSession {
+  aborted: boolean;
+  streaming: boolean;
+  directive?: string;
+  steerReply?: (text: string) => void;
+  permissionReply?: (allowed: boolean) => void;
+}
+const sessions = new Map<string, FakeSession>();
 
 const respond = (requestId: string, payload: unknown): void => {
   write({ requestId, ok: true, payload });
+};
+const respondError = (requestId: string, error: string): void => {
+  write({ requestId, ok: false, error });
 };
 
 readJsonl(Bun.stdin.stream(), (raw) => {
@@ -33,22 +48,31 @@ readJsonl(Bun.stdin.stream(), (raw) => {
     case "probe":
       respond(msg.requestId!, { agentId: "pi", installed: true, sdkOk: true, agentVersion: "fake-pi-1" });
       break;
-    case "session.open":
-    case "session.resume": {
+    case "session.open": {
       const id = `s${++sessionCounter}`;
-      sessions.set(id, { aborted: false });
+      sessions.set(id, { aborted: false, streaming: false });
       respond(msg.requestId!, { sessionId: id, nativeSessionId: `fake://${id}` });
       break;
     }
+    case "session.resume": {
+      // A resumed native session keeps its native id — like real pi sessions.
+      const resumed = (msg as unknown as { nativeSessionId: string }).nativeSessionId;
+      const id = `s${++sessionCounter}`;
+      sessions.set(id, { aborted: false, streaming: false });
+      respond(msg.requestId!, { sessionId: id, nativeSessionId: resumed });
+      break;
+    }
     case "message.send": {
-      const { sessionId, runId, message } = msg as unknown as { sessionId: string; runId: string; message: { text: string } };
+      const { sessionId, message } = msg as unknown as { sessionId: string; turnId: string; message: { text: string } };
       const text = message.text;
       const s = sessions.get(sessionId)!;
       void (async () => {
         if (text.startsWith("say:")) {
           const said = text.slice(4).trim();
           write({ type: "event", event: { type: "message.delta", sessionId, text: said.slice(0, 3) } });
+          await Bun.sleep(350);
           write({ type: "event", event: { type: "message.delta", sessionId, text: said.slice(3) } });
+          await Bun.sleep(350);
           write({ type: "event", event: { type: "turn.completed", sessionId, usage: { tokens: 1 } } });
           respond(msg.requestId!, { accepted: true });
           return;
@@ -56,6 +80,17 @@ readJsonl(Bun.stdin.stream(), (raw) => {
         if (text.startsWith("tool") || text.startsWith("ask") || text.startsWith("deny-tool")) {
           const needApproval = text.startsWith("ask") || text.startsWith("deny-tool");
           write({ type: "event", event: { type: "tool.started", sessionId, id: "t1", name: "bash", input: { command: "echo fake" } } });
+          write({
+            type: "event",
+            event: {
+              type: "native",
+              sessionId,
+              agentId: "pi",
+              capability: "fake.progress",
+              payload: { stage: "tool-running" },
+              sensitivity: "public",
+            },
+          });
           if (needApproval) {
             const allowed = await new Promise<boolean>((resolve) => {
               s.permissionReply = (a) => resolve(a);
@@ -79,20 +114,57 @@ readJsonl(Bun.stdin.stream(), (raw) => {
             }
           }
           write({ type: "event", event: { type: "tool.completed", sessionId, id: "t1", output: "fake output", isError: false } });
+          write({ type: "event", event: { type: "message.delta", sessionId, text: "tool finished" } });
+          await Bun.sleep(150);
           write({ type: "event", event: { type: "turn.completed", sessionId } });
           respond(msg.requestId!, { accepted: true });
           return;
         }
+        if (text === "fail") {
+          write({ type: "event", event: { type: "error", sessionId, message: "fake failure", retryable: false } });
+          respond(msg.requestId!, { accepted: true });
+          return;
+        }
         if (text === "hang") {
+          s.streaming = true;
+          s.directive = "hang";
           write({ type: "event", event: { type: "message.delta", sessionId, text: "hanging…" } });
-          // never completes; turn.abort must arrive
+          // never completes; turn.abort must arrive. steering is unsupported here.
+          respond(msg.requestId!, { accepted: true });
+          return;
+        }
+        if (text === "steer-echo") {
+          s.streaming = true;
+          s.directive = "steer-echo";
+          write({ type: "event", event: { type: "message.delta", sessionId, text: "working… " } });
+          // Long turn: wait for a steer, then echo it and complete.
+          const steered = await new Promise<string>((resolve) => {
+            s.steerReply = (t) => resolve(t);
+          });
+          write({ type: "event", event: { type: "message.delta", sessionId, text: `steered: ${steered}` } });
+          write({ type: "event", event: { type: "turn.completed", sessionId } });
+          s.streaming = false;
           respond(msg.requestId!, { accepted: true });
           return;
         }
         write({ type: "event", event: { type: "turn.completed", sessionId } });
         respond(msg.requestId!, { accepted: true });
-        void runId;
       })();
+      break;
+    }
+    case "message.steer": {
+      const { sessionId, text } = msg as unknown as { sessionId: string; text: string };
+      const s = sessions.get(sessionId);
+      if (!s || !s.streaming) {
+        respondError(msg.requestId!, "cannot steer: session is not streaming");
+        break;
+      }
+      if (s.directive === "hang") {
+        respondError(msg.requestId!, "fake hang is not steerable");
+        break;
+      }
+      s.steerReply?.(text);
+      respond(msg.requestId!, { steered: true });
       break;
     }
     case "permission.respond": {
@@ -106,6 +178,7 @@ readJsonl(Bun.stdin.stream(), (raw) => {
       const { sessionId } = msg as unknown as { sessionId: string };
       const s = sessions.get(sessionId);
       if (s) {
+        s.streaming = false;
         write({ type: "event", event: { type: "turn.cancelled", sessionId } });
       }
       respond(msg.requestId!, {});
@@ -122,7 +195,10 @@ readJsonl(Bun.stdin.stream(), (raw) => {
     case "session.close":
       respond(msg.requestId!, {});
       break;
+    case "session.delete":
+      respond(msg.requestId!, { deleted: true });
+      break;
     default:
-      if (msg.requestId) write({ requestId: msg.requestId, ok: false, error: `unknown command ${msg.type}` });
+      if (msg.requestId) respondError(msg.requestId, `unknown command ${msg.type}`);
   }
 });

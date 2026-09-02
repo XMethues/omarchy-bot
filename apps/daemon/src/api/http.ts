@@ -1,26 +1,38 @@
 import type { Database } from "bun:sqlite";
+import type { z } from "zod";
 import type { Config } from "../bootstrap/config.ts";
 import type { EventLog } from "../modules/events/eventLog.ts";
-import type { BotRegistry } from "../modules/bots/registry.ts";
+import type { AgentsRegistry } from "../modules/agents/registry.ts";
+import type { BotsService } from "../modules/bots/bots.ts";
 import type { ThreadsService } from "../modules/threads/threads.ts";
-import type { TaskRunner } from "../modules/tasks/runner.ts";
-import type { PermissionsService } from "../modules/permissions/permissions.ts";
+import type { TurnService } from "../modules/turns/turns.ts";
+import type { ApprovalsService } from "../modules/approvals/approvals.ts";
 import type { ComputerBroker } from "../modules/computer/broker.ts";
+import type { Supervisor } from "../supervision/supervisor.ts";
 import { existsSync } from "node:fs";
 import path from "node:path";
-import { ComputerStateDto, CreateThreadBody, RespondApprovalBody, SendMessageBody } from "@omarchy-bot/protocol";
+import {
+  CreateBotBody,
+  PatchBotBody,
+  PatchThreadBody,
+  RespondApprovalBody,
+  SendMessageBody,
+  type ComputerViewDto,
+} from "@omarchy-bot/protocol";
+import { HttpError } from "../modules/bots/bots.ts";
 
 export interface DaemonServices {
   cfg: Config;
   db: Database;
   events: EventLog;
-  bots: BotRegistry;
+  agents: AgentsRegistry;
+  bots: BotsService;
   threads: ThreadsService;
-  runner: TaskRunner;
-  permissions: PermissionsService;
+  turns: TurnService;
+  approvals: ApprovalsService;
   computer: ComputerBroker;
   /** Exposed for the conformance suite and advanced embedders; not used by HTTP handlers. */
-  supervisor: import("../supervision/supervisor.ts").Supervisor;
+  supervisor: Supervisor;
 }
 
 const JSON_HEADERS = { "content-type": "application/json" };
@@ -31,122 +43,182 @@ interface WsData {
   sub?: () => void;
 }
 
+/** Parse a JSON body with zod; 400 with the first issue on failure. */
+async function parseBody<T>(req: Request, schema: z.ZodType<T>): Promise<T> {
+  const raw: unknown = await req.json().catch(() => {
+    throw new HttpError(400, "invalid JSON body");
+  });
+  const parsed = schema.safeParse(raw);
+  if (!parsed.success) {
+    throw new HttpError(400, parsed.error.issues[0]?.message ?? "invalid body");
+  }
+  return parsed.data;
+}
+
+function notFound(message: string): Response {
+  return json({ error: message }, 404);
+}
+
+/** Plain-language computer view (ADR 0004): no lease/TTL/queue mechanics. */
+function computerView(svc: DaemonServices): ComputerViewDto {
+  const state = svc.computer.state();
+  if (state.emergencyStopped) return { state: "emergency-stopped", activity: "All computer control is stopped." };
+  if (state.lease !== null) {
+    if (state.lease.holder === "human") {
+      return { state: "user-control", activity: "You are using the computer. Return it to the bots when done." };
+    }
+    return { state: "bot-using", botId: state.lease.holder.botId, activity: "A bot is using the computer." };
+  }
+  if (state.queueDepth > 0) return { state: "waiting", activity: "A bot is waiting for the computer." };
+  const previewAt = state.lastImageAt;
+  return { state: "idle", activity: "The computer is free.", ...(previewAt !== undefined ? { previewAt } : {}) };
+}
 
 /**
- * Localhost REST + WS. Mutating commands are accepted -> completed-via-events;
- * desktop-input commands are never retried. MVP binds 127.0.0.1 only.
+ * Localhost REST + WS. Mutating commands are accepted -> completed-via-events.
+ * Binds 127.0.0.1 only; the browser talks to nothing else.
  */
 export function startHttp(svc: DaemonServices): { stop: () => Promise<void>; port: number } {
+  const route = async (req: Request): Promise<Response> => {
+    const url = new URL(req.url);
+    const pathname = url.pathname;
+
+    if (pathname === "/api/events") {
+      const upgraded = server.upgrade(req, { data: { svc } as WsData });
+      if (upgraded) return undefined as unknown as Response;
+      return json({ error: "expected websocket upgrade" }, 426);
+    }
+
+    if (pathname === "/api/health" && req.method === "GET") return json({ ok: true, ts: new Date().toISOString() });
+
+    if (pathname === "/api/agents" && req.method === "GET") return json(svc.agents.list());
+
+    if (pathname === "/api/bots" && req.method === "GET") {
+      return json(svc.bots.list({ includeArchived: url.searchParams.get("includeArchived") === "1" }));
+    }
+    if (pathname === "/api/bots" && req.method === "POST") {
+      const body = await parseBody(req, CreateBotBody);
+      return json(svc.bots.create(body), 201);
+    }
+
+    const m = (re: RegExp): RegExpMatchArray | null => pathname.match(re);
+
+    const botGet = m(/^\/api\/bots\/([\w-]+)$/);
+    if (botGet && req.method === "GET") return json(svc.bots.getView(botGet[1]!));
+    if (botGet && req.method === "PATCH") {
+      const raw = (await req.json().catch(() => {
+        throw new HttpError(400, "invalid JSON body");
+      })) as Record<string, unknown>;
+      if (raw.agentId !== undefined) throw new HttpError(400, "a bot's agent cannot change; create another bot instead");
+      const body = PatchBotBody.safeParse(raw);
+      if (!body.success) throw new HttpError(400, body.error.issues[0]?.message ?? "invalid body");
+      return json(svc.bots.patch(botGet[1]!, body.data));
+    }
+
+    const botThreads = m(/^\/api\/bots\/([\w-]+)\/threads$/);
+    if (botThreads && req.method === "GET") {
+      const q = url.searchParams.get("q");
+      return json(svc.threads.listThreadsForBot(botThreads[1]!, q ?? undefined));
+    }
+
+    const botMessages = m(/^\/api\/bots\/([\w-]+)\/messages$/);
+    if (botMessages && req.method === "POST") {
+      // Lazy threads: first send atomically creates thread+message+turn.
+      const body = await parseBody(req, SendMessageBody);
+      const result = await svc.turns.send(botMessages[1]!, null, body.text.trim());
+      return json(result, 202);
+    }
+
+    const threadGet = m(/^\/api\/threads\/([\w-]+)$/);
+    if (threadGet && req.method === "GET") {
+      const t = svc.threads.getThread(threadGet[1]!);
+      return t ? json(t) : notFound(`unknown thread ${threadGet[1]}`);
+    }
+    if (threadGet && req.method === "PATCH") {
+      await parseBody(req, PatchThreadBody);
+      const thread = svc.threads.getThread(threadGet[1]!);
+      if (!thread) return notFound(`unknown thread ${threadGet[1]}`);
+      // pi has no native rename in its capability inventory; unsupported ops
+      // are never simulated (agents-integration.md).
+      return json({ error: `rename not supported by ${svc.bots.getDto(thread.botId).agentId}` }, 409);
+    }
+
+    const threadMsgs = m(/^\/api\/threads\/([\w-]+)\/messages$/);
+    if (threadMsgs && req.method === "GET") return json(svc.threads.listMessages(threadMsgs[1]!));
+    if (threadMsgs && req.method === "POST") {
+      const body = await parseBody(req, SendMessageBody);
+      const thread = svc.threads.getThread(threadMsgs[1]!);
+      if (!thread) return notFound(`unknown thread ${threadMsgs[1]}`);
+      const result = await svc.turns.send(thread.botId, thread.id, body.text.trim());
+      return json(result, 202);
+    }
+
+    const turnAbort = m(/^\/api\/turns\/([\w-]+)\/abort$/);
+    if (turnAbort && req.method === "POST") {
+      await svc.turns.abortTurn(turnAbort[1]!, "user abort");
+      return new Response(null, { status: 202 });
+    }
+
+    if (pathname === "/api/approvals" && req.method === "GET") return json(svc.approvals.list());
+    const approvalRespond = m(/^\/api\/approvals\/([\w-]+)\/respond$/);
+    if (approvalRespond && req.method === "POST") {
+      const body = await parseBody(req, RespondApprovalBody);
+      const updated = svc.approvals.respond(approvalRespond[1]!, {
+        decision: body.decision,
+        ...(body.note !== undefined ? { note: body.note } : {}),
+      });
+      if (!updated) return notFound("unknown approval");
+      return json(updated);
+    }
+
+    if (pathname === "/api/computer/state" && req.method === "GET") return json(computerView(svc));
+    if (pathname === "/api/computer/take-control" && req.method === "POST") {
+      svc.computer.takeOver();
+      return json(computerView(svc));
+    }
+    if (pathname === "/api/computer/return-to-bot" && req.method === "POST") {
+      await svc.computer.imDone();
+      return json(computerView(svc));
+    }
+    if (pathname === "/api/computer/emergency-stop" && req.method === "POST") {
+      svc.computer.emergencyStop();
+      return json(computerView(svc));
+    }
+    if (pathname === "/api/computer/resume" && req.method === "POST") {
+      svc.computer.resumeAfterEmergencyStop();
+      return json(computerView(svc));
+    }
+    if (pathname === "/api/computer/snapshot" && req.method === "GET") {
+      const snap = await svc.computer.snapshot();
+      if (!snap) return new Response("no snapshot", { status: 503 });
+      return new Response(snap.bytes as unknown as BodyInit, { headers: { "content-type": snap.mediaType, "cache-control": "no-store" } });
+    }
+
+    // Release: serve the built web UI if present.
+    const dist = path.resolve(import.meta.dir, "../../../web/dist");
+    if (existsSync(dist) && req.method === "GET" && !pathname.startsWith("/api/")) {
+      const file = pathname === "/" ? "/index.html" : pathname;
+      const f = Bun.file(path.join(dist, file));
+      if (await f.exists()) return new Response(f);
+      return new Response(Bun.file(path.join(dist, "index.html")));
+    }
+
+    return notFound("not found");
+  };
+
+  const handle = async (req: Request): Promise<Response> => {
+    try {
+      return await route(req);
+    } catch (err) {
+      if (err instanceof HttpError) return json({ error: err.message, ...(err.extra ?? {}) }, err.status);
+      return json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    }
+  };
+
   const server = Bun.serve<WsData>({
     port: svc.cfg.port,
     hostname: "127.0.0.1",
-    async fetch(req): Promise<Response> {
-      const { pathname } = new URL(req.url);
-
-      if (pathname === "/api/events") {
-        const upgraded = server.upgrade(req, { data: { svc } as WsData });
-        if (upgraded) return undefined as unknown as Response;
-        return json({ error: "expected websocket upgrade" }, 426);
-      }
-
-      if (pathname === "/api/health" && req.method === "GET") return json({ ok: true, ts: new Date().toISOString() });
-
-      if (pathname === "/api/bots" && req.method === "GET") return json(svc.bots.list());
-
-      const m = (re: RegExp): RegExpMatchArray | null => pathname.match(re);
-
-      const botRecheck = m(/^\/api\/bots\/([\w-]+)\/recheck$/);
-      if (botRecheck && req.method === "POST") return json(await svc.bots.recheck(botRecheck[1]!));
-
-      const botPatch = m(/^\/api\/bots\/([\w-]+)$/);
-      if (botPatch && req.method === "PATCH") {
-        const body = (await req.json()) as { enabled?: boolean; permissionPolicy?: "ask" | "trusted" };
-        if (body.enabled !== undefined) svc.bots.setEnabled(botPatch[1]!, body.enabled);
-        if (body.permissionPolicy !== undefined) svc.bots.setPolicy(botPatch[1]!, body.permissionPolicy);
-        return json(svc.bots.get(botPatch[1]!));
-      }
-
-      if (pathname === "/api/threads" && req.method === "GET") return json(svc.threads.listThreads());
-      if (pathname === "/api/threads" && req.method === "POST") {
-        const body = CreateThreadBody.parse(await req.json());
-        if (!svc.bots.isEnabled(body.botId)) return json({ error: `bot ${body.botId} not enabled` }, 400);
-        return json(
-          svc.threads.createDirectThread(body.botId, {
-            ...(body.roleId !== undefined ? { roleId: body.roleId } : {}),
-            ...(body.title !== undefined ? { title: body.title } : {}),
-            ...(body.cwd !== undefined ? { cwd: body.cwd } : {}),
-          }),
-        );
-      }
-
-      const threadMsgs = m(/^\/api\/threads\/([\w-]+)\/messages$/);
-      if (threadMsgs && req.method === "GET") return json(svc.threads.listMessages(threadMsgs[1]!));
-      if (threadMsgs && req.method === "POST") {
-        const body = SendMessageBody.parse(await req.json());
-        const msg = await svc.runner.sendUserMessage(threadMsgs[1]!, body.text);
-        return json(msg, 202);
-      }
-
-      if (pathname === "/api/tasks" && req.method === "GET") return json(taskList(svc.db));
-      const taskAbort = m(/^\/api\/tasks\/([\w-]+)\/abort$/);
-      if (taskAbort && req.method === "POST") {
-        await svc.runner.abortTask(taskAbort[1]!, "user abort");
-        return new Response(null, { status: 202 });
-      }
-
-      if (pathname === "/api/permissions" && req.method === "GET") return json(svc.permissions.list());
-      const permRespond = m(/^\/api\/permissions\/([\w-]+)\/respond$/);
-      if (permRespond && req.method === "POST") {
-        const body = RespondApprovalBody.parse(await req.json());
-        const updated = svc.permissions.respond(permRespond[1]!, {
-          decision: body.decision,
-          ...(body.note !== undefined ? { note: body.note } : {}),
-        });
-        if (!updated) return json({ error: "unknown permission" }, 404);
-        return json(updated);
-      }
-
-      if (pathname === "/api/computer/state" && req.method === "GET") return json(ComputerStateDto.parse(svc.computer.state()));
-      if (pathname === "/api/computer/take-over" && req.method === "POST") {
-        svc.computer.takeOver();
-        return json(ComputerStateDto.parse(svc.computer.state()));
-      }
-      if (pathname === "/api/computer/release" && req.method === "POST") {
-        svc.computer.release("human", "");
-        return json(ComputerStateDto.parse(svc.computer.state()));
-      }
-      if (pathname === "/api/computer/im-done" && req.method === "POST") {
-        const body = (await req.json().catch(() => ({}))) as { note?: string };
-        await svc.computer.imDone(body.note);
-        return json(ComputerStateDto.parse(svc.computer.state()));
-      }
-      if (pathname === "/api/computer/emergency-stop" && req.method === "POST") {
-        svc.computer.emergencyStop();
-        return json(ComputerStateDto.parse(svc.computer.state()));
-      }
-      if (pathname === "/api/computer/resume" && req.method === "POST") {
-        svc.computer.resumeAfterEmergencyStop();
-        return json(ComputerStateDto.parse(svc.computer.state()));
-      }
-      if (pathname === "/api/computer/snapshot" && req.method === "GET") {
-        const snap = await svc.computer.snapshot();
-        if (!snap) return new Response("no snapshot", { status: 503 });
-        return new Response(snap.bytes as unknown as BodyInit, { headers: { "content-type": snap.mediaType, "cache-control": "no-store" } });
-      }
-
-      if (pathname === "/api/attachments" && req.method === "POST") return json({ error: "attachments land with M2 conformance" }, 501);
-
-      // Release: serve the built web UI if present.
-      const dist = path.resolve(import.meta.dir, "../../../web/dist");
-      if (existsSync(dist) && req.method === "GET" && !pathname.startsWith("/api/")) {
-        const file = pathname === "/" ? "/index.html" : pathname;
-        const f = Bun.file(path.join(dist, file));
-        if (await f.exists()) return new Response(f);
-        return new Response(Bun.file(path.join(dist, "index.html")));
-      }
-
-      return json({ error: "not found" }, 404);
-    },
+    fetch: handle,
     websocket: {
       open(_ws) {},
       message(ws, raw) {
@@ -176,19 +248,4 @@ export function startHttp(svc: DaemonServices): { stop: () => Promise<void>; por
   });
 
   return { port: server.port ?? svc.cfg.port, stop: () => server.stop(true) };
-}
-
-function taskList(db: Database) {
-  const rows = db
-    .query(`SELECT id, thread_id, owner_bot_id, owner_role_id, title, status, created_at, updated_at FROM tasks ORDER BY updated_at DESC LIMIT 200`)
-    .all() as Record<string, string>[];
-  return rows.map((r) => ({
-    id: r.id,
-    threadId: r.thread_id,
-    owner: { botId: r.owner_bot_id, roleId: r.owner_role_id },
-    title: r.title,
-    status: r.status,
-    createdAt: r.created_at,
-    updatedAt: r.updated_at,
-  }));
 }

@@ -1,12 +1,10 @@
-import type { ActorRef } from "./ids.ts";
-
 /**
  * The single, globally exclusive desktop-input grant. `holder: "human"` means
  * the user took over. Read-only observation is never lease-gated.
  */
 export interface ComputerLease {
-  holder: ActorRef | "human";
-  runId?: string;
+  holder: { botId: string } | "human";
+  turnId?: string;
   acquiredAt: string;
   expiresAt: string;
 }
@@ -42,13 +40,6 @@ export const INPUT_ACTIONS: readonly ComputerActionName[] = [
 
 export function isInputAction(name: ComputerActionName): boolean {
   return INPUT_ACTIONS.includes(name);
-}
-
-/** Legacy action classification pending removal with the old Computer approval layer. */
-export const SENSITIVE_ACTIONS: readonly ComputerActionName[] = ["open_url"];
-
-export function isSensitiveAction(name: ComputerActionName): boolean {
-  return SENSITIVE_ACTIONS.includes(name);
 }
 
 export function leaseExpired(lease: ComputerLease, now: Date = new Date()): boolean {

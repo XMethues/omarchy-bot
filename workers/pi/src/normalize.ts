@@ -11,11 +11,10 @@ export interface SessionRuntime {
   running: boolean;
   finished: boolean;
   aborted: boolean;
-  pendingPermissions: Map<string, (granted: boolean) => void>;
 }
 
 export function normalizeSessionEvent(ev: unknown, sessionId: string): AgentEvent[] {
-  const e = ev as { type: string; [k: string]: any };
+  const e = ev as { type: string; [k: string]: unknown };
   switch (e.type) {
     case "message_update": {
       const ame = e.assistantMessageEvent as { type?: string; delta?: string } | undefined;
@@ -32,7 +31,7 @@ export function normalizeSessionEvent(ev: unknown, sessionId: string): AgentEven
       return [{ type: "tool.completed", sessionId, id: String(e.toolCallId), output: summarizeToolResult(e.result), isError: Boolean(e.isError) }];
     case "auto_retry_end": {
       if (e.success === false) {
-        return [{ type: "error", sessionId, message: `native retry failed: ${e.finalError ?? "unknown"}`, retryable: false }];
+        return [{ type: "error", sessionId, message: `native retry failed: ${String(e.finalError ?? "unknown")}`, retryable: false }];
       }
       return [];
     }
@@ -45,7 +44,7 @@ function textOf(content: unknown): string {
   if (typeof content === "string") return content;
   if (Array.isArray(content)) {
     return content
-      .filter((c): c is { type: "text"; text: string } => (c as any)?.type === "text" && typeof (c as any)?.text === "string")
+      .filter((c): c is { type: "text"; text: string } => (c as { type?: string; text?: unknown })?.type === "text" && typeof (c as { text?: unknown }).text === "string")
       .map((c) => c.text)
       .join("");
   }

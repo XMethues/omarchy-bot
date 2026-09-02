@@ -1,37 +1,41 @@
+import type { JSX } from "react";
 import { AppShell } from "@astryxdesign/core/AppShell";
-import { TopNav } from "@astryxdesign/core/TopNav";
-import { TopNavHeading } from "@astryxdesign/core/TopNav";
-import { Banner } from "@astryxdesign/core/Banner";
-import { HStack } from "@astryxdesign/core/HStack";
-import { Text } from "@astryxdesign/core/Text";
-import { VStack } from "@astryxdesign/core/VStack";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { api } from "../lib/api.ts";
-import { startEventPump } from "../lib/events.ts";
-import { BotSidebar } from "../components/BotSidebar.tsx";
+import { startEventPump, type QueryTag } from "../lib/events.ts";
+import { Sidebar } from "../components/Sidebar.tsx";
+import { ConversationHeader } from "../components/ConversationHeader.tsx";
 import { ChatPanel } from "../components/ChatPanel.tsx";
-import { ComputerPanel } from "../components/ComputerPanel.tsx";
-import type { QueryTag } from "../lib/events.ts";
+import { CreateBotDialog } from "../components/CreateBotDialog.tsx";
 import styles from "../lib/styles.ts";
 
-export const Route = createFileRoute("/")({ component: HomeScreen });
+export const Route = createFileRoute("/")({
+  component: HomeScreen,
+  // Selection lives in the URL so a refresh restores it (contract §Web app).
+  validateSearch: (search: Record<string, unknown>): { bot?: string; thread?: string } => ({
+    ...(typeof search.bot === "string" ? { bot: search.bot } : {}),
+    ...(typeof search.thread === "string" ? { thread: search.thread } : {}),
+  }),
+});
 
 type Tags = Record<QueryTag, string[]>;
 const QUERY_KEYS: Tags = {
+  agents: ["agents"],
   bots: ["bots"],
   threads: ["threads"],
   messages: ["messages"],
   approvals: ["approvals"],
-  tasks: ["tasks"],
+  turns: ["turns"],
   computer: ["computer"],
 };
 
-function HomeScreen() {
+function HomeScreen(): JSX.Element {
   const qc = useQueryClient();
-  const [selectedBotId, setSelectedBotId] = useState<string>();
-  const [selectedThreadId, setSelectedThreadId] = useState<string>();
+  const navigate = useNavigate();
+  const { bot: selectedBotId, thread: selectedThreadId } = Route.useSearch();
+  const [createOpen, setCreateOpen] = useState(false);
 
   const invalidate = useCallback(
     (tag: QueryTag, threadId?: string) => {
@@ -44,59 +48,92 @@ function HomeScreen() {
     startEventPump(invalidate, () => void qc.invalidateQueries());
   }, [qc, invalidate]);
 
+  const agents = useQuery({ queryKey: ["agents"], queryFn: () => api.listAgents(), refetchInterval: 30_000 });
   const bots = useQuery({ queryKey: ["bots"], queryFn: () => api.listBots(), refetchInterval: 30_000 });
-  const threads = useQuery({ queryKey: ["threads"], queryFn: () => api.listThreads(), refetchInterval: 60_000 });
-  const tasks = useQuery({ queryKey: ["tasks"], queryFn: () => api.listTasks(), refetchInterval: 15_000 });
   const approvals = useQuery({ queryKey: ["approvals"], queryFn: () => api.listApprovals(), refetchInterval: 15_000 });
-  const computer = useQuery({ queryKey: ["computer"], queryFn: () => api.computerState(), refetchInterval: 5_000 });
 
-  // Default selection: first bot, its latest thread.
-  useEffect(() => {
-    if (selectedBotId === undefined && bots.data?.length) setSelectedBotId(bots.data[0]?.id);
-  }, [bots.data, selectedBotId]);
-  useEffect(() => {
-    if (!selectedBotId || !threads.data) return;
-    const known = threads.data.some((t) => t.id === selectedThreadId);
-    if (!known) {
-      const latest = threads.data
-        .filter((t) => t.botId === selectedBotId)
-        .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
-      setSelectedThreadId(latest?.id);
-    }
-  }, [threads.data, selectedBotId, selectedThreadId]);
-
-  const thread = useMemo(() => threads.data?.find((t) => t.id === selectedThreadId), [threads.data, selectedThreadId]);
   const bot = useMemo(() => bots.data?.find((b) => b.id === selectedBotId), [bots.data, selectedBotId]);
 
-  const messages = useQuery({
-    queryKey: ["messages", selectedThreadId],
-    queryFn: () => api.listMessages(selectedThreadId!),
-    enabled: selectedThreadId !== undefined,
+  const threads = useQuery({
+    queryKey: ["threads", bot?.id],
+    queryFn: () => api.listBotThreads(bot!.id),
+    enabled: bot !== undefined,
+    refetchInterval: 60_000,
   });
 
-  const recheck = useMutation({ mutationFn: api.recheckBot, onSuccess: () => invalidate("bots") });
-  const newChat = useMutation({
-    mutationFn: () => api.createThread({ botId: selectedBotId! }),
-    onSuccess: (t) => {
-      invalidate("threads");
-      setSelectedThreadId(t.id);
-    },
+  // Startup with no URL params: select the most recently active bot. Leaving
+  // the thread param absent lets the thread query below resolve its latest
+  // conversation; bots with no history resolve to an explicit blank draft.
+  useEffect(() => {
+    if (selectedBotId !== undefined) return;
+    const list = bots.data ?? [];
+    if (list.length === 0) return;
+    const ordered = [...list].sort(
+      (a, b) => Number(b.pinned) - Number(a.pinned) || (b.lastActivityAt ?? "").localeCompare(a.lastActivityAt ?? ""),
+    );
+    const first = ordered[0];
+    if (first === undefined) return;
+    void navigate({ search: { bot: first.id }, replace: true });
+  }, [selectedBotId, bots.data, navigate]);
+
+  // Resolve the selected thread; `blank` keeps the genuinely empty composer.
+  const thread = useMemo(() => {
+    if (selectedThreadId === undefined || selectedThreadId === "blank") return undefined;
+    return threads.data?.find((t) => t.id === selectedThreadId);
+  }, [threads.data, selectedThreadId]);
+
+  // When a bot is selected without an explicit thread, open its most recent one.
+  useEffect(() => {
+    if (bot === undefined || selectedThreadId !== undefined || threads.data === undefined) return;
+    const latest = threads.data[0];
+    void navigate({ search: { bot: bot.id, thread: latest?.id ?? "blank" }, replace: true });
+  }, [bot, selectedThreadId, threads.data, navigate]);
+
+  const messages = useQuery({
+    queryKey: ["messages", thread?.id],
+    queryFn: () => api.listMessages(thread!.id),
+    enabled: thread !== undefined,
+    refetchInterval: 15_000,
   });
-  const respond = useMutation({
+
+  const respondApproval = useMutation({
     mutationFn: ({ id, decision }: { id: string; decision: boolean }) => api.respondApproval(id, { decision }),
     onSuccess: () => {
       invalidate("approvals");
-      invalidate("tasks");
-      invalidate("messages", selectedThreadId);
+      invalidate("turns");
+      invalidate("messages", thread?.id);
     },
   });
 
-  const pendingPermissionIds = useMemo(
+  const pendingApprovalIds = useMemo(
     () => new Set((approvals.data ?? []).filter((a) => a.status === "pending").map((a) => a.id)),
     [approvals.data],
   );
 
-  const needsRecheck = (bots.data ?? []).some((b) => b.status === "missing" || b.status === "unconfigured");
+  const selectBot = useCallback(
+    (botId: string): void => {
+      // Drop the thread param: the resolution effect below opens the newly
+      // selected bot's most recent thread or a genuinely blank composer.
+      void navigate({ search: { bot: botId } });
+    },
+    [navigate],
+  );
+
+  const onMessageSent = useCallback(
+    (threadId: string): void => {
+      invalidate("threads");
+      invalidate("bots");
+      if (bot !== undefined && threadId !== selectedThreadId) {
+        void navigate({ search: { bot: bot.id, thread: threadId } });
+      }
+    },
+    [bot, selectedThreadId, navigate, invalidate],
+  );
+
+  const isAgentReady = useMemo(() => {
+    if (bot === undefined) return false;
+    return (agents.data ?? []).find((a) => a.id === bot.agentId)?.status === "ready";
+  }, [agents.data, bot]);
 
   return (
     <AppShell
@@ -104,79 +141,37 @@ function HomeScreen() {
       contentPadding={0}
       variant="section"
       sideNav={
-        <BotSidebar
+        <Sidebar
           bots={bots.data ?? []}
-          threads={threads.data ?? []}
           selectedBotId={selectedBotId}
-          selectedThreadId={selectedThreadId}
-          onSelectBot={(id) => {
-            setSelectedBotId(id);
-            setSelectedThreadId(undefined);
+          onSelectBot={selectBot}
+          onCreateBot={() => setCreateOpen(true)}
+          onOpenSettings={() => {
+            /* Settings lands with T03; the button is named and inert until then. */
           }}
-          onSelectThread={setSelectedThreadId}
-          onNewChat={() => newChat.mutate()}
-          onRecheck={(id) => recheck.mutate(id)}
-        />
-      }
-      topNav={
-        <TopNav
-          label="Main"
-          heading={<TopNavHeading>omarchy-bot</TopNavHeading>}
-          endContent={
-            <HStack gap={2}>
-              <Text type="supporting" size="2xs">
-                M1 · Pi Bot
-              </Text>
-            </HStack>
-          }
         />
       }
     >
-      <VStack gap={0} height="fill">
-        {needsRecheck && (
-          <Banner
-            status="warning"
-            title="Some agents are not installed or unconfigured"
-            description="Click a bot's status pill to re-check it against this machine."
-            container="card"
-            collapsible={false}
-          />
-        )}
-        {computer.data?.emergencyStopped && (
-          <Banner status="error" title="Emergency stop is active" container="card" collapsible={false} />
-        )}
-        <HStack gap={0} height="fill" xstyle={styles.stretch}>
-          <VStack xstyle={styles.fillColumn}>
-            {thread && bot ? (
-              <ChatPanel
-                thread={thread}
-                bot={bot}
-                messages={messages.data ?? []}
-                tasks={tasks.data ?? []}
-                pendingPermissionIds={pendingPermissionIds}
-                onRespond={(id, decision) => respond.mutate({ id, decision })}
-                onSnapshotRequired={() => void qc.invalidateQueries()}
-              />
-            ) : (
-              <VStack gap={2} padding={4}>
-                <Text type="supporting">
-                  {bots.data?.length ? "Select a bot and start a chat." : "Starting daemon… no bots yet."}
-                </Text>
-              </VStack>
-            )}
-          </VStack>
-          <VStack padding={0} xstyle={styles.computerColumn}>
-            {computer.data && (
-              <ComputerPanel
-                state={computer.data}
-                bots={bots.data ?? []}
-                threads={threads.data ?? []}
-                onSnapshotRequired={() => void qc.invalidateQueries()}
-              />
-            )}
-          </VStack>
-        </HStack>
-      </VStack>
+      <div xstyle={styles.fillColumn}>
+        <ConversationHeader bot={bot} thread={thread} />
+        <ChatPanel
+          bot={bot}
+          thread={thread}
+          messages={messages.data ?? []}
+          pendingApprovalIds={pendingApprovalIds}
+          onRespondApproval={(id, decision) => respondApproval.mutate({ id, decision })}
+          onMessageSent={onMessageSent}
+          isAgentReady={isAgentReady}
+        />
+      </div>
+      <CreateBotDialog
+        isOpen={createOpen}
+        onClose={() => setCreateOpen(false)}
+        onCreated={(botId) => {
+          invalidate("bots");
+          void navigate({ search: { bot: botId, thread: "blank" } });
+        }}
+      />
     </AppShell>
   );
 }

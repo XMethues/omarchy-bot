@@ -2,25 +2,15 @@ import { loadConfig } from "./config.ts";
 import { openDb, recoverOnStartup } from "../persistence/db.ts";
 import { EventLog } from "../modules/events/eventLog.ts";
 import { ThreadsService } from "../modules/threads/threads.ts";
-import { PermissionsService } from "../modules/permissions/permissions.ts";
-import { BotRegistry } from "../modules/bots/registry.ts";
-import { TaskRunner } from "../modules/tasks/runner.ts";
+import { ApprovalsService } from "../modules/approvals/approvals.ts";
+import { AgentsRegistry } from "../modules/agents/registry.ts";
+import { BotsService } from "../modules/bots/bots.ts";
+import { TurnService } from "../modules/turns/turns.ts";
 import { ComputerBroker } from "../modules/computer/broker.ts";
 import { Supervisor } from "../supervision/supervisor.ts";
 import { startHttp, type DaemonServices } from "../api/http.ts";
 import { writeFileSync, renameSync } from "node:fs";
 import path from "node:path";
-
-/** The default agent Bot ranks first (research.md §6); read-only discovery only. */
-function readDefaultAgent(): "pi" {
-  try {
-    const out = Bun.spawnSync(["omarchy", "default", "agent"], { stdout: "pipe", stderr: "ignore" });
-    const v = out.stdout.toString().trim();
-    return (["pi", "omp", "codex", "claude", "grok", "opencode", "gemini", "copilot", "crush"].includes(v) ? v : "pi") as "pi";
-  } catch {
-    return "pi";
-  }
-}
 
 function writeStatusAtomic(statusPath: string, data: unknown): void {
   const tmp = `${statusPath}.tmp`;
@@ -35,29 +25,32 @@ export async function main(): Promise<{ stop: () => Promise<void>; port: number;
 
   const events = new EventLog(db);
   const threads = new ThreadsService(db, events);
-  const permissions = new PermissionsService(db, events);
+  const approvals = new ApprovalsService(db, events);
+  const workersDir = process.env.OMARCHY_BOT_WORKERS_DIR ?? path.resolve(import.meta.dir, "../../../../workers");
+  const agentsDir = path.resolve(workersDir);
   const supervisor = new Supervisor(
     {
-      onAgentEvent: (botId, event) => runner.onAgentEvent(botId, event),
-      onWorkerCrash: (botId, err) => events.append("bot", botId, "bot.worker_crash", { message: err.message }),
+      onAgentEvent: (agentId, event) => turns.onAgentEvent(agentId, event),
+      onWorkerCrash: (agentId, err) => events.append("bot", agentId, "agent.worker_crash", { agentId, message: err.message }),
     },
     {
-      agents: path.resolve(import.meta.dir, process.env.OMARCHY_BOT_WORKERS_DIR ?? "../../../../workers"),
-      computer: path.resolve(import.meta.dir, process.env.OMARCHY_BOT_WORKERS_DIR ?? "../../../../workers", "computer"),
+      agents: agentsDir,
+      computer: path.resolve(agentsDir, "computer"),
     },
   );
-  const bots = new BotRegistry(db, events, cfg, supervisor, readDefaultAgent());
-  const runner = new TaskRunner(db, events, threads, permissions, bots, supervisor, { turnTimeoutMs: cfg.turnTimeoutMs });
-  const computer = new ComputerBroker(db, events, permissions, supervisor, runner, cfg);
+  const agents = new AgentsRegistry(db, events, { conformanceDir: cfg.conformanceDir, workersAgentsDir: agentsDir }, supervisor);
+  const bots = new BotsService(db, events, agents, threads);
+  const turns = new TurnService(db, events, threads, approvals, agents, bots, supervisor, { turnTimeoutMs: cfg.turnTimeoutMs });
+  const computer = new ComputerBroker(db, events, turns, supervisor, cfg);
 
-  bots.init();
+  agents.init();
 
-  // Recheck enabled bots in the background: probe only; conformance stays explicit.
-  for (const b of bots.list().filter((x) => x.enabled)) {
-    void bots.recheck(b.id).catch(() => {});
+  // Recheck every agent in the background: probe + conformance gate.
+  for (const a of agents.list()) {
+    void agents.recheck(a.id).catch(() => {});
   }
 
-  const svc: DaemonServices = { cfg, db, events, bots, threads, runner, permissions, computer, supervisor };
+  const svc: DaemonServices = { cfg, db, events, agents, bots, threads, turns, approvals, computer, supervisor };
   const http = startHttp(svc);
 
   // Periodic status file for the future bar widget (decoupled pattern from research.md §3).
@@ -65,8 +58,8 @@ export async function main(): Promise<{ stop: () => Promise<void>; port: number;
     try {
       writeStatusAtomic(cfg.statusPath, {
         ts: new Date().toISOString(),
-        bots: bots.list().map((b) => ({ id: b.id, status: b.status })),
-        approvals: permissions.listPending().length,
+        agents: agents.list().map((a) => ({ id: a.id, status: a.status })),
+        approvals: approvals.listPending().length,
         computer: computer.state(),
       });
     } catch {
@@ -83,11 +76,11 @@ export async function main(): Promise<{ stop: () => Promise<void>; port: number;
     stopping = true;
     // Safe shutdown order: stop new work before revoking shared resources.
     clearInterval(statusTimer);
-    permissions.failClosedAll(); // 4. pending approvals resolve as unavailable
-    computer.emergencyStop(); // 3. revoke leases, stop input (also parks runs)
-    await supervisor.stopAll(); // 6. close workers
-    http.stop(); // 8. close listeners
-    db.close(); // 7. flush WAL
+    approvals.failClosedAll(); // pending approvals resolve as unavailable
+    computer.emergencyStop(); // revoke leases, stop input (also parks turns)
+    await supervisor.stopAll(); // close workers
+    http.stop(); // close listeners
+    db.close(); // flush WAL
     console.log("omarchy-bot daemon stopped");
   };
 

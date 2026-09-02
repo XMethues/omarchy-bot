@@ -1,8 +1,9 @@
 #!/usr/bin/env bun
 /**
  * Real Pi worker (agents-integration.md §4): LF-JSONL over stdio, `hello` first.
- * Each omarchy-bot session maps to one native pi AgentSession with its own
- * session file; events are normalized; permissions gate side-effecting tools.
+ * Each omarchy-bot thread maps to one native pi AgentSession with its own
+ * session file; events are normalized. Pi keeps its native approval behavior —
+ * NO omarchy-bot permission gate sits on this path (ADR 0003).
  */
 import {
   createAgentSession,
@@ -16,7 +17,6 @@ import {
   HEARTBEAT_MS,
   PROTOCOL_VERSION,
   readJsonl,
-  stderr,
   writeJsonl,
   type AgentCommand,
   type AgentEvent,
@@ -25,7 +25,6 @@ import {
   type ProbePayload,
   type SessionOpenedPayload,
 } from "@omarchy-bot/agent-contract";
-import { permissionGate, READ_ONLY_TOOLS } from "./permission-gate.ts";
 import { normalizeSessionEvent, toNormalizedMessages, type SessionRuntime } from "./normalize.ts";
 import { sdkVersion } from "./sdk-version.ts";
 
@@ -86,27 +85,19 @@ function attachSubscription(entry: SessionEntry): void {
 
 async function openSession(
   requestId: string,
-  options: { cwd: string; permissionPolicy: "ask" | "trusted"; model?: string },
+  options: { cwd: string; instructions: string; model?: string },
   existing?: SessionEntry | undefined,
 ): Promise<void> {
   const sessionId = `s_${crypto.randomUUID()}`;
-  const pendingPermissions = new Map<string, (granted: boolean) => void>();
-  const entry: SessionEntry | undefined = existing
-    ? existing
-    : undefined;
-  void entry;
 
+  // Bot Job/Instructions are injected into the system prompt; pi itself keeps
+  // deciding when to ask for approvals.
   const loader = new DefaultResourceLoader({
     cwd: options.cwd,
     agentDir: getAgentDir(),
-    extensionFactories: [
-      permissionGate({
-        sessionId,
-        policy: options.permissionPolicy,
-        pending: pendingPermissions,
-        emit,
-      }),
-    ],
+    ...(options.instructions.trim() !== ""
+      ? { appendSystemPrompt: [`[omarchy-bot] Your Job/Instructions for this Bot:\n\n${options.instructions.trim()}`] }
+      : {}),
   });
   await loader.reload();
 
@@ -136,7 +127,6 @@ async function openSession(
     running: false,
     finished: false,
     aborted: false,
-    pendingPermissions,
   };
   sessions.set(sessionId, newEntry);
   attachSubscription(newEntry);
@@ -166,7 +156,7 @@ async function handleMessage(cmd: AgentCommand): Promise<void> {
       case "session.open":
         await openSession(cmd.requestId, {
           cwd: cmd.options.cwd,
-          permissionPolicy: cmd.options.permissionPolicy,
+          instructions: cmd.options.instructions,
           ...(cmd.options.model !== undefined ? { model: cmd.options.model } : {}),
         });
         return;
@@ -177,12 +167,14 @@ async function handleMessage(cmd: AgentCommand): Promise<void> {
         const holder = { nativeSessionId: cmd.nativeSessionId } as SessionEntry;
         await openSession(cmd.requestId, {
           cwd: cmd.options.cwd,
-          permissionPolicy: cmd.options.permissionPolicy,
+          instructions: cmd.options.instructions,
           ...(cmd.options.model !== undefined ? { model: cmd.options.model } : {}),
         }, holder);
         return;
       }
       case "message.send": {
+        // The daemon only sends on idle sessions; mid-turn user input arrives
+        // as message.steer. A busy session is therefore an error, never a crash.
         const entry = sessionEntry(cmd.sessionId);
         if (entry.session.isStreaming) throw new Error("session busy: a turn is already running");
         const images =
@@ -219,20 +211,21 @@ async function handleMessage(cmd: AgentCommand): Promise<void> {
         reply({ requestId: cmd.requestId, ok: true, payload: { accepted: true } });
         return;
       }
-      case "permission.respond": {
+      case "message.steer": {
+        // Native pi steering: delivered at pi's safe boundary between tool calls.
         const entry = sessionEntry(cmd.sessionId);
-        const resolve = entry.pendingPermissions.get(cmd.permissionId);
-        entry.pendingPermissions.delete(cmd.permissionId);
-        if (!resolve) throw new Error(`unknown permission ${cmd.permissionId}`);
-        resolve(cmd.decision.allow);
-        reply({ requestId: cmd.requestId, ok: true, payload: { delivered: true } });
+        if (!entry.session.isStreaming) throw new Error("cannot steer: session is not streaming");
+        await entry.session.steer(cmd.text);
+        reply({ requestId: cmd.requestId, ok: true, payload: { steered: true } });
         return;
+      }
+      case "permission.respond": {
+        // Pi's native approvals surface through permission.requested only when
+        // the adapter has them; without a gate there is nothing to forward.
+        throw new Error("pi does not route omarchy-bot permission decisions");
       }
       case "turn.abort": {
         const entry = sessionEntry(cmd.sessionId);
-        // Fail closed: unanswered permission gates resolve as denied.
-        for (const [, resolve] of entry.pendingPermissions) resolve(false);
-        entry.pendingPermissions.clear();
         if (entry.running && !entry.finished) {
           entry.aborted = true;
           await entry.session.abort();
@@ -254,11 +247,14 @@ async function handleMessage(cmd: AgentCommand): Promise<void> {
       }
       case "session.close": {
         const entry = sessionEntry(cmd.sessionId);
-        for (const [, resolve] of entry.pendingPermissions) resolve(false);
-        entry.pendingPermissions.clear();
         entry.session.dispose();
         sessions.delete(cmd.sessionId);
         reply({ requestId: cmd.requestId, ok: true, payload: { closed: true } });
+        return;
+      }
+      case "session.delete": {
+        // Honest capability answer: pi has no native session deletion.
+        reply({ requestId: cmd.requestId, ok: false, error: "pi does not support native session deletion" });
         return;
       }
       default: {
@@ -283,5 +279,3 @@ await readJsonl(
   },
   () => process.exit(0),
 );
-
-export { READ_ONLY_TOOLS };
