@@ -1,0 +1,37 @@
+# omarchy-bot — daemon systemd --user unit
+#
+# Release artifact. This file ships in-repo; it is NOT installed by the build.
+# To run omarchy-bot as a user service (M1+):
+#
+#   1. Build once (the daemon serves the built web UI on 127.0.0.1:7321):
+#        bun install && bun run build
+#   2. Install the unit (adjust the repo path if you cloned elsewhere):
+#        cp omarchy-bot.service ~/.config/systemd/user/
+#        systemctl --user daemon-reload
+#   3. Start / enable:
+#        systemctl --user start omarchy-bot
+#        systemctl --user enable omarchy-bot
+#
+# The daemon spawns the pi + computer workers itself; it does not need a
+# desktop session to serve the API, but the computer worker needs access to
+# the running Wayland session (WAYLAND_DISPLAY is discovered at runtime).
+
+[Unit]
+Description=omarchy-bot daemon (multi-agent bot harness)
+Documentation=https://github.com/omarchy-bot/omarchy-bot
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Projects/omarchy-bot
+ExecStart=%h/.local/share/mise/installs/bun/latest/bin/bun run start
+Restart=on-failure
+RestartSec=3
+# Hardened worker supervision: workers are children; keep them in the cgroup.
+KillMode=control-group
+# Data lives under ~/.local/share/omarchy-bot and ~/.local/state/omarchy-bot.
+NoNewPrivileges=true
+
+[Install]
+WantedBy=graphical-session.target

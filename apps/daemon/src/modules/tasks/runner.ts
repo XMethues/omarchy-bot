@@ -221,7 +221,9 @@ export class TaskRunner {
         kind: "text",
         text: ctx.assistantBuf,
       });
-    } else if (outcome !== "completed") {
+    }
+    if (outcome !== "completed") {
+      // Keep the transcript honest: non-normative turn ends always leave a note.
       this.threads.appendMessage(ctx.threadId, { author: { kind: "system" }, kind: "event", text: reason ? `turn ${outcome}: ${reason}` : `turn ${outcome}` });
     }
 

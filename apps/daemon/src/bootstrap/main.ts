@@ -28,7 +28,7 @@ function writeStatusAtomic(statusPath: string, data: unknown): void {
   renameSync(tmp, statusPath);
 }
 
-export async function main(): Promise<{ stop: () => Promise<void> }> {
+export async function main(): Promise<{ stop: () => Promise<void>; port: number }> {
   const cfg = loadConfig();
   const db = openDb(cfg);
   recoverOnStartup(db); // leases never survive a restart as bot-held
@@ -42,8 +42,8 @@ export async function main(): Promise<{ stop: () => Promise<void> }> {
       onWorkerCrash: (botId, err) => events.append("bot", botId, "bot.worker_crash", { message: err.message }),
     },
     {
-      agents: path.resolve(import.meta.dir, "../../../../workers"),
-      computer: path.resolve(import.meta.dir, "../../../../workers/computer"),
+      agents: path.resolve(import.meta.dir, process.env.OMARCHY_BOT_WORKERS_DIR ?? "../../../../workers"),
+      computer: path.resolve(import.meta.dir, process.env.OMARCHY_BOT_WORKERS_DIR ?? "../../../../workers", "computer"),
     },
   );
   const bots = new BotRegistry(db, events, cfg, supervisor, readDefaultAgent());
@@ -94,7 +94,7 @@ export async function main(): Promise<{ stop: () => Promise<void> }> {
   process.on("SIGINT", () => void stop());
   process.on("SIGTERM", () => void stop());
 
-  return { stop };
+  return { stop, port: http.port };
 }
 
 if (import.meta.main) {
