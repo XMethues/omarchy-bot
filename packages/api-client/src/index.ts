@@ -10,6 +10,7 @@ import type {
   ComputerViewDto,
   CreateBotBodyDto,
   DeleteBotBodyDto,
+  DeleteBotResultDto,
   DictationDto,
   DictationResultDto,
   EventEnvelope,
@@ -26,6 +27,7 @@ import type {
   ThreadDto,
   TurnDto,
 } from "@omarchy-bot/protocol";
+import { DeleteBotResultDto as DeleteBotResultSchema } from "@omarchy-bot/protocol";
 
 export interface ApiClientOptions {
   baseUrl?: string;
@@ -104,8 +106,16 @@ export class ApiClient {
   restoreBot(id: string): Promise<BotDto> {
     return this.req(`/api/bots/${id}/restore`, { method: "POST" });
   }
-  deleteBot(id: string, body: DeleteBotBodyDto): Promise<{ deleted: Record<string, unknown> }> {
-    return this.req(`/api/bots/${id}`, { method: "DELETE", body: JSON.stringify(body) });
+  async deleteBot(id: string, body: DeleteBotBodyDto): Promise<DeleteBotResultDto> {
+    try {
+      return await this.req(`/api/bots/${id}`, { method: "DELETE", body: JSON.stringify(body) });
+    } catch (error) {
+      if (error !== null && typeof error === "object" && "body" in error) {
+        const result = DeleteBotResultSchema.safeParse(error.body);
+        if (result.success) return result.data;
+      }
+      throw error;
+    }
   }
   generateAvatar(id: string): Promise<BotDto> {
     return this.req(`/api/bots/${id}/avatar/generate`, { method: "POST" });

@@ -5,6 +5,7 @@ import { ThreadsService } from "../modules/threads/threads.ts";
 import { ApprovalsService } from "../modules/approvals/approvals.ts";
 import { AgentsRegistry } from "../modules/agents/registry.ts";
 import { BotsService } from "../modules/bots/bots.ts";
+import { BotDeletionService } from "../modules/bots/botDeletion.ts";
 import { TurnService } from "../modules/turns/turns.ts";
 import { ComputerBroker } from "../modules/computer/broker.ts";
 import { AvatarService } from "../modules/avatars/avatarService.ts";
@@ -49,6 +50,7 @@ export async function main(): Promise<{ stop: () => Promise<void>; port: number;
   const attachments = new AttachmentsService(db, cfg.attachmentsDir);
   attachments.gcStaged();
   const avatars = new AvatarService(bots, supervisor, cfg.avatarsDir);
+  const botDeletions = new BotDeletionService(db, events, attachments, avatars, supervisor);
   const turns = new TurnService(db, events, threads, approvals, agents, bots, attachments, supervisor, { turnTimeoutMs: cfg.turnTimeoutMs });
   const computer = new ComputerBroker(db, events, turns, supervisor, cfg);
 
@@ -59,7 +61,7 @@ export async function main(): Promise<{ stop: () => Promise<void>; port: number;
     void agents.recheck(a.id).catch(() => {});
   }
 
-  const svc: DaemonServices = { cfg, db, events, agents, bots, threads, turns, approvals, avatars, attachments, dictation, computer, supervisor };
+  const svc: DaemonServices = { cfg, db, events, agents, bots, botDeletions, threads, turns, approvals, avatars, attachments, dictation, computer, supervisor };
   const http = startHttp(svc);
 
   // Periodic status file for the future bar widget (decoupled pattern from research.md §3).

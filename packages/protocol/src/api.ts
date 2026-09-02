@@ -201,6 +201,33 @@ export type ArchiveBodyDto = z.infer<typeof ArchiveBody>;
 export const DeleteBotBody = z.object({ confirmName: z.string() });
 export type DeleteBotBodyDto = z.infer<typeof DeleteBotBody>;
 
+export const DeleteBotFailureDto = z.object({
+  stage: z.enum(["native_session", "attachment", "avatar", "database"]),
+  resource: z.string(),
+  message: z.string(),
+});
+export type DeleteBotFailureDto = z.infer<typeof DeleteBotFailureDto>;
+
+export const DeleteBotResultDto = z.object({
+  status: z.enum(["deleted", "failed"]),
+  botId: z.string(),
+  botName: z.string(),
+  removed: z.object({
+    threads: z.number().int().nonnegative(),
+    messages: z.number().int().nonnegative(),
+    turns: z.number().int().nonnegative(),
+    attachments: z.number().int().nonnegative(),
+    avatar: z.boolean(),
+    nativeSessions: z.number().int().nonnegative(),
+  }),
+  nativeSessionCleanup: z.object({
+    supported: z.boolean(),
+    skipped: z.number().int().nonnegative(),
+  }),
+  failures: z.array(DeleteBotFailureDto),
+});
+export type DeleteBotResultDto = z.infer<typeof DeleteBotResultDto>;
+
 export const AvatarRecipeBody = z.object({ prompt: z.string().trim().min(1).max(2000) });
 export type AvatarRecipeBodyDto = z.infer<typeof AvatarRecipeBody>;
 

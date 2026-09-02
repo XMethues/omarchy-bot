@@ -54,7 +54,13 @@ readJsonl(Bun.stdin.stream(), (raw) => {
   const msg = raw as Record<string, unknown> & { type: string; requestId?: string };
   switch (msg.type) {
     case "probe":
-      respond(msg.requestId!, { agentId: "pi", installed: true, sdkOk: true, agentVersion: "fake-pi-1" });
+      respond(msg.requestId!, {
+        agentId: "pi",
+        installed: true,
+        sdkOk: true,
+        agentVersion: "fake-pi-1",
+        capabilities: { sessionDeletion: true },
+      });
       break;
     case "session.open": {
       const id = `s${++sessionCounter}`;
@@ -257,9 +263,15 @@ readJsonl(Bun.stdin.stream(), (raw) => {
     case "session.close":
       respond(msg.requestId!, {});
       break;
-    case "session.delete":
-      respond(msg.requestId!, { deleted: true });
+    case "session.delete": {
+      const nativeSessionId = typeof msg.nativeSessionId === "string" ? msg.nativeSessionId : "";
+      if (nativeSessionId.includes("fail-delete")) {
+        respondError(msg.requestId!, `native session deletion failed for ${nativeSessionId}`);
+      } else {
+        respond(msg.requestId!, { deleted: true });
+      }
       break;
+    }
     default:
       if (msg.requestId) respondError(msg.requestId, `unknown command ${msg.type}`);
   }

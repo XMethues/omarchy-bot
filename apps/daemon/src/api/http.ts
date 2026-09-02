@@ -4,6 +4,7 @@ import type { Config } from "../bootstrap/config.ts";
 import type { EventLog } from "../modules/events/eventLog.ts";
 import type { AgentsRegistry } from "../modules/agents/registry.ts";
 import type { BotsService } from "../modules/bots/bots.ts";
+import type { BotDeletionService } from "../modules/bots/botDeletion.ts";
 import type { ThreadsService } from "../modules/threads/threads.ts";
 import type { TurnService } from "../modules/turns/turns.ts";
 import type { ApprovalsService } from "../modules/approvals/approvals.ts";
@@ -15,6 +16,7 @@ import { handleAvatarRequest } from "./avatarRoutes.ts";
 import { handleThreadFeatureRequest } from "./threadRoutes.ts";
 import { handleBotArchiveRequest } from "./botArchiveRoutes.ts";
 import { handleBotAttentionRequest } from "./botAttentionRoutes.ts";
+import { handleBotDeletionRequest } from "./botDeletionRoutes.ts";
 import { handleComputerRequest } from "./computerRoutes.ts";
 import { handleDictationRequest } from "./dictationRoutes.ts";
 import { handleAttachmentRequest } from "./attachmentRoutes.ts";
@@ -30,6 +32,7 @@ export interface DaemonServices {
   events: EventLog;
   agents: AgentsRegistry;
   bots: BotsService;
+  botDeletions: BotDeletionService;
   threads: ThreadsService;
   turns: TurnService;
   approvals: ApprovalsService;
@@ -106,6 +109,9 @@ export function startHttp(svc: DaemonServices): { stop: () => Promise<void>; por
       if (!body.success) throw new HttpError(400, body.error.issues[0]?.message ?? "invalid body");
       return json(svc.bots.patch(botGet[1]!, body.data));
     }
+    const deletionResponse = await handleBotDeletionRequest(req, svc.botDeletions, pathname);
+    if (deletionResponse) return deletionResponse;
+
     const attentionResponse = await handleBotAttentionRequest(req, svc.bots, pathname);
     if (attentionResponse) return attentionResponse;
 

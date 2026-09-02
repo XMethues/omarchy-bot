@@ -111,6 +111,7 @@ function route(envelope: EventEnvelope, invalidate: Invalidate): void {
     case "bot.pinned":
     case "bot.archived":
     case "bot.restored":
+    case "bot.deleted":
     case "bot.read":
       invalidate("bots");
       return;

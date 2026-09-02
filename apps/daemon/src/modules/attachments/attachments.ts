@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdirSync, renameSync, unlinkSync } from "node:fs";
+import { mkdirSync, renameSync, rmSync, unlinkSync } from "node:fs";
 import path from "node:path";
 import type { Database } from "bun:sqlite";
 import type { WorkerUserMessage } from "@omarchy-bot/agent-contract";
@@ -207,6 +207,30 @@ export class AttachmentsService {
       path: path.join(this.#managedDir, row.id),
       mediaType: row.media_type,
     }));
+  }
+
+  /** Remove local bytes while retaining rows until the caller commits Bot deletion. */
+  deleteOwnedFiles(botId: string): { removed: number; failures: Array<{ resource: string; message: string }> } {
+    const rows = this.db.query(`SELECT * FROM attachments WHERE bot_id = ?`).all(botId) as AttachmentRow[];
+    const failures: Array<{ resource: string; message: string }> = [];
+    let removed = 0;
+    const root = path.resolve(this.attachmentsDir);
+    for (const row of rows) {
+      try {
+        const fullPath = path.resolve(root, row.rel_path);
+        if (fullPath !== root && !fullPath.startsWith(`${root}${path.sep}`)) {
+          throw new Error("stored attachment path escapes the managed root");
+        }
+        rmSync(fullPath, { force: true });
+        removed += 1;
+      } catch (error) {
+        failures.push({
+          resource: row.id,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    return { removed, failures };
   }
 
   gcStaged(maxAgeMs = STAGED_MAX_AGE_MS): number {

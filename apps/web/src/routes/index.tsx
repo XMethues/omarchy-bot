@@ -310,6 +310,20 @@ function HomeScreen(): JSX.Element {
         archivedBots={allBots.data ?? []}
         onRestoreBot={(botId) => api.restoreBot(botId)}
         onBotRestored={() => invalidate("bots")}
+        onDeleteBot={async (botId, confirmName) => {
+          const result = await api.deleteBot(botId, { confirmName });
+          if (result.status === "deleted") await qc.cancelQueries({ queryKey: ["bots"] });
+          return result;
+        }}
+        onBotDeleted={(botId) => {
+          qc.setQueryData(["bots"], (current: typeof bots.data) => current?.filter((candidate) => candidate.id !== botId));
+          qc.setQueryData(["bots", "all"], (current: typeof allBots.data) => current?.filter((candidate) => candidate.id !== botId));
+          qc.removeQueries({ queryKey: ["threads", botId], exact: true });
+          qc.removeQueries({ queryKey: ["messages"] });
+          clearDraftsByBot(botId);
+          invalidate("bots");
+          if (selectedBotId === botId) void navigate({ search: {}, replace: true });
+        }}
       >
         <>
           <VoiceSettingsControl value={autoSendVoice} onChange={setAutoSendVoice} />

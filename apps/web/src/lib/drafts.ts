@@ -121,8 +121,8 @@ export function saveDraft(
 export function clearDraftsByBot(
   botId: string,
   storage: StorageLike | undefined = windowSessionStorage(),
-): void {
-  if (storage === undefined) return;
+): boolean {
+  if (storage === undefined) return true;
   const prefix = `${DRAFT_STORAGE_PREFIX}${botId}:`;
 
   try {
@@ -132,7 +132,9 @@ export function clearDraftsByBot(
       if (key?.startsWith(prefix)) keys.push(key);
     }
     for (const key of keys) storage.removeItem(key);
+    return true;
   } catch {
-    // Storage can become unavailable after the page loads; cleanup is best effort.
+    // A caller performing permanent deletion must keep the archived record when cleanup cannot be verified.
+    return false;
   }
 }

@@ -50,6 +50,10 @@ export interface ProbePayload {
   agentVersion: string;
   sdkOk: boolean;
   reason?: string;
+  capabilities: {
+    /** True only when the adapter has a tested native operation that permanently removes a session. */
+    sessionDeletion: boolean;
+  };
 }
 
 export interface SessionOpenedPayload {

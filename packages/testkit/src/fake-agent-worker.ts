@@ -69,7 +69,13 @@ readJsonl(Bun.stdin.stream(), async (raw) => {
   const cmd = raw as AgentCommand;
   switch (cmd.type) {
     case "probe":
-      result(cmd.requestId, true, { agentId: "fake", installed: true, agentVersion: "fake-1.0.0", sdkOk: true });
+      result(cmd.requestId, true, {
+        agentId: "fake",
+        installed: true,
+        agentVersion: "fake-1.0.0",
+        sdkOk: true,
+        capabilities: { sessionDeletion: true },
+      });
       break;
     case "session.open":
     case "session.resume": {

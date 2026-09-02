@@ -278,6 +278,24 @@ CREATE INDEX idx_turns_thread ON turns(thread_id);
 CREATE INDEX idx_attachments_thread ON attachments(thread_id);
 `,
   },
+  {
+    name: "0003-permanent-bot-deletion",
+    sql: `
+CREATE TABLE bot_deletions (
+  bot_id TEXT PRIMARY KEY REFERENCES bots(id) ON DELETE CASCADE,
+  state TEXT NOT NULL CHECK (state IN ('cleaning', 'failed')),
+  failure_json TEXT,
+  started_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE bot_native_session_deletions (
+  bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+  native_session_id TEXT NOT NULL,
+  deleted_at TEXT NOT NULL,
+  PRIMARY KEY (bot_id, native_session_id)
+);
+`,
+  },
 ];
 
 export function openDb(cfg: Config): Database {
@@ -311,9 +329,11 @@ export function openDb(cfg: Config): Database {
   return db;
 }
 
-/** Shared-screen safety rule: input ownership never survives a daemon restart. */
+/** In-flight ownership and cleanup attempts never survive a daemon restart. */
 export function recoverOnStartup(db: Database): void {
   db.exec("DELETE FROM computer_leases");
   const now = new Date().toISOString();
   db.query(`UPDATE turns SET status='failed', finished_at=?, outcome_reason='daemon restart' WHERE status NOT IN ('completed','cancelled','failed')`).run(now);
+  db.query(`UPDATE bot_deletions SET state='failed', failure_json=?, updated_at=? WHERE state='cleaning'`)
+    .run(JSON.stringify([{ stage: "database", resource: "daemon", message: "daemon restarted during permanent deletion" }]), now);
 }

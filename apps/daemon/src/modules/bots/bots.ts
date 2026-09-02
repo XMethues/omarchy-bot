@@ -218,6 +218,9 @@ export class BotsService {
   restore(id: string): BotDto {
     const row = this.#row(id);
     if (!row) throw new HttpError(404, `unknown bot ${id}`);
+    if (this.db.query(`SELECT bot_id FROM bot_deletions WHERE bot_id = ?`).get(id) !== null) {
+      throw new HttpError(409, "permanent deletion cleanup must be retried before this bot can be restored");
+    }
     if (!row.archived) return this.#toDto(row);
 
     const now = new Date().toISOString();

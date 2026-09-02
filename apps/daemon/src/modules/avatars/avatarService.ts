@@ -222,6 +222,11 @@ export class AvatarService {
     return this.#localPath(relativeFile);
   }
 
+  /** Permanent deletion uses a strict file operation so callers cannot report false success. */
+  async deleteUploadedFile(relativeFile: string): Promise<void> {
+    await rm(this.#localPath(relativeFile), { force: true });
+  }
+
   #settleRecipe(sessionId: string, error?: Error, output?: string): void {
     const pending = this.#pendingRecipes.get(sessionId);
     if (pending === undefined) return;

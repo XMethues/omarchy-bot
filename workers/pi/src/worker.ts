@@ -148,6 +148,7 @@ async function handleMessage(cmd: AgentCommand): Promise<void> {
           installed: sdkOk,
           agentVersion: sdkVersion(),
           sdkOk,
+          capabilities: { sessionDeletion: false },
           ...(authed ? {} : { reason: "no authenticated model provider (run `pi` once or fill ~/.pi/agent/auth.json)" }),
         };
         reply({ requestId: cmd.requestId, ok: true, payload });
