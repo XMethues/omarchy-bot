@@ -1,5 +1,7 @@
 import type {
+  ClipboardEvent as ReactClipboardEvent,
   JSX,
+  KeyboardEvent as ReactKeyboardEvent,
   MouseEvent as ReactMouseEvent,
   PointerEvent as ReactPointerEvent,
   RefObject,
@@ -238,6 +240,7 @@ export function ComputerSheet({
   const frameUrlRef = useRef<string | undefined>(undefined);
   const expandedRef = useRef<HTMLDialogElement | null>(null);
   const pressedPointersRef = useRef(new Map<number, number>());
+  const browserPasteKeysRef = useRef(new Set<string>());
 
   const replaceFrame = useCallback((frame: Blob | undefined): void => {
     if (frameUrlRef.current !== undefined) URL.revokeObjectURL(frameUrlRef.current);
@@ -279,6 +282,46 @@ export function ComputerSheet({
     if (!previewExpanded || isSmallScreen) pressedPointersRef.current.clear();
     connectionRef.current?.setMode(previewExpanded && !isSmallScreen ? "expanded" : "preview");
   }, [isSmallScreen, previewExpanded]);
+
+  useEffect(() => {
+    if (!open || isSmallScreen || !previewExpanded) return;
+    const connection = connectionRef.current;
+    requestAnimationFrame(() => expandedRef.current?.focus());
+    browserPasteKeysRef.current.clear();
+    const releaseForBlur = (): void => {
+      pressedPointersRef.current.clear();
+      browserPasteKeysRef.current.clear();
+      connection?.releaseControl("blur");
+    };
+    const resumeAfterFocus = (): void => connection?.resumeControl();
+    const releaseForNavigation = (): void => {
+      pressedPointersRef.current.clear();
+      browserPasteKeysRef.current.clear();
+      connection?.releaseControl("navigation");
+    };
+    const handleVisibility = (): void => {
+      if (document.visibilityState === "hidden") {
+        pressedPointersRef.current.clear();
+        browserPasteKeysRef.current.clear();
+        connection?.releaseControl("visibility-loss");
+      } else {
+        connection?.resumeControl();
+      }
+    };
+    window.addEventListener("blur", releaseForBlur);
+    window.addEventListener("focus", resumeAfterFocus);
+    window.addEventListener("pagehide", releaseForNavigation);
+    document.addEventListener("visibilitychange", handleVisibility);
+    return () => {
+      window.removeEventListener("blur", releaseForBlur);
+      window.removeEventListener("focus", resumeAfterFocus);
+      window.removeEventListener("pagehide", releaseForNavigation);
+      browserPasteKeysRef.current.clear();
+      document.removeEventListener("visibilitychange", handleVisibility);
+      pressedPointersRef.current.clear();
+      connection?.releaseControl("teardown");
+    };
+  }, [isSmallScreen, open, previewExpanded]);
 
   useEffect(() => {
     if (!open || isSmallScreen) return;
@@ -330,6 +373,29 @@ export function ComputerSheet({
   const suppressExpandedMenu = (event: ReactMouseEvent<HTMLDialogElement>): void => {
     if (!(event.target instanceof Element) || event.target.closest("button") === null) event.preventDefault();
   };
+  const sendExpandedKey = (event: ReactKeyboardEvent<HTMLDialogElement>, state: "pressed" | "released"): void => {
+    if (event.target instanceof Element && event.target.closest("button") !== null) return;
+    if (state === "pressed" && event.code === "KeyV" && (event.ctrlKey || event.metaKey)) {
+      browserPasteKeysRef.current.add(event.code);
+      return;
+    }
+    if (state === "released" && browserPasteKeysRef.current.delete(event.code)) return;
+    if (event.repeat) {
+      event.preventDefault();
+      return;
+    }
+    const sent = connectionRef.current?.keyTransition(event.code, state, {
+      control: event.ctrlKey,
+      alt: event.altKey,
+      shift: event.shiftKey,
+      meta: event.metaKey,
+    }) ?? false;
+    if (sent) event.preventDefault();
+  };
+  const pasteExpandedText = (event: ReactClipboardEvent<HTMLDialogElement>): void => {
+    if (event.target instanceof Element && event.target.closest("button") !== null) return;
+    if (connectionRef.current?.paste(event.clipboardData.getData("text/plain")) === true) event.preventDefault();
+  };
   const content = (
     <ComputerSheetContent
       {...contentProps}
@@ -351,7 +417,7 @@ export function ComputerSheet({
       media={{
         src: frameUrl,
         alt: `Expanded computer preview for ${bot.name}`,
-        caption: `${bot.name} computer — pointer Web Control`,
+        caption: `${bot.name} computer — Web Control`,
       }}
       {...(previewExpanded
         ? {
@@ -361,6 +427,10 @@ export function ComputerSheet({
             onPointerCancel: releaseExpandedPointer,
             onWheel: scrollExpandedPointer,
             onContextMenu: suppressExpandedMenu,
+            onKeyDown: (event: ReactKeyboardEvent<HTMLDialogElement>) => sendExpandedKey(event, "pressed"),
+            onKeyUp: (event: ReactKeyboardEvent<HTMLDialogElement>) => sendExpandedKey(event, "released"),
+            onPaste: pasteExpandedText,
+            tabIndex: 0,
             "data-testid": "expanded-web-control",
           }
         : {})}

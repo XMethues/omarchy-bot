@@ -545,6 +545,25 @@ CREATE TABLE artifacts (
 CREATE INDEX idx_artifacts_surface ON artifacts(surface_id);
 `,
   },
+  {
+    name: "0011-redacted-input-diagnostics",
+    sql: `
+CREATE TABLE input_diagnostics (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  surface_id TEXT NOT NULL REFERENCES bot_surfaces(surface_id) ON DELETE CASCADE,
+  occurred_at TEXT NOT NULL,
+  actor_kind TEXT NOT NULL CHECK (actor_kind IN ('browser')),
+  action_category TEXT NOT NULL CHECK (
+    action_category IN ('controller', 'pointer-button', 'pointer-scroll', 'key', 'shortcut', 'paste', 'release', 'invalid')
+  ),
+  outcome TEXT NOT NULL CHECK (outcome IN ('accepted', 'rejected', 'failed', 'released')),
+  redacted_length INTEGER CHECK (redacted_length IS NULL OR redacted_length >= 0),
+  latency_ms INTEGER NOT NULL CHECK (latency_ms >= 0)
+);
+CREATE INDEX idx_input_diagnostics_expiry ON input_diagnostics(occurred_at);
+CREATE INDEX idx_input_diagnostics_surface ON input_diagnostics(surface_id, occurred_at);
+`,
+  },
 ];
 
 export function openDb(cfg: Config): Database {

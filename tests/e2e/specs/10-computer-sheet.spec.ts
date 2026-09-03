@@ -92,7 +92,26 @@ async function installProjectionPeer(page: Page): Promise<void> {
       createDataChannel(label: string): RTCDataChannel {
         const channel = new FakeDataChannel(label, (sentLabel, raw) => {
           if (sentLabel === "screen.input.v1") {
-            inputMessages.push(JSON.parse(raw));
+            const message = JSON.parse(raw) as { type?: string; controllerEpoch?: number };
+            inputMessages.push(message);
+            if (message.type === "release-control") {
+              queueMicrotask(() => this.channels.get("screen.input.v1")?.dispatchEvent(new MessageEvent("message", {
+                data: JSON.stringify({
+                  version: 1,
+                  type: "input-authority",
+                  active: false,
+                  surfaceId: this.surfaceId,
+                  runtimeGeneration: 1,
+                  geometryGeneration: 1,
+                  controllerEpoch: message.controllerEpoch,
+                  logicalWidth: 1000,
+                  logicalHeight: 500,
+                  videoWidth: 2000,
+                  videoHeight: 1000,
+                  scale: 2,
+                }),
+              })));
+            }
             return;
           }
           if (sentLabel !== "screen.control.v1") return;
@@ -106,7 +125,7 @@ async function installProjectionPeer(page: Page): Promise<void> {
               this.channels.get("screen.input.v1")?.dispatchEvent(new MessageEvent("message", {
                 data: JSON.stringify({
                   version: 1,
-                  type: "pointer-authority",
+                  type: "input-authority",
                   active: true,
                   surfaceId: this.surfaceId,
                   runtimeGeneration: 1,
@@ -461,6 +480,91 @@ test.describe("contextual computer sheet", () => {
     )).toBe(true);
   });
 
+  test("sends shortcuts and plain-text paste only from expanded desktop control and releases on blur", async ({ page }) => {
+    await installProjectionPeer(page);
+    await page.route("**/api/computer/**", async (route) => {
+      if (await fulfillProjection(route)) return;
+      const url = new URL(route.request().url());
+      await fulfillJson(route, {
+        botId: url.searchParams.get("botId"),
+        surfaceId: url.searchParams.get("surfaceId"),
+        state: "ready",
+        activity: "Screen ready.",
+      });
+    });
+    await page.setViewportSize({ width: 1280, height: 760 });
+    await page.goto("/");
+    await createBot(page, "Keyboard Bot");
+    await page.getByRole("button", { name: "Open computer", exact: true }).click();
+    await page.keyboard.press("Control+L");
+    expect(await page.evaluate(
+      () => (window as typeof window & { __screenInputMessages: unknown[] }).__screenInputMessages,
+    )).toEqual([]);
+
+    await page.getByRole("button", { name: "Expand desktop preview" }).click();
+    const control = page.getByTestId("expanded-web-control");
+    await expect(control).toBeVisible();
+    await control.focus();
+    await page.keyboard.down("Control");
+    await page.keyboard.press("l");
+    await page.keyboard.up("Control");
+    await control.evaluate((element) => {
+      const clipboard = new DataTransfer();
+      clipboard.setData("text/plain", "pasted λ text");
+      element.dispatchEvent(new ClipboardEvent("paste", {
+        bubbles: true,
+        cancelable: true,
+        clipboardData: clipboard,
+      }));
+    });
+    await page.evaluate(() => window.dispatchEvent(new Event("blur")));
+    await page.evaluate(async () => {
+      window.dispatchEvent(new Event("focus"));
+      await Promise.resolve();
+      await Promise.resolve();
+      Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+      document.dispatchEvent(new Event("visibilitychange"));
+      Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+      document.dispatchEvent(new Event("visibilitychange"));
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      window.dispatchEvent(new PageTransitionEvent("pagehide"));
+    });
+
+    const messages = await page.evaluate(
+      () => (window as typeof window & { __screenInputMessages: Array<Record<string, unknown>> }).__screenInputMessages,
+    );
+    expect(messages.map(({ type }) => type)).toEqual([
+      "key",
+      "key",
+      "key",
+      "key",
+      "paste",
+      "release-control",
+      "release-control",
+      "release-control",
+    ]);
+    expect(messages.slice(0, 4).map(({ code, state }) => ({ code, state }))).toEqual([
+      { code: "ControlLeft", state: "pressed" },
+      { code: "KeyL", state: "pressed" },
+      { code: "KeyL", state: "released" },
+      { code: "ControlLeft", state: "released" },
+    ]);
+    expect(messages[1]?.modifiers).toEqual({ control: true, alt: false, shift: false, meta: false });
+    expect(messages[4]).toMatchObject({ type: "paste", text: "pasted λ text" });
+    expect(messages.slice(5).map(({ reason }) => reason)).toEqual([
+      "blur",
+      "visibility-loss",
+      "navigation",
+    ]);
+    expect(messages.slice(0, 6).map(({ sequence }) => sequence)).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(messages.slice(6).map(({ sequence }) => sequence)).toEqual([1, 1]);
+  });
+
+
   test("uses a bottom sheet on a narrow screen", async ({ page }) => {
     await installProjectionPeer(page);
     await page.route("**/api/computer/projection**", async (route) => {
@@ -482,5 +586,18 @@ test.describe("contextual computer sheet", () => {
     await page.getByRole("button", { name: "Open computer", exact: true }).click();
     await expect(page.getByRole("dialog", { name: "Computer" })).toBeVisible();
     await expect(page.getByRole("button", { name: "Expand desktop preview" })).toHaveCount(0);
+    await page.keyboard.press("Control+L");
+    await page.getByRole("dialog", { name: "Computer" }).evaluate((element) => {
+      const clipboard = new DataTransfer();
+      clipboard.setData("text/plain", "mobile paste");
+      element.dispatchEvent(new ClipboardEvent("paste", {
+        bubbles: true,
+        cancelable: true,
+        clipboardData: clipboard,
+      }));
+    });
+    expect(await page.evaluate(
+      () => (window as typeof window & { __screenInputMessages: unknown[] }).__screenInputMessages,
+    )).toEqual([]);
   });
 });

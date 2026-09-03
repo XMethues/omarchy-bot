@@ -11,6 +11,7 @@ import { ComputerBroker } from "../modules/computer/broker.ts";
 import { BotScreenManager, type BotScreenRuntimeAdapter } from "../modules/computer/botScreenManager.ts";
 import { HyprlandBotScreenRuntimeAdapter } from "../modules/computer/hyprlandBotScreenRuntime.ts";
 import { ScreenProjectionService } from "../modules/computer/screenProjection.ts";
+import { InputDiagnostics } from "../modules/computer/inputDiagnostics.ts";
 import { AvatarService } from "../modules/avatars/avatarService.ts";
 import { DictationService } from "../modules/dictation/dictationService.ts";
 import { AttachmentsService } from "../modules/attachments/attachments.ts";
@@ -72,7 +73,7 @@ export async function main(options: MainOptions = {}): Promise<{ stop: () => Pro
       : { applicationBin: process.env.OMARCHY_BOT_SCREEN_APP_BIN }),
   });
   const screens = new BotScreenManager(db, options.botScreenAdapter ?? productionScreenAdapter);
-  const projections = new ScreenProjectionService(screens);
+  const projections = new ScreenProjectionService(screens, new InputDiagnostics(db));
 
   const events = new EventLog(db);
   events.subscribe((event) => {
@@ -144,7 +145,7 @@ export async function main(options: MainOptions = {}): Promise<{ stop: () => Pro
     clearInterval(statusTimer);
     await dictation.shutdown();
     computer.shutdown();
-    projections.shutdown();
+    await projections.shutdown();
     await screens.shutdown();
     await supervisor.stopAll(); // close workers
     http.stop(); // close listeners

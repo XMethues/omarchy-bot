@@ -3,11 +3,12 @@ import {
   SCREEN_FRAME_CHANNEL,
   SCREEN_INPUT_CHANNEL,
   SCREEN_PROJECTION_PROTOCOL_VERSION,
-  ScreenPointerAuthorityMessageDto,
+  ScreenInputAuthorityMessageDto,
+  ScreenKeyCodeDto,
   ScreenProjectionAnswerDto,
   ScreenProjectionFrameHeaderDto,
-  type ScreenPointerAuthorityMessageDto as PointerAuthority,
   type ScreenProjectionFrameHeaderDto as FrameHeader,
+  type ScreenInputAuthorityMessageDto as InputAuthority,
   type ScreenProjectionModeDto,
 } from "@omarchy-bot/protocol";
 
@@ -62,8 +63,10 @@ export class ScreenProjectionConnection {
   #desiredMode: ScreenProjectionMode = "preview";
   #pending: PendingFrame | undefined;
   #closed = false;
-  #pointerAuthority: PointerAuthority | undefined;
-  #pointerSequence = 0;
+  #inputAuthority: InputAuthority | undefined;
+  #inputSequence = 0;
+  #releasingEpoch: number | undefined;
+  #resumeAfterRelease = false;
   #geometry: ProjectionGeometry | undefined;
 
   constructor(
@@ -76,11 +79,14 @@ export class ScreenProjectionConnection {
     this.#control = this.#peer.createDataChannel(SCREEN_CONTROL_CHANNEL, { ordered: true });
     this.#input = this.#peer.createDataChannel(SCREEN_INPUT_CHANNEL, { ordered: true });
     this.#frames.addEventListener("message", (event) => this.#receive(event.data));
-    this.#input.addEventListener("message", (event) => this.#receivePointerAuthority(event.data));
+    this.#input.addEventListener("message", (event) => this.#receiveInputAuthority(event.data));
     this.#control.addEventListener("open", () => this.#activate());
     this.#peer.addEventListener("connectionstatechange", () => {
       if (this.#closed) return;
-      if (this.#peer.connectionState === "disconnected") this.callbacks.onState("reconnecting");
+      if (this.#peer.connectionState === "disconnected") {
+        this.releaseControl("teardown");
+        this.callbacks.onState("reconnecting");
+      }
       if (this.#peer.connectionState === "connected") this.#activate();
       if (this.#peer.connectionState === "failed") {
         this.close();
@@ -140,7 +146,11 @@ export class ScreenProjectionConnection {
   }
 
   setMode(mode: ScreenProjectionMode): void {
-    if (this.#desiredMode !== mode) this.#pointerAuthority = undefined;
+    if (this.#desiredMode !== mode) {
+      this.#inputAuthority = undefined;
+      this.#releasingEpoch = undefined;
+      this.#resumeAfterRelease = false;
+    }
     this.#desiredMode = mode;
     this.#activate();
   }
@@ -174,13 +184,53 @@ export class ScreenProjectionConnection {
     if (position !== undefined) this.#sendPointer("pointer-scroll", { ...position, deltaX, deltaY });
   }
 
+  keyTransition(
+    code: string,
+    state: "pressed" | "released",
+    modifiers: { control: boolean; alt: boolean; shift: boolean; meta: boolean },
+  ): boolean {
+    const supported = ScreenKeyCodeDto.safeParse(code);
+    if (!supported.success) return false;
+    return this.#sendInput({ type: "key", code: supported.data, state, modifiers });
+  }
+
+  paste(text: string): boolean {
+    if (
+      text.length === 0
+      || text.includes("\0")
+      || new TextEncoder().encode(text).byteLength > 65_536
+    ) return false;
+    return this.#sendInput({ type: "paste", text });
+  }
+
+  releaseControl(reason: "blur" | "visibility-loss" | "navigation" | "teardown"): void {
+    const authority = this.#inputAuthority;
+    if (authority === undefined) return;
+    if (this.#sendInput({ type: "release-control", reason })) {
+      this.#releasingEpoch = authority.controllerEpoch;
+      this.#inputAuthority = undefined;
+    }
+  }
+
+  resumeControl(): void {
+    if (this.#desiredMode !== "expanded") return;
+    if (this.#releasingEpoch !== undefined) {
+      this.#resumeAfterRelease = true;
+      return;
+    }
+    this.#activate();
+  }
+
   close(): void {
     if (this.#closed) return;
+    this.releaseControl("teardown");
     this.#closed = true;
     this.#abort.abort();
     this.#pending = undefined;
-    this.#pointerAuthority = undefined;
+    this.#inputAuthority = undefined;
     this.#geometry = undefined;
+    this.#releasingEpoch = undefined;
+    this.#resumeAfterRelease = false;
     this.callbacks.onFrame(undefined);
     this.callbacks.onState("closed");
     if (this.#control.readyState === "open" && this.#runtimeGeneration !== undefined) {
@@ -211,6 +261,7 @@ export class ScreenProjectionConnection {
       this.#closed
       || this.#control.readyState !== "open"
       || this.#sessionId === undefined
+      || this.#releasingEpoch !== undefined
       || this.#runtimeGeneration === undefined
     ) return;
     this.#control.send(JSON.stringify({
@@ -223,7 +274,7 @@ export class ScreenProjectionConnection {
     this.callbacks.onState(this.#desiredMode);
   }
 
-  #receivePointerAuthority(raw: unknown): void {
+  #receiveInputAuthority(raw: unknown): void {
     if (this.#closed || typeof raw !== "string") return;
     let parsed: unknown;
     try {
@@ -231,7 +282,7 @@ export class ScreenProjectionConnection {
     } catch {
       return;
     }
-    const authority = ScreenPointerAuthorityMessageDto.safeParse(parsed);
+    const authority = ScreenInputAuthorityMessageDto.safeParse(parsed);
     if (
       !authority.success
       || authority.data.surfaceId !== this.owner.surfaceId
@@ -239,13 +290,23 @@ export class ScreenProjectionConnection {
       || !this.#matchesGeometry(authority.data)
     ) return;
     if (!authority.data.active) {
-      if (this.#pointerAuthority?.controllerEpoch === authority.data.controllerEpoch) {
-        this.#pointerAuthority = undefined;
+      if (
+        this.#inputAuthority?.controllerEpoch === authority.data.controllerEpoch
+        || this.#releasingEpoch === authority.data.controllerEpoch
+      ) {
+        this.#inputAuthority = undefined;
+        this.#releasingEpoch = undefined;
+        if (this.#resumeAfterRelease) {
+          this.#resumeAfterRelease = false;
+          queueMicrotask(() => this.#activate());
+        }
       }
       return;
     }
-    this.#pointerAuthority = authority.data;
-    this.#pointerSequence = 0;
+    this.#inputAuthority = authority.data;
+    this.#inputSequence = 0;
+    this.#releasingEpoch = undefined;
+    this.#resumeAfterRelease = false;
   }
 
   #mapPointer(
@@ -254,7 +315,7 @@ export class ScreenProjectionConnection {
     renderedRect: PointerContentRect,
     clampToContent = false,
   ): { x: number; y: number } | undefined {
-    const authority = this.#pointerAuthority;
+    const authority = this.#inputAuthority;
     if (
       authority === undefined
       || !Number.isFinite(clientX)
@@ -297,22 +358,26 @@ export class ScreenProjectionConnection {
     type: "pointer-motion" | "pointer-button" | "pointer-scroll",
     event: Record<string, number | string>,
   ): void {
-    const authority = this.#pointerAuthority;
+    this.#sendInput({ type, ...event });
+  }
+
+  #sendInput(event: Record<string, unknown>): boolean {
+    const authority = this.#inputAuthority;
     if (
       authority === undefined
       || this.#desiredMode !== "expanded"
       || this.#input.readyState !== "open"
-    ) return;
+    ) return false;
     this.#input.send(JSON.stringify({
       version: SCREEN_PROJECTION_PROTOCOL_VERSION,
-      type,
       surfaceId: this.owner.surfaceId,
       runtimeGeneration: authority.runtimeGeneration,
       geometryGeneration: authority.geometryGeneration,
       controllerEpoch: authority.controllerEpoch,
-      sequence: ++this.#pointerSequence,
+      sequence: ++this.#inputSequence,
       ...event,
     }));
+    return true;
   }
   #receive(raw: unknown): void {
     if (this.#closed) return;

@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
+import path from "node:path";
 import rtc, { type DataChannel, type PeerConnection } from "node-datachannel";
 import type { ComputerSurfaceOwner } from "../../apps/daemon/src/modules/computer/broker.ts";
 import { FakeBotScreenRuntimeAdapter } from "../../apps/daemon/src/modules/computer/fakeBotScreenRuntime.ts";
@@ -125,7 +127,7 @@ function authority(input: DataChannel): Promise<{
     input.onMessage((raw) => {
       if (typeof raw !== "string") return;
       const message = JSON.parse(raw) as { type?: string };
-      if (message.type === "pointer-authority") resolve(message as never);
+      if (message.type === "input-authority") resolve(message as never);
     });
   });
 }
@@ -404,7 +406,231 @@ describe("expanded pointer Web Control", () => {
     expect(runtime.pointerEvents).toHaveLength(firstBatch.length + 1);
   }, 20_000);
 
+  test("delivers keyboard transitions, modifiers, shortcuts, and one-way paste in controller order", async () => {
+    const runtime = new FakeBotScreenRuntimeAdapter();
+    h = await startDaemon(undefined, { botScreenAdapter: runtime });
+    const owner = await ownerFor(h, await makeBot(h, "Keyboard controlled screen"));
+    const projection = await connectProjection(h, owner, "keyboard-browser");
+    peers.push(projection.peer);
+    const granted = authority(projection.input);
+    projection.control.sendMessage(JSON.stringify({
+      version: 1,
+      type: "view",
+      surfaceId: owner.surfaceId,
+      runtimeGeneration: 1,
+      mode: "expanded",
+    }));
+    const grant = await granted;
+    const envelope = {
+      version: 1,
+      surfaceId: owner.surfaceId,
+      runtimeGeneration: 1,
+      geometryGeneration: 1,
+      controllerEpoch: grant.controllerEpoch,
+    };
+    const messages = [
+      { type: "key", code: "ControlLeft", state: "pressed", modifiers: { control: true, alt: false, shift: false, meta: false } },
+      { type: "key", code: "KeyL", state: "pressed", modifiers: { control: true, alt: false, shift: false, meta: false } },
+      { type: "key", code: "KeyL", state: "released", modifiers: { control: true, alt: false, shift: false, meta: false } },
+      { type: "key", code: "ControlLeft", state: "released", modifiers: { control: false, alt: false, shift: false, meta: false } },
+      { type: "paste", text: "one-way λ paste" },
+    ];
+    messages.forEach((message, index) => projection.input.sendMessage(JSON.stringify({
+      ...envelope,
+      ...message,
+      sequence: index + 1,
+    })));
+
+    await runtime.waitForInputEvents(messages.length);
+    expect(runtime.inputEvents.map(({ event }) => event)).toEqual([
+      { type: "key", keyCode: 29, state: "pressed" },
+      { type: "key", keyCode: 38, state: "pressed" },
+      { type: "key", keyCode: 38, state: "released" },
+      { type: "key", keyCode: 29, state: "released" },
+      { type: "paste", text: "one-way λ paste" },
+    ]);
+  }, 15_000);
+
+  test("releases held keys and buttons before replacement and rejects the stale controller epoch", async () => {
+
+    const runtime = new FakeBotScreenRuntimeAdapter(undefined, { releaseDelayMs: 100 });
+    h = await startDaemon(undefined, { botScreenAdapter: runtime });
+    const owner = await ownerFor(h, await makeBot(h, "Replaceable controller screen"));
+    const first = await connectProjection(h, owner, "held-input-browser-one");
+    peers.push(first.peer);
+    const firstGranted = authority(first.input);
+    first.control.sendMessage(JSON.stringify({
+      version: 1,
+      type: "view",
+      surfaceId: owner.surfaceId,
+      runtimeGeneration: 1,
+      mode: "expanded",
+    }));
+    const firstGrant = await firstGranted;
+    const firstEnvelope = {
+      version: 1,
+      surfaceId: owner.surfaceId,
+      runtimeGeneration: 1,
+      geometryGeneration: 1,
+      controllerEpoch: firstGrant.controllerEpoch,
+    };
+    first.input.sendMessage(JSON.stringify({
+      ...firstEnvelope,
+      type: "key",
+      code: "ControlLeft",
+      state: "pressed",
+      modifiers: { control: true, alt: false, shift: false, meta: false },
+      sequence: 1,
+    }));
+    first.input.sendMessage(JSON.stringify({
+      ...firstEnvelope,
+      type: "pointer-button",
+      button: "left",
+      state: "pressed",
+      x: 40,
+      y: 50,
+      sequence: 2,
+    }));
+    await runtime.waitForInputEvents(2);
+
+    const second = await connectProjection(h, owner, "held-input-browser-two");
+    peers.push(second.peer);
+    const secondGranted = authority(second.input);
+    const replacementStarted = Date.now();
+    second.control.sendMessage(JSON.stringify({
+      version: 1,
+      type: "view",
+      surfaceId: owner.surfaceId,
+      runtimeGeneration: 1,
+      mode: "expanded",
+    }));
+    const secondGrant = await secondGranted;
+    expect(runtime.releaseCount).toBe(1);
+    expect(Date.now() - replacementStarted).toBeGreaterThanOrEqual(80);
+    expect(secondGrant.controllerEpoch).toBeGreaterThan(firstGrant.controllerEpoch);
+
+    try {
+      first.input.sendMessage(JSON.stringify({
+        ...firstEnvelope,
+        type: "key",
+        code: "KeyA",
+        state: "pressed",
+        modifiers: { control: true, alt: false, shift: false, meta: false },
+        sequence: 3,
+      }));
+    } catch {
+      // The replaced peer may already have closed its stale input channel.
+    }
+    second.input.sendMessage(JSON.stringify({
+      ...firstEnvelope,
+      controllerEpoch: firstGrant.controllerEpoch,
+      type: "key",
+      code: "KeyA",
+      state: "pressed",
+      modifiers: { control: false, alt: false, shift: false, meta: false },
+      sequence: 1,
+    }));
+    await runtime.waitForReleases(2);
+    expect(runtime.inputEvents).toHaveLength(2);
+  }, 20_000);
+  test("retains only redacted semantic input diagnostics and expires records after seven days", async () => {
+    const runtime = new FakeBotScreenRuntimeAdapter();
+    h = await startDaemon(undefined, { botScreenAdapter: runtime });
+    const owner = await ownerFor(h, await makeBot(h, "Diagnosed keyboard screen"));
+    const database = new Database(path.join(h.home, "db.sqlite"));
+    database.query(
+      `INSERT INTO input_diagnostics
+       (surface_id, occurred_at, actor_kind, action_category, outcome, redacted_length, latency_ms)
+       VALUES (?, ?, 'browser', 'paste', 'accepted', 99, 1)`,
+    ).run(owner.surfaceId, new Date(Date.now() - 8 * 24 * 3600_000).toISOString());
+    const projection = await connectProjection(h, owner, "diagnostic-browser");
+    peers.push(projection.peer);
+    const granted = authority(projection.input);
+    projection.control.sendMessage(JSON.stringify({
+      version: 1,
+      type: "view",
+      surfaceId: owner.surfaceId,
+      runtimeGeneration: 1,
+      mode: "expanded",
+    }));
+    const grant = await granted;
+    const envelope = {
+      version: 1,
+      surfaceId: owner.surfaceId,
+      runtimeGeneration: 1,
+      geometryGeneration: 1,
+      controllerEpoch: grant.controllerEpoch,
+    };
+    projection.input.sendMessage(JSON.stringify({
+      ...envelope,
+      type: "key",
+      code: "KeyX",
+      state: "pressed",
+      modifiers: { control: false, alt: false, shift: false, meta: false },
+      sequence: 1,
+    }));
+    projection.input.sendMessage(JSON.stringify({
+      ...envelope,
+      type: "key",
+      code: "KeyX",
+      state: "released",
+      modifiers: { control: false, alt: false, shift: false, meta: false },
+      sequence: 2,
+    }));
+    projection.input.sendMessage(JSON.stringify({
+      ...envelope,
+      type: "paste",
+      text: "never persist λ",
+      sequence: 3,
+    }));
+    await runtime.waitForInputEvents(3);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const rows = database.query<{
+      surface_id: string;
+      actor_kind: string;
+      action_category: string;
+      outcome: string;
+      redacted_length: number | null;
+      latency_ms: number;
+    }, []>(
+      `SELECT surface_id, actor_kind, action_category, outcome, redacted_length, latency_ms
+       FROM input_diagnostics WHERE action_category IN ('key', 'paste') ORDER BY id`,
+    ).all();
+    expect(rows.map(({ latency_ms: _latency, ...row }) => row)).toEqual([
+      {
+        surface_id: owner.surfaceId,
+        actor_kind: "browser",
+        action_category: "key",
+        outcome: "accepted",
+        redacted_length: null,
+      },
+      {
+        surface_id: owner.surfaceId,
+        actor_kind: "browser",
+        action_category: "key",
+        outcome: "accepted",
+        redacted_length: null,
+      },
+      {
+        surface_id: owner.surfaceId,
+        actor_kind: "browser",
+        action_category: "paste",
+        outcome: "accepted",
+        redacted_length: 15,
+      },
+    ]);
+    expect(rows.every(({ latency_ms }) => latency_ms >= 0)).toBeTrue();
+    const stored = JSON.stringify(rows);
+    expect(stored).not.toContain("never persist");
+    expect(stored).not.toContain("KeyX");
+    expect(Object.keys(rows[0] ?? {})).not.toContain("controller_id");
+    database.close();
+  }, 15_000);
+
   test("fails closed on missing, stale, mismatched, duplicated, or out-of-order fields", async () => {
+
     const runtime = new FakeBotScreenRuntimeAdapter();
     h = await startDaemon(undefined, { botScreenAdapter: runtime });
     const owner = await ownerFor(h, await makeBot(h, "Validated pointer screen"));
@@ -489,4 +715,66 @@ describe("expanded pointer Web Control", () => {
     await runtime.waitForReleases(++releaseCount);
     expect(runtime.pointerEvents.map(({ event }) => event)).toEqual([{ type: "motion", x: 40, y: 50 }]);
   }, 35_000);
+  test("revokes held input on browser suspension and helper failure before issuing a new epoch", async () => {
+    const runtime = new FakeBotScreenRuntimeAdapter(undefined, { inputFailureAt: 2 });
+    h = await startDaemon(undefined, { botScreenAdapter: runtime });
+    const owner = await ownerFor(h, await makeBot(h, "Failure cleanup screen"));
+    const projection = await connectProjection(h, owner, "cleanup-browser");
+    peers.push(projection.peer);
+    const firstGranted = authority(projection.input);
+    projection.control.sendMessage(JSON.stringify({
+      version: 1,
+      type: "view",
+      surfaceId: owner.surfaceId,
+      runtimeGeneration: 1,
+      mode: "expanded",
+    }));
+    const firstGrant = await firstGranted;
+    const envelope = {
+      version: 1,
+      surfaceId: owner.surfaceId,
+      runtimeGeneration: 1,
+      geometryGeneration: 1,
+      controllerEpoch: firstGrant.controllerEpoch,
+    };
+    projection.input.sendMessage(JSON.stringify({
+      ...envelope,
+      type: "key",
+      code: "ShiftLeft",
+      state: "pressed",
+      modifiers: { control: false, alt: false, shift: true, meta: false },
+      sequence: 1,
+    }));
+    projection.input.sendMessage(JSON.stringify({
+      ...envelope,
+      type: "release-control",
+      reason: "visibility-loss",
+      sequence: 2,
+    }));
+    await runtime.waitForReleases(1);
+
+    const secondGranted = authority(projection.input);
+    projection.control.sendMessage(JSON.stringify({
+      version: 1,
+      type: "view",
+      surfaceId: owner.surfaceId,
+      runtimeGeneration: 1,
+      mode: "expanded",
+    }));
+    const secondGrant = await secondGranted;
+    expect(secondGrant.controllerEpoch).toBeGreaterThan(firstGrant.controllerEpoch);
+    projection.input.sendMessage(JSON.stringify({
+      ...envelope,
+      controllerEpoch: secondGrant.controllerEpoch,
+      type: "key",
+      code: "KeyA",
+      state: "pressed",
+      modifiers: { control: false, alt: false, shift: false, meta: false },
+      sequence: 1,
+    }));
+    await runtime.waitForReleases(2);
+    expect(runtime.inputEvents.map(({ event }) => event)).toEqual([
+      { type: "key", keyCode: 42, state: "pressed" },
+    ]);
+  }, 15_000);
 });

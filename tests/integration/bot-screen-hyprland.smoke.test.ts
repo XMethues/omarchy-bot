@@ -135,17 +135,33 @@ platformTest("two real nested Hyprland Screens act and capture concurrently with
     const secondSource = sources[1]!;
     const secondBeforePointer = (await secondSource.capture()).bytes;
 
-    await firstSource.pointer({ type: "motion", x: 100, y: 120 });
-    await firstSource.pointer({ type: "button", x: 100, y: 120, button: "left", state: "pressed" });
-    await firstSource.pointer({ type: "button", x: 100, y: 120, button: "left", state: "released" });
-    await firstSource.pointer({ type: "button", x: 80, y: 100, button: "left", state: "pressed" });
-    await firstSource.pointer({ type: "motion", x: 600, y: 180 });
-    await firstSource.pointer({ type: "button", x: 600, y: 180, button: "left", state: "released" });
-    await firstSource.pointer({ type: "scroll", x: 600, y: 180, deltaX: 0, deltaY: -720 });
+    await firstSource.input({ type: "motion", x: 100, y: 120 });
+    await firstSource.input({ type: "button", x: 100, y: 120, button: "left", state: "pressed" });
+    await firstSource.input({ type: "button", x: 100, y: 120, button: "left", state: "released" });
+    await firstSource.input({ type: "button", x: 80, y: 100, button: "left", state: "pressed" });
+    await firstSource.input({ type: "motion", x: 600, y: 180 });
+    await firstSource.input({ type: "button", x: 600, y: 180, button: "left", state: "released" });
+    await firstSource.input({ type: "scroll", x: 600, y: 180, deltaX: 0, deltaY: -720 });
+    await firstSource.input({ type: "key", keyCode: 29, state: "pressed" });
+    await firstSource.input({ type: "key", keyCode: 38, state: "pressed" });
+    await firstSource.input({ type: "key", keyCode: 38, state: "released" });
+    await firstSource.input({ type: "key", keyCode: 29, state: "released" });
+    await firstSource.input({ type: "paste", text: "WEB-CONTROL-PASTE λ" });
+    await firstSource.input({ type: "key", keyCode: 28, state: "pressed" });
+    await firstSource.input({ type: "key", keyCode: 28, state: "released" });
+    const firstAfterKeyboard = (await firstSource.capture()).bytes;
+    expect(await differingPixels(previews[0]!, firstAfterKeyboard, harness.home)).toBeGreaterThan(0);
     const secondAfterFirstInput = (await secondSource.capture()).bytes;
     expect(await differingPixels(secondBeforePointer, secondAfterFirstInput, harness.home)).toBeLessThan(10_000);
-    await secondSource.pointer({ type: "motion", x: 700, y: 400 });
-    await Promise.all([firstSource.releasePointer(), secondSource.releasePointer()]);
+    await secondSource.input({ type: "motion", x: 700, y: 400 });
+    await firstSource.input({ type: "key", keyCode: 42, state: "pressed" });
+    await firstSource.input({ type: "button", x: 600, y: 180, button: "left", state: "pressed" });
+    await firstSource.releaseInput();
+    await firstSource.input({ type: "key", keyCode: 42, state: "pressed" });
+    await firstSource.input({ type: "key", keyCode: 42, state: "released" });
+    await firstSource.input({ type: "button", x: 600, y: 180, button: "left", state: "pressed" });
+    await firstSource.input({ type: "button", x: 600, y: 180, button: "left", state: "released" });
+    await Promise.all([firstSource.releaseInput(), secondSource.releaseInput()]);
 
     expect(await run(["hyprctl", "-j", "cursorpos"])).toBe(hostPointerBefore);
 

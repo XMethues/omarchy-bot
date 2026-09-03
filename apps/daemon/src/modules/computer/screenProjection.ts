@@ -6,9 +6,9 @@ import {
   SCREEN_FRAME_CHANNEL,
   SCREEN_INPUT_CHANNEL,
   SCREEN_PROJECTION_PROTOCOL_VERSION,
-  ScreenPointerInputMessageDto,
+  ScreenInputMessageDto,
+  type ScreenInputAuthorityMessageDto,
   ScreenProjectionControlMessageDto,
-  type ScreenPointerAuthorityMessageDto,
   type ScreenProjectionAnswerDto,
   type ScreenProjectionModeDto,
   type ScreenProjectionOfferDto,
@@ -16,9 +16,10 @@ import {
 import type { ComputerSurfaceOwner } from "./broker.ts";
 import type {
   BotScreenManager,
-  BotScreenPointerEvent,
+  BotScreenInputEvent,
   BotScreenProjectionSource,
 } from "./botScreenManager.ts";
+import { InputDiagnostics, type InputDiagnosticCategory } from "./inputDiagnostics.ts";
 
 const PREVIEW_INTERVAL_MS = 1_000;
 const EXPANDED_INTERVAL_MS = 200;
@@ -56,14 +57,41 @@ interface ProjectionSession {
   captureInFlight: boolean;
 }
 
-interface PointerController {
+interface InputController {
   session: ProjectionSession;
   epoch: number;
   nextSequence: number;
-  queue: BotScreenPointerEvent[];
+  queue: Array<{
+    event: BotScreenInputEvent;
+    receivedAt: number;
+    category?: InputDiagnosticCategory;
+    redactedLength?: number;
+  }>;
   draining: boolean;
   revoked: boolean;
+  active: boolean;
+  heldCodes: Set<string>;
+  release: Promise<void>;
 }
+
+const KEY_CODES: Record<string, number> = {
+  Escape: 1,
+  Digit1: 2, Digit2: 3, Digit3: 4, Digit4: 5, Digit5: 6, Digit6: 7, Digit7: 8, Digit8: 9, Digit9: 10, Digit0: 11,
+  Minus: 12, Equal: 13, Backspace: 14, Tab: 15,
+  KeyQ: 16, KeyW: 17, KeyE: 18, KeyR: 19, KeyT: 20, KeyY: 21, KeyU: 22, KeyI: 23, KeyO: 24, KeyP: 25,
+  BracketLeft: 26, BracketRight: 27, Enter: 28, ControlLeft: 29,
+  KeyA: 30, KeyS: 31, KeyD: 32, KeyF: 33, KeyG: 34, KeyH: 35, KeyJ: 36, KeyK: 37, KeyL: 38,
+  Semicolon: 39, Quote: 40, Backquote: 41, ShiftLeft: 42, Backslash: 43,
+  KeyZ: 44, KeyX: 45, KeyC: 46, KeyV: 47, KeyB: 48, KeyN: 49, KeyM: 50,
+  Comma: 51, Period: 52, Slash: 53, ShiftRight: 54, NumpadMultiply: 55, AltLeft: 56, Space: 57, CapsLock: 58,
+  F1: 59, F2: 60, F3: 61, F4: 62, F5: 63, F6: 64, F7: 65, F8: 66, F9: 67, F10: 68,
+  NumLock: 69, ScrollLock: 70, Numpad7: 71, Numpad8: 72, Numpad9: 73, NumpadSubtract: 74,
+  Numpad4: 75, Numpad5: 76, Numpad6: 77, NumpadAdd: 78, Numpad1: 79, Numpad2: 80, Numpad3: 81,
+  Numpad0: 82, NumpadDecimal: 83, F11: 87, F12: 88, NumpadEnter: 96, ControlRight: 97,
+  NumpadDivide: 98, PrintScreen: 99, AltRight: 100, Home: 102, ArrowUp: 103, PageUp: 104,
+  ArrowLeft: 105, ArrowRight: 106, End: 107, ArrowDown: 108, PageDown: 109, Insert: 110, Delete: 111,
+  Pause: 119, MetaLeft: 125, MetaRight: 126, ContextMenu: 127,
+};
 
 
 function timeout<T>(message: string): { promise: Promise<T>; resolve: (value: T) => void; reject: (error: Error) => void } {
@@ -83,16 +111,19 @@ function timeout<T>(message: string): { promise: Promise<T>; resolve: (value: T)
 }
 
 /**
- * Owns WebRTC peers, capture pumps, and validated pointer controllers. HTTP
+ * Owns WebRTC peers, capture pumps, and validated Web Controllers. HTTP
  * routes exchange SDP while runtime handles, geometry, authority, ordering,
- * protocol framing, coalescing, and backpressure stay here.
+ * protocol framing, motion coalescing, release barriers, and backpressure stay here.
  */
 export class ScreenProjectionService {
   #sessions = new Map<string, ProjectionSession>();
-  #controllers = new Map<SurfaceId, PointerController>();
+  #controllers = new Map<SurfaceId, InputController>();
   #controllerEpochs = new Map<SurfaceId, number>();
-
-  constructor(private readonly screens: BotScreenManager) {}
+  #releaseBarriers = new Map<SurfaceId, Promise<void>>();
+  constructor(
+    private readonly screens: BotScreenManager,
+    private readonly diagnostics: InputDiagnostics,
+  ) {}
 
   async answer(owner: ComputerSurfaceOwner, offer: ScreenProjectionOfferDto): Promise<ScreenProjectionAnswerDto> {
     if (offer.type !== "offer" || offer.sdp.trim() === "") throw new Error("a WebRTC SDP offer is required");
@@ -128,7 +159,9 @@ export class ScreenProjectionService {
     });
     peer.onDataChannel((channel) => this.#acceptChannel(session, channel));
     peer.onStateChange((state) => {
-      if (state === "closed" || state === "failed") this.#close(session, state === "failed");
+      if (state === "closed" || state === "disconnected" || state === "failed") {
+        this.#close(session, state === "failed");
+      }
     });
 
     try {
@@ -195,8 +228,10 @@ export class ScreenProjectionService {
     }
   }
 
-  shutdown(): void {
+  async shutdown(): Promise<void> {
     for (const session of [...this.#sessions.values()]) this.#close(session, false);
+    await Promise.allSettled(this.#releaseBarriers.values());
+    this.diagnostics.shutdown();
   }
 
   #acceptChannel(session: ProjectionSession, channel: DataChannel): void {
@@ -219,7 +254,7 @@ export class ScreenProjectionService {
     channel.onOpen(() => {
       if (this.#sessions.get(session.id) !== session) return;
       if (session.state === "connecting") session.state = "idle";
-      if (label === SCREEN_INPUT_CHANNEL && session.mode === "expanded") this.#claimPointer(session);
+      if (label === SCREEN_INPUT_CHANNEL && session.mode === "expanded") this.#claimInput(session);
     });
     channel.onClosed(() => this.#close(session, false));
     channel.onError(() => this.#close(session, true));
@@ -246,11 +281,11 @@ export class ScreenProjectionService {
   #setMode(session: ProjectionSession, mode: ProjectionViewMode): void {
     if (session.timer !== undefined) clearTimeout(session.timer);
     session.timer = undefined;
-    if (session.mode === "expanded" && mode !== "expanded") this.#revokePointerFor(session);
+    if (session.mode === "expanded" && mode !== "expanded") this.#revokeInputFor(session);
     const changed = session.mode !== mode;
     session.mode = mode;
     session.state = mode;
-    if (mode === "expanded" && (changed || !this.#isPointerController(session))) this.#claimPointer(session);
+    if (mode === "expanded" && (changed || !this.#isInputController(session))) this.#claimInput(session);
     if (mode !== "idle") this.#schedule(session, 0);
   }
 
@@ -319,19 +354,24 @@ export class ScreenProjectionService {
 
   #input(session: ProjectionSession, raw: string | Buffer | ArrayBuffer): void {
     const controller = this.#controllers.get(session.source.surfaceId);
-    if (controller?.session !== session || controller.revoked || session.mode !== "expanded") return;
-    if (typeof raw !== "string") {
-      this.#close(session, true);
+    if (
+      controller?.session !== session
+      || controller.revoked
+      || !controller.active
+      || session.mode !== "expanded"
+      || typeof raw !== "string"
+    ) {
+      this.#rejectInput(session);
       return;
     }
     let parsed: unknown;
     try {
       parsed = JSON.parse(raw);
     } catch {
-      this.#close(session, true);
+      this.#rejectInput(session);
       return;
     }
-    const message = ScreenPointerInputMessageDto.safeParse(parsed);
+    const message = ScreenInputMessageDto.safeParse(parsed);
     if (
       !message.success
       || message.data.surfaceId !== session.source.surfaceId
@@ -339,111 +379,256 @@ export class ScreenProjectionService {
       || message.data.geometryGeneration !== session.source.geometryGeneration
       || message.data.controllerEpoch !== controller.epoch
       || message.data.sequence !== controller.nextSequence
-      || message.data.x >= session.source.logicalWidth
-      || message.data.y >= session.source.logicalHeight
+      || (
+        (message.data.type === "pointer-motion"
+          || message.data.type === "pointer-button"
+          || message.data.type === "pointer-scroll")
+        && (message.data.x >= session.source.logicalWidth || message.data.y >= session.source.logicalHeight)
+      )
       || (message.data.type === "pointer-scroll" && message.data.deltaX === 0 && message.data.deltaY === 0)
+      || (
+        message.data.type === "paste"
+        && (
+          message.data.text.includes("\0")
+          || new TextEncoder().encode(message.data.text).byteLength > 65_536
+        )
+      )
     ) {
-      this.#close(session, true);
+      this.#rejectInput(session);
       return;
     }
     controller.nextSequence += 1;
-    const event: BotScreenPointerEvent = message.data.type === "pointer-motion"
-      ? { type: "motion", x: message.data.x, y: message.data.y }
-      : message.data.type === "pointer-button"
-        ? {
-            type: "button",
-            x: message.data.x,
-            y: message.data.y,
-            button: message.data.button,
-            state: message.data.state,
-          }
-        : {
-            type: "scroll",
-            x: message.data.x,
-            y: message.data.y,
-            deltaX: message.data.deltaX,
-            deltaY: message.data.deltaY,
-          };
+    if (message.data.type === "release-control") {
+      this.#revokeInput(controller);
+      return;
+    }
+
+    let event: BotScreenInputEvent;
+    if (message.data.type === "pointer-motion") {
+      event = { type: "motion", x: message.data.x, y: message.data.y };
+    } else if (message.data.type === "pointer-button") {
+      event = {
+        type: "button",
+        x: message.data.x,
+        y: message.data.y,
+        button: message.data.button,
+        state: message.data.state,
+      };
+    } else if (message.data.type === "pointer-scroll") {
+      event = {
+        type: "scroll",
+        x: message.data.x,
+        y: message.data.y,
+        deltaX: message.data.deltaX,
+        deltaY: message.data.deltaY,
+      };
+    } else if (message.data.type === "paste") {
+      event = { type: "paste", text: message.data.text };
+    } else {
+      const heldCodes = new Set(controller.heldCodes);
+      if (message.data.state === "pressed") {
+        if (heldCodes.has(message.data.code)) {
+          this.#rejectInput(session);
+          return;
+        }
+        heldCodes.add(message.data.code);
+      } else {
+        if (!heldCodes.delete(message.data.code)) {
+          this.#rejectInput(session);
+          return;
+        }
+      }
+      const actualModifiers = {
+        control: heldCodes.has("ControlLeft") || heldCodes.has("ControlRight"),
+        alt: heldCodes.has("AltLeft") || heldCodes.has("AltRight"),
+        shift: heldCodes.has("ShiftLeft") || heldCodes.has("ShiftRight"),
+        meta: heldCodes.has("MetaLeft") || heldCodes.has("MetaRight"),
+      };
+      if (
+        actualModifiers.control !== message.data.modifiers.control
+        || actualModifiers.alt !== message.data.modifiers.alt
+        || actualModifiers.shift !== message.data.modifiers.shift
+        || actualModifiers.meta !== message.data.modifiers.meta
+      ) {
+        this.#rejectInput(session);
+        return;
+      }
+      controller.heldCodes = heldCodes;
+      event = { type: "key", keyCode: KEY_CODES[message.data.code]!, state: message.data.state };
+    }
+    const category: InputDiagnosticCategory | undefined = message.data.type === "pointer-button"
+      ? "pointer-button"
+      : message.data.type === "pointer-scroll"
+        ? "pointer-scroll"
+        : message.data.type === "paste"
+          ? "paste"
+          : message.data.type === "key"
+            ? (
+                message.data.state === "pressed"
+                && (message.data.modifiers.control || message.data.modifiers.alt || message.data.modifiers.meta)
+                  ? "shortcut"
+                  : "key"
+              )
+            : undefined;
+    const queued = {
+      event,
+      receivedAt: Date.now(),
+      ...(category === undefined ? {} : { category }),
+      ...(message.data.type === "paste" ? { redactedLength: Array.from(message.data.text).length } : {}),
+    };
+    if (queued.category !== undefined) {
+      this.#recordDiagnostic(
+        session.source.surfaceId,
+        queued.category,
+        "accepted",
+        0,
+        queued.redactedLength,
+      );
+    }
     const last = controller.queue.at(-1);
-    if (event.type === "motion" && last?.type === "motion") controller.queue[controller.queue.length - 1] = event;
-    else controller.queue.push(event);
+    if (event.type === "motion" && last?.event.type === "motion") controller.queue[controller.queue.length - 1] = queued;
+    else controller.queue.push(queued);
     if (!controller.draining) {
       controller.draining = true;
-      queueMicrotask(() => void this.#drainPointer(controller));
+      queueMicrotask(() => void this.#drainInput(controller));
     }
   }
 
-  async #drainPointer(controller: PointerController): Promise<void> {
+  async #drainInput(controller: InputController): Promise<void> {
     try {
       while (
         !controller.revoked
+        && controller.active
         && this.#controllers.get(controller.session.source.surfaceId) === controller
       ) {
-        const event = controller.queue.shift();
-        if (event === undefined) return;
-        await controller.session.source.pointer(event);
+        const queued = controller.queue.shift();
+        if (queued === undefined) return;
+        try {
+          await controller.session.source.input(queued.event);
+        } catch {
+          if (queued.category !== undefined) {
+            this.#recordDiagnostic(
+              controller.session.source.surfaceId,
+              queued.category,
+              "failed",
+              Date.now() - queued.receivedAt,
+              queued.redactedLength,
+            );
+          }
+          this.#close(controller.session, true);
+          return;
+        }
       }
-    } catch {
-      this.#close(controller.session, true);
     } finally {
       controller.draining = false;
-      if (!controller.revoked && controller.queue.length > 0) {
+      if (!controller.revoked && controller.active && controller.queue.length > 0) {
         controller.draining = true;
-        queueMicrotask(() => void this.#drainPointer(controller));
+        queueMicrotask(() => void this.#drainInput(controller));
       }
     }
   }
 
-  #claimPointer(session: ProjectionSession): void {
+  #claimInput(session: ProjectionSession): void {
     if (
       this.#sessions.get(session.id) !== session
       || session.mode !== "expanded"
       || session.input === undefined
       || !session.input.isOpen()
-      || this.#isPointerController(session)
+      || this.#isInputController(session)
     ) return;
-    const previous = this.#controllers.get(session.source.surfaceId);
+    const surfaceId = session.source.surfaceId;
+    const previous = this.#controllers.get(surfaceId);
     if (previous !== undefined && previous.session !== session) this.#close(previous.session, false);
-    const epoch = (this.#controllerEpochs.get(session.source.surfaceId) ?? 0) + 1;
-    this.#controllerEpochs.set(session.source.surfaceId, epoch);
-    const controller: PointerController = {
+    const epoch = (this.#controllerEpochs.get(surfaceId) ?? 0) + 1;
+    this.#controllerEpochs.set(surfaceId, epoch);
+    const controller: InputController = {
       session,
       epoch,
       nextSequence: 1,
       queue: [],
       draining: false,
       revoked: false,
+      active: false,
+      heldCodes: new Set(),
+      release: Promise.resolve(),
     };
-    this.#controllers.set(session.source.surfaceId, controller);
-    this.#sendPointerAuthority(controller, true);
+    this.#controllers.set(surfaceId, controller);
+    const barrier = this.#releaseBarriers.get(surfaceId) ?? Promise.resolve();
+    controller.release = barrier.then(() => {
+      if (
+        controller.revoked
+        || this.#controllers.get(surfaceId) !== controller
+        || this.#sessions.get(session.id) !== session
+        || session.mode !== "expanded"
+      ) return;
+      controller.active = true;
+      this.#sendInputAuthority(controller, true);
+      this.#recordDiagnostic(surfaceId, "controller", "accepted", 0);
+    }).catch(() => this.#close(session, true));
   }
 
-  #isPointerController(session: ProjectionSession): boolean {
+  #rejectInput(session: ProjectionSession): void {
+    this.#recordDiagnostic(session.source.surfaceId, "invalid", "rejected", 0);
+    this.#close(session, true);
+  }
+
+  #recordDiagnostic(
+    surfaceId: SurfaceId,
+    category: InputDiagnosticCategory,
+    outcome: "accepted" | "rejected" | "failed" | "released",
+    latencyMs: number,
+    redactedLength?: number,
+  ): void {
+    try {
+      this.diagnostics.record(surfaceId, category, outcome, latencyMs, redactedLength);
+    } catch {
+      // Local diagnostics must never interrupt control or held-input cleanup.
+    }
+  }
+
+  #isInputController(session: ProjectionSession): boolean {
     return this.#controllers.get(session.source.surfaceId)?.session === session;
   }
 
-  #revokePointerFor(session: ProjectionSession): void {
+  #revokeInputFor(session: ProjectionSession): Promise<void> {
     const controller = this.#controllers.get(session.source.surfaceId);
-    if (controller?.session === session) this.#revokePointer(controller);
+    return controller?.session === session ? this.#revokeInput(controller) : Promise.resolve();
   }
 
-  #revokePointer(controller: PointerController): void {
-    if (controller.revoked) return;
+  #revokeInput(controller: InputController): Promise<void> {
+    if (controller.revoked) return controller.release;
     controller.revoked = true;
+    controller.active = false;
     controller.queue.length = 0;
-    if (this.#controllers.get(controller.session.source.surfaceId) === controller) {
-      this.#controllers.delete(controller.session.source.surfaceId);
-    }
-    this.#sendPointerAuthority(controller, false);
-    void controller.session.source.releasePointer().catch(() => {});
+    controller.heldCodes.clear();
+    const surfaceId = controller.session.source.surfaceId;
+    if (this.#controllers.get(surfaceId) === controller) this.#controllers.delete(surfaceId);
+    this.#sendInputAuthority(controller, false);
+    const prior = this.#releaseBarriers.get(surfaceId) ?? Promise.resolve();
+    const startedAt = Date.now();
+    const release = prior.catch(() => {}).then(async () => {
+      try {
+        await controller.session.source.releaseInput();
+        this.#recordDiagnostic(surfaceId, "release", "released", Date.now() - startedAt);
+      } catch (error) {
+        this.#recordDiagnostic(surfaceId, "release", "failed", Date.now() - startedAt);
+        throw error;
+      }
+    });
+    controller.release = release;
+    this.#releaseBarriers.set(surfaceId, release);
+    void release.finally(() => {
+      if (this.#releaseBarriers.get(surfaceId) === release) this.#releaseBarriers.delete(surfaceId);
+    }).catch(() => {});
+    return release;
   }
 
-  #sendPointerAuthority(controller: PointerController, active: boolean): void {
+  #sendInputAuthority(controller: InputController, active: boolean): void {
     const { input, source } = controller.session;
     if (input === undefined || !input.isOpen()) return;
-    const message: ScreenPointerAuthorityMessageDto = {
+    const message: ScreenInputAuthorityMessageDto = {
       version: SCREEN_PROJECTION_PROTOCOL_VERSION,
-      type: "pointer-authority",
+      type: "input-authority",
       active,
       surfaceId: source.surfaceId,
       runtimeGeneration: source.runtimeGeneration,
@@ -463,7 +648,7 @@ export class ScreenProjectionService {
   }
   #close(session: ProjectionSession, failed: boolean): void {
     if (this.#sessions.get(session.id) !== session) return;
-    this.#revokePointerFor(session);
+    void this.#revokeInputFor(session).catch(() => {});
     this.#sessions.delete(session.id);
     if (session.timer !== undefined) clearTimeout(session.timer);
     session.timer = undefined;

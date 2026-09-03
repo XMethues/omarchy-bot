@@ -242,7 +242,7 @@ export const ScreenProjectionControlMessageDto = z.object({
 });
 export type ScreenProjectionControlMessageDto = z.infer<typeof ScreenProjectionControlMessageDto>;
 
-const ScreenPointerEnvelopeDto = z.object({
+const ScreenInputEnvelopeDto = z.object({
   version: z.literal(SCREEN_PROJECTION_PROTOCOL_VERSION),
   surfaceId: SurfaceIdDto,
   runtimeGeneration: z.number().int().positive(),
@@ -256,29 +256,67 @@ const ScreenPointerPositionDto = {
   y: z.number().finite().nonnegative(),
 };
 
-export const ScreenPointerInputMessageDto = z.discriminatedUnion("type", [
-  ScreenPointerEnvelopeDto.extend({
+export const SCREEN_KEY_CODES = [
+  "Escape", "Digit1", "Digit2", "Digit3", "Digit4", "Digit5", "Digit6", "Digit7", "Digit8", "Digit9", "Digit0",
+  "Minus", "Equal", "Backspace", "Tab",
+  "KeyQ", "KeyW", "KeyE", "KeyR", "KeyT", "KeyY", "KeyU", "KeyI", "KeyO", "KeyP", "BracketLeft", "BracketRight",
+  "Enter", "ControlLeft",
+  "KeyA", "KeyS", "KeyD", "KeyF", "KeyG", "KeyH", "KeyJ", "KeyK", "KeyL", "Semicolon", "Quote", "Backquote",
+  "ShiftLeft", "Backslash",
+  "KeyZ", "KeyX", "KeyC", "KeyV", "KeyB", "KeyN", "KeyM", "Comma", "Period", "Slash", "ShiftRight",
+  "AltLeft", "Space", "CapsLock",
+  "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12",
+  "NumLock", "ScrollLock",
+  "Numpad7", "Numpad8", "Numpad9", "NumpadSubtract", "Numpad4", "Numpad5", "Numpad6", "NumpadAdd",
+  "Numpad1", "Numpad2", "Numpad3", "Numpad0", "NumpadDecimal", "NumpadEnter", "NumpadDivide", "NumpadMultiply",
+  "ControlRight", "AltRight", "Home", "ArrowUp", "PageUp", "ArrowLeft", "ArrowRight", "End", "ArrowDown", "PageDown",
+  "Insert", "Delete", "MetaLeft", "MetaRight", "ContextMenu", "PrintScreen", "Pause",
+] as const;
+export const ScreenKeyCodeDto = z.enum(SCREEN_KEY_CODES);
+export type ScreenKeyCodeDto = z.infer<typeof ScreenKeyCodeDto>;
+
+export const ScreenInputMessageDto = z.discriminatedUnion("type", [
+  ScreenInputEnvelopeDto.extend({
     type: z.literal("pointer-motion"),
     ...ScreenPointerPositionDto,
   }),
-  ScreenPointerEnvelopeDto.extend({
+  ScreenInputEnvelopeDto.extend({
     type: z.literal("pointer-button"),
     ...ScreenPointerPositionDto,
     button: z.enum(["left", "middle", "right"]),
     state: z.enum(["pressed", "released"]),
   }),
-  ScreenPointerEnvelopeDto.extend({
+  ScreenInputEnvelopeDto.extend({
     type: z.literal("pointer-scroll"),
     ...ScreenPointerPositionDto,
     deltaX: z.number().finite(),
     deltaY: z.number().finite(),
   }),
+  ScreenInputEnvelopeDto.extend({
+    type: z.literal("key"),
+    code: ScreenKeyCodeDto,
+    state: z.enum(["pressed", "released"]),
+    modifiers: z.object({
+      control: z.boolean(),
+      alt: z.boolean(),
+      shift: z.boolean(),
+      meta: z.boolean(),
+    }),
+  }),
+  ScreenInputEnvelopeDto.extend({
+    type: z.literal("paste"),
+    text: z.string().min(1).max(65_536),
+  }),
+  ScreenInputEnvelopeDto.extend({
+    type: z.literal("release-control"),
+    reason: z.enum(["blur", "visibility-loss", "navigation", "teardown"]),
+  }),
 ]);
-export type ScreenPointerInputMessageDto = z.infer<typeof ScreenPointerInputMessageDto>;
+export type ScreenInputMessageDto = z.infer<typeof ScreenInputMessageDto>;
 
-export const ScreenPointerAuthorityMessageDto = z.object({
+export const ScreenInputAuthorityMessageDto = z.object({
   version: z.literal(SCREEN_PROJECTION_PROTOCOL_VERSION),
-  type: z.literal("pointer-authority"),
+  type: z.literal("input-authority"),
   active: z.boolean(),
   surfaceId: SurfaceIdDto,
   runtimeGeneration: z.number().int().positive(),
@@ -290,7 +328,7 @@ export const ScreenPointerAuthorityMessageDto = z.object({
   videoHeight: z.number().int().positive(),
   scale: z.number().positive(),
 });
-export type ScreenPointerAuthorityMessageDto = z.infer<typeof ScreenPointerAuthorityMessageDto>;
+export type ScreenInputAuthorityMessageDto = z.infer<typeof ScreenInputAuthorityMessageDto>;
 
 export const ScreenProjectionFrameHeaderDto = z.object({
   version: z.literal(SCREEN_PROJECTION_PROTOCOL_VERSION),

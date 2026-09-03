@@ -15,10 +15,12 @@ export interface BotScreenActionResult {
   windowList?: unknown;
 }
 
-export type BotScreenPointerEvent =
+export type BotScreenInputEvent =
   | { type: "motion"; x: number; y: number }
   | { type: "button"; x: number; y: number; button: "left" | "middle" | "right"; state: "pressed" | "released" }
-  | { type: "scroll"; x: number; y: number; deltaX: number; deltaY: number };
+  | { type: "scroll"; x: number; y: number; deltaX: number; deltaY: number }
+  | { type: "key"; keyCode: number; state: "pressed" | "released" }
+  | { type: "paste"; text: string };
 
 export interface BotScreenInputLease {
   surfaceId: SurfaceId;
@@ -46,16 +48,16 @@ export interface BotScreenProjectionSource {
   videoHeight: number;
   scale: number;
   capture(): Promise<BotScreenCapture>;
-  pointer(event: BotScreenPointerEvent): Promise<void>;
-  releasePointer(): Promise<void>;
+  input(event: BotScreenInputEvent): Promise<void>;
+  releaseInput(): Promise<void>;
 }
 
 /** Internal platform seam. Runtime handles keep process and socket facts private. */
 export interface BotScreenRuntime {
   capture(): Promise<BotScreenCapture>;
   act(action: ComputerAction, lease?: BotScreenInputLease): Promise<BotScreenActionResult>;
-  pointer(event: BotScreenPointerEvent): Promise<void>;
-  releasePointer(): Promise<void>;
+  input(event: BotScreenInputEvent): Promise<void>;
+  releaseInput(): Promise<void>;
   /** Resolves only when the runtime exits; deliberate stops are ignored by the manager. */
   exited: Promise<Error>;
   stop(): Promise<void>;
@@ -199,10 +201,10 @@ export class BotScreenManager {
         scale,
         capture: () =>
           this.#serialize(owner.surfaceId, async () => (await currentRuntime()).capture()),
-        pointer: (event) =>
-          this.#serialize(owner.surfaceId, async () => (await currentRuntime()).pointer(event)),
-        releasePointer: () =>
-          this.#serialize(owner.surfaceId, async () => (await currentRuntime()).releasePointer()),
+        input: (event) =>
+          this.#serialize(owner.surfaceId, async () => (await currentRuntime()).input(event)),
+        releaseInput: () =>
+          this.#serialize(owner.surfaceId, async () => (await currentRuntime()).releaseInput()),
       };
     });
   }

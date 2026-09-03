@@ -203,10 +203,10 @@ class ControlledRuntimeAdapter implements BotScreenRuntimeAdapter {
           this.#actionsInFlight.set(provision.surfaceId, inFlight - 1);
         }
       },
-      pointer: async () => {
+      input: async () => {
         if (stopped) throw new Error("test Screen is stopped");
       },
-      releasePointer: async () => {
+      releaseInput: async () => {
         if (stopped) throw new Error("test Screen is stopped");
       },
       exited,

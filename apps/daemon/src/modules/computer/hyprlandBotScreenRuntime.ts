@@ -11,12 +11,12 @@ import {
 import path from "node:path";
 import type { ComputerAction } from "@omarchy-bot/domain";
 import type { SurfaceComputerWorker, Supervisor } from "../../supervision/supervisor.ts";
-import { ensurePointerHelper } from "../../../native/pointer-helper/build.ts";
+import { ensureInputHelper } from "../../../native/pointer-helper/build.ts";
 import type {
   BotScreenActionResult,
   BotScreenCapture,
   BotScreenInputLease,
-  BotScreenPointerEvent,
+  BotScreenInputEvent,
   BotScreenProvision,
   BotScreenRuntime,
   BotScreenRuntimeAdapter,
@@ -30,7 +30,7 @@ interface HyprlandAdapterOptions {
   hyprlandBin?: string;
   hyprctlBin?: string;
   grimBin?: string;
-  pointerHelperBin?: string;
+  inputHelperBin?: string;
   applicationBin?: string;
   computerWorkers: Pick<Supervisor, "startComputerWorker">;
 }
@@ -80,7 +80,7 @@ async function terminate(child: ScreenProcess): Promise<void> {
   await child.exited;
 }
 
-class WlrVirtualPointerInput {
+class WaylandVirtualInput {
   readonly exited: Promise<Error>;
   #reader: ReadableStreamDefaultReader<Uint8Array>;
   #decoder = new TextDecoder();
@@ -95,7 +95,7 @@ class WlrVirtualPointerInput {
     private readonly logicalHeight: number,
   ) {
     this.#reader = process.stdout.getReader();
-    this.exited = process.exited.then((status) => new Error(`Bot Screen pointer helper exited with status ${status}`));
+    this.exited = process.exited.then((status) => new Error(`Bot Screen input helper exited with status ${status}`));
   }
 
   static async start(
@@ -104,39 +104,47 @@ class WlrVirtualPointerInput {
     env: Record<string, string>,
     logicalWidth: number,
     logicalHeight: number,
-  ): Promise<WlrVirtualPointerInput> {
+  ): Promise<WaylandVirtualInput> {
     const process = Bun.spawn([binary, outputName], {
       env,
       stdin: "pipe",
       stdout: "pipe",
       stderr: "pipe",
     });
-    const input = new WlrVirtualPointerInput(process, logicalWidth, logicalHeight);
+    const input = new WaylandVirtualInput(process, logicalWidth, logicalHeight);
     const ready = await Promise.race([
       input.#readLine(),
       process.exited.then(async (status) => {
         const stderr = await new Response(process.stderr).text();
         throw new Error(
-          `Bot Screen pointer helper exited with status ${status}${stderr.trim() === "" ? "" : `: ${stderr.trim()}`}`,
+          `Bot Screen input helper exited with status ${status}${stderr.trim() === "" ? "" : `: ${stderr.trim()}`}`,
         );
       }),
       Bun.sleep(5_000).then(() => {
-        throw new Error("Bot Screen pointer helper did not become ready");
+        throw new Error("Bot Screen input helper did not become ready");
       }),
     ]);
     if (ready !== "READY") {
       process.kill("SIGTERM");
-      throw new Error("Bot Screen pointer helper returned an invalid readiness response");
+      throw new Error("Bot Screen input helper returned an invalid readiness response");
     }
     return input;
   }
 
-  pointer(event: BotScreenPointerEvent): Promise<void> {
+  input(event: BotScreenInputEvent): Promise<void> {
     if (event.type === "motion") {
       return this.#command(
         `motion ${++this.#sequence} ${event.x} ${event.y} ${this.logicalWidth} ${this.logicalHeight}`,
         this.#sequence,
       );
+    }
+    if (event.type === "key") {
+      const sequence = ++this.#sequence;
+      return this.#command(`key ${sequence} ${event.keyCode} ${event.state === "pressed" ? 1 : 0}`, sequence);
+    }
+    if (event.type === "paste") {
+      const sequence = ++this.#sequence;
+      return this.#command(`paste ${sequence} ${Buffer.from(event.text, "utf8").toString("base64")}`, sequence);
     }
     const motionSequence = ++this.#sequence;
     const motion = this.#command(
@@ -174,11 +182,11 @@ class WlrVirtualPointerInput {
 
   #command(line: string, sequence: number): Promise<void> {
     const operation = this.#operations.then(async () => {
-      if (this.#stopped || this.process.exitCode !== null) throw new Error("Bot Screen pointer helper is not running");
+      if (this.#stopped || this.process.exitCode !== null) throw new Error("Bot Screen input helper is not running");
       this.process.stdin.write(`${line}\n`);
       await this.process.stdin.flush();
       const response = await this.#readLine();
-      if (response !== `OK ${sequence}`) throw new Error("Bot Screen pointer helper rejected an input event");
+      if (response !== `OK ${sequence}`) throw new Error("Bot Screen input helper rejected an input event");
     });
     this.#operations = operation.catch(() => {});
     return operation;
@@ -193,7 +201,7 @@ class WlrVirtualPointerInput {
         return line;
       }
       const chunk = await this.#reader.read();
-      if (chunk.done) throw new Error("Bot Screen pointer helper closed its protocol stream");
+      if (chunk.done) throw new Error("Bot Screen input helper closed its protocol stream");
       this.#buffer += this.#decoder.decode(chunk.value, { stream: true });
     }
   }
@@ -313,7 +321,7 @@ export class HyprlandBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter 
 
     let applicationProcess: ScreenProcess | undefined;
     let computerWorker: SurfaceComputerWorker | undefined;
-    let pointerInput: WlrVirtualPointerInput | undefined;
+    let virtualInput: WaylandVirtualInput | undefined;
     try {
       const ready = await this.#discover(socketRuntimeDir, compositor);
       const childEnv = explicitEnvironment({
@@ -341,18 +349,18 @@ export class HyprlandBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter 
         }
       }
       await this.#waitForHeadlessOutput(hyprctl, childEnv, outputName);
-      const pointerHelper = this.options.pointerHelperBin === undefined
-        ? await ensurePointerHelper()
-        : executable(this.options.pointerHelperBin, this.options.pointerHelperBin);
-      if (pointerHelper === undefined) throw new Error("the Bot Screen pointer helper is unavailable");
-      const startedPointerInput = await WlrVirtualPointerInput.start(
-        pointerHelper,
+      const inputHelper = this.options.inputHelperBin === undefined
+        ? await ensureInputHelper()
+        : executable(this.options.inputHelperBin, this.options.inputHelperBin);
+      if (inputHelper === undefined) throw new Error("the Bot Screen Wayland input helper is unavailable");
+      const startedVirtualInput = await WaylandVirtualInput.start(
+        inputHelper,
         outputName,
         childEnv,
         provision.logicalWidth,
         provision.logicalHeight,
       );
-      pointerInput = startedPointerInput;
+      virtualInput = startedVirtualInput;
 
       applicationProcess = Bun.spawn([application], {
         env: childEnv,
@@ -372,7 +380,7 @@ export class HyprlandBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter 
         compositor.exited.then((status) => new Error(`nested Hyprland exited with status ${status}`)),
         applicationProcess.exited.then((status) => new Error(`Bot Screen application exited with status ${status}`)),
         startedComputerWorker.exited,
-        startedPointerInput.exited,
+        startedVirtualInput.exited,
       ]);
 
       let stopped = false;
@@ -417,13 +425,13 @@ export class HyprlandBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter 
       return {
         capture,
         act,
-        pointer: (event) => startedPointerInput.pointer(event),
-        releasePointer: () => startedPointerInput.release(),
+        input: (event) => startedVirtualInput.input(event),
+        releaseInput: () => startedVirtualInput.release(),
         exited,
         stop: async () => {
           if (stopped) return;
           stopped = true;
-          await startedPointerInput.stop().catch(() => {});
+          await startedVirtualInput.stop().catch(() => {});
           await Promise.allSettled([
             startedComputerWorker.stop(),
             ...(applicationProcess === undefined ? [] : [terminate(applicationProcess)]),
@@ -435,7 +443,7 @@ export class HyprlandBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter 
       };
     } catch (error) {
       await computerWorker?.stop().catch(() => {});
-      await pointerInput?.stop().catch(() => {});
+      await virtualInput?.stop().catch(() => {});
       await Promise.allSettled([
         ...(applicationProcess === undefined ? [] : [terminate(applicationProcess)]),
         terminate(compositor),

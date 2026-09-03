@@ -1,11 +1,13 @@
 import type {
   BotScreenCapture,
-  BotScreenPointerEvent,
+  BotScreenInputEvent,
   BotScreenProvision,
   BotScreenRuntime,
   BotScreenRuntimeAdapter,
 } from "./botScreenManager.ts";
 
+
+type FakePointerEvent = Extract<BotScreenInputEvent, { type: "motion" | "button" | "scroll" }>;
 const FAKE_SCREEN_PNG = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAYAAAD0In+KAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAADklEQVQImWMQMgn7D8IAC5MDN627upEAAAAASUVORK5CYII=",
   "base64",
@@ -14,16 +16,21 @@ const FAKE_SCREEN_PNG = Buffer.from(
 
 interface FakeBotScreenRuntimeOptions {
   pointerDelayMs?: number;
+  inputFailureAt?: number;
+  releaseDelayMs?: number;
 }
 /** Deterministic in-process platform adapter used by daemon integration tests. */
 export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
-  readonly pointerEvents: Array<{ surfaceId: string; runtimeGeneration: number; event: BotScreenPointerEvent }> = [];
+  readonly pointerEvents: Array<{ surfaceId: string; runtimeGeneration: number; event: FakePointerEvent }> = [];
+  readonly inputEvents: Array<{ surfaceId: string; runtimeGeneration: number; event: BotScreenInputEvent }> = [];
   releaseCount = 0;
   #pointerWaiters: Array<{ count: number; resolve: () => void }> = [];
+  #inputWaiters: Array<{ count: number; resolve: () => void }> = [];
   #pointerEventWaiters: Array<{
-    predicate: (event: { surfaceId: string; runtimeGeneration: number; event: BotScreenPointerEvent }) => boolean;
+    predicate: (event: { surfaceId: string; runtimeGeneration: number; event: FakePointerEvent }) => boolean;
     resolve: () => void;
   }> = [];
+  #inputAttempts = 0;
   #releaseWaiters: Array<{ count: number; resolve: () => void }> = [];
 
   constructor(
@@ -31,6 +38,13 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     private readonly options: FakeBotScreenRuntimeOptions = {},
   ) {}
 
+
+  waitForInputEvents(count: number): Promise<void> {
+    if (this.inputEvents.length >= count) return Promise.resolve();
+    const { promise, resolve } = Promise.withResolvers<void>();
+    this.#inputWaiters.push({ count, resolve });
+    return promise;
+  }
 
   waitForPointerEvents(count: number): Promise<void> {
     if (this.pointerEvents.length >= count) return Promise.resolve();
@@ -40,7 +54,7 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
   }
 
   waitForPointerEvent(
-    predicate: (event: { surfaceId: string; runtimeGeneration: number; event: BotScreenPointerEvent }) => boolean,
+    predicate: (event: { surfaceId: string; runtimeGeneration: number; event: FakePointerEvent }) => boolean,
   ): Promise<void> {
     if (this.pointerEvents.some(predicate)) return Promise.resolve();
     const { promise, resolve } = Promise.withResolvers<void>();
@@ -76,9 +90,26 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
             : {}),
         };
       },
-      pointer: async (event): Promise<void> => {
+      input: async (event): Promise<void> => {
+        this.#inputAttempts += 1;
+        if (this.options.inputFailureAt === this.#inputAttempts) {
+          throw new Error("fake Bot Screen input helper failed");
+        }
         if (stopped) throw new Error("fake Bot Screen is stopped");
-        if (this.options.pointerDelayMs !== undefined) await Bun.sleep(this.options.pointerDelayMs);
+        if (this.options.pointerDelayMs !== undefined && event.type === "motion") {
+          await Bun.sleep(this.options.pointerDelayMs);
+        }
+        const recorded = {
+          surfaceId: provision.surfaceId,
+          runtimeGeneration: provision.generation,
+          event,
+        };
+        this.inputEvents.push(recorded);
+        for (const waiter of this.#inputWaiters.splice(0)) {
+          if (this.inputEvents.length >= waiter.count) waiter.resolve();
+          else this.#inputWaiters.push(waiter);
+        }
+        if (event.type === "key" || event.type === "paste") return;
         this.pointerEvents.push({
           surfaceId: provision.surfaceId,
           runtimeGeneration: provision.generation,
@@ -93,8 +124,9 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
           else this.#pointerEventWaiters.push(waiter);
         }
       },
-      releasePointer: async (): Promise<void> => {
+      releaseInput: async (): Promise<void> => {
         if (stopped) return;
+        if (this.options.releaseDelayMs !== undefined) await Bun.sleep(this.options.releaseDelayMs);
         this.releaseCount += 1;
         for (const waiter of this.#releaseWaiters.splice(0)) {
           if (this.releaseCount >= waiter.count) waiter.resolve();
