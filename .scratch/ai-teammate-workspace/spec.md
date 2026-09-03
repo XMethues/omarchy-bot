@@ -28,7 +28,7 @@ The product uses Astryx primitives, local managed storage for attachments and av
 6. As an Omarchy user, I want a newly created Bot to open a blank conversation, so that the workspace does not impose generic onboarding content.
 7. As an Omarchy user, I want several Bots to use the same Agent, so that one backend can power teammates with different identities and Jobs.
 8. As an Omarchy user, I want a Bot's Agent reference to remain fixed, so that an existing teammate and its conversation history do not silently change execution backend.
-9. As an Omarchy user, I want the Bot avatar and name to open a right-side Profile drawer that identifies its immutable Agent while letting me edit its name, Job, and avatar, so that identity is truthful and can evolve without changing backend.
+9. As an Omarchy user, I want the Bot avatar and name to open a right-side Profile panel that identifies its immutable Agent while letting me edit its name, Job, and avatar, so that identity is truthful and can evolve without changing backend.
 10. As an Omarchy user, I want updated Instructions to affect future turns in all of that Bot's Threads, so that the teammate has one current Job.
 11. As an Omarchy user, I want existing messages to remain unchanged after Instructions are edited, so that history stays truthful.
 12. As an Omarchy user, I want to archive a Bot without losing its Threads, so that I can remove inactive teammates from daily navigation.
@@ -95,8 +95,8 @@ The product uses Astryx primitives, local managed storage for attachments and av
 73. As an Omarchy user, I want the assistant avatar to animate while output streams and settle afterward, so that motion communicates real state.
 74. As a motion-sensitive user, I want reduced-motion mode to replace animation with static indicators, so that the workspace remains comfortable.
 75. As an Omarchy user, I want a recognizable Computer glyph consistently available in the conversation Header, so that the selected Bot's screen context is discoverable.
-76. As an Omarchy user, I want the Computer control quiet while inactive, stateful only when relevant, and able to close its open desktop drawer when selected again, so that it behaves as a predictable toggle without permanent operational noise.
-77. As an Omarchy user, I want the Computer control to toggle a docked desktop drawer or open a narrow-window BottomSheet with a preview that expands into a modal Lightbox, so that I can observe desktop work without lease terminology and enlarge it only when needed.
+76. As an Omarchy user, I want the Computer control quiet while inactive, stateful only when relevant, and able to close its open right-side panel when selected again, so that it behaves as a predictable toggle without permanent operational noise.
+77. As an Omarchy user, I want the Computer control to toggle a right-side panel at every window width with a preview that expands into a modal Lightbox, so that I can observe desktop work without lease terminology and enlarge it only when needed.
 78. As an Omarchy user, I want Take control shown only when human input is relevant, so that takeover is contextual.
 79. As an Omarchy user, I want Return to Bot while I control the Shared Screen, so that the handoff has a clear end.
 80. As an Omarchy user, I want the computer re-observed before the Bot resumes, so that automation continues from current desktop state.

@@ -3,7 +3,6 @@ import { useCallback, useEffect, useState } from "react";
 import * as stylex from "@stylexjs/stylex";
 import { Maximize2 } from "lucide-react";
 import { AspectRatio } from "@astryxdesign/core/AspectRatio";
-import { useAppShellMobile } from "@astryxdesign/core/AppShell";
 import { Banner } from "@astryxdesign/core/Banner";
 import { Button } from "@astryxdesign/core/Button";
 import { IconButton } from "@astryxdesign/core/IconButton";
@@ -17,9 +16,8 @@ import { Text } from "@astryxdesign/core/Text";
 import { StackItem } from "@astryxdesign/core/Stack";
 import { VStack } from "@astryxdesign/core/VStack";
 import type { BotViewDto, ComputerViewDto } from "@omarchy-bot/protocol";
-import { BottomSheetWithReturnFocus } from "./BottomSheetWithReturnFocus.tsx";
 
-export interface ComputerSheetProps {
+export interface ComputerPanelProps {
   bot: Pick<BotViewDto, "id" | "name">;
   view: ComputerViewDto;
   snapshotUrl: string;
@@ -76,12 +74,11 @@ const localStyles = stylex.create({
     insetInlineEnd: "var(--spacing-2)",
   },
 });
-interface ComputerSheetContentProps extends Omit<ComputerSheetProps, "onClose"> {
-  compactHeading: boolean;
+interface ComputerPanelContentProps extends Omit<ComputerPanelProps, "onClose"> {
   onExpandPreview?: () => void;
 }
 
-function ComputerSheetContent({
+function ComputerPanelContent({
   bot,
   open,
   view,
@@ -92,9 +89,8 @@ function ComputerSheetContent({
   onRetry,
   onTakeControl,
   onReturnToBot,
-  compactHeading,
   onExpandPreview,
-}: ComputerSheetContentProps): JSX.Element {
+}: ComputerPanelContentProps): JSX.Element {
   const [previewLoading, setPreviewLoading] = useState(true);
   const [previewError, setPreviewError] = useState(false);
   const [previewKey, setPreviewKey] = useState(0);
@@ -115,8 +111,7 @@ function ComputerSheetContent({
   };
 
   return (
-    <VStack gap={4} padding={4} aria-busy={loading || busy || undefined} data-testid="computer-sheet">
-      {compactHeading ? <Heading level={2}>Computer</Heading> : null}
+    <VStack gap={4} padding={4} aria-busy={loading || busy || undefined} data-testid="computer-drawer">
       {!loading && view.state !== "unavailable" ? (
         <VStack gap={1}>
           <Heading level={3}>{STATE_LABELS[view.state]}</Heading>
@@ -209,24 +204,22 @@ function ComputerSheetContent({
   );
 }
 
-/** Docked desktop drawer with a native bottom sheet on narrow screens. */
-export function ComputerSheet({
+/** Right-side computer panel at every window width. */
+export function ComputerPanel({
   open,
   onClose,
   returnFocusRef,
   ...contentProps
-}: ComputerSheetProps): JSX.Element | null {
-  const { isMobile: isSmallScreen } = useAppShellMobile();
+}: ComputerPanelProps): JSX.Element | null {
   const [previewExpanded, setPreviewExpanded] = useState(false);
   const closePanel = useCallback((): void => {
     onClose();
     requestAnimationFrame(() => returnFocusRef.current?.focus());
   }, [onClose, returnFocusRef]);
   const content = (
-    <ComputerSheetContent
+    <ComputerPanelContent
       {...contentProps}
       open={open}
-      compactHeading={isSmallScreen}
       onExpandPreview={() => setPreviewExpanded(true)}
     />
   );
@@ -244,35 +237,27 @@ export function ComputerSheet({
   );
 
   useEffect(() => {
-    if (!open || isSmallScreen) return;
+    if (!open) return;
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.key === "Escape" && !previewExpanded) closePanel();
     };
     window.addEventListener("keydown", onKeyDown, true);
     return () => window.removeEventListener("keydown", onKeyDown, true);
-  }, [closePanel, isSmallScreen, open, previewExpanded]);
+  }, [closePanel, open, previewExpanded]);
 
-  if (isSmallScreen) {
-    return (
-      <>
-        <BottomSheetWithReturnFocus
-          label="Computer"
-          returnFocusRef={returnFocusRef}
-          isOpen={open}
-          onOpenChange={(nextOpen) => !nextOpen && onClose()}
-          height="tall"
-        >
-          {content}
-        </BottomSheetWithReturnFocus>
-        {lightbox}
-      </>
-    );
-  }
   if (!open) return null;
 
   return (
     <>
-      <LayoutPanel width={380} padding={0} hasDivider label="Computer" role="complementary">
+      <LayoutPanel
+        width="min(440px, 100vw)"
+        padding={0}
+        hasDivider
+        isScrollable
+        label="Computer"
+        role="complementary"
+        style={{ width: "min(440px, 100vw)", minWidth: 0, maxWidth: "100vw" }}
+      >
         <HStack gap={2} padding={4} vAlign="center">
           <StackItem size="fill">
             <Heading level={2}>Computer</Heading>

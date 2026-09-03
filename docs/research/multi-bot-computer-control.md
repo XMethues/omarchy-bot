@@ -27,7 +27,7 @@ OpenAI's computer-use guide requires a human handoff for selected sensitive step
 The current implementation reflects that limitation:
 
 - `apps/daemon/src/modules/computer/broker.ts` serializes global input and keeps its lease and queue mechanics internal.
-- `apps/web/src/components/ComputerSheet.tsx` exposes only contextual state, preview, **Take control**, and **Return to Bot**.
+- `apps/web/src/components/ComputerPanel.tsx` exposes only contextual state, preview, **Take control**, and **Return to Bot**.
 - `apps/web/src/components/EmergencyComputerControl.tsx` provides the separate global fail-safe.
 - No implemented service claims to detect physical keyboard or pointer activity and transfer control automatically.
 
@@ -48,9 +48,9 @@ Removing coordination now would allow focus changes, typing, and clicks from sep
 
 Keep the global input arbiter internally because all Bots currently target one real compositor and input seat. Do not expose it as a lease in the product language.
 
-1. Open **Computer** as a Sheet from the selected Bot's conversation.
+1. Open **Computer** in the conversation's right-side `LayoutPanel`.
 2. In the normal state, show only the current preview, active application, and a plain-language activity state. Show no lease holder, TTL, queue depth, Take over, I'm done, or Emergency stop row.
-3. When that Bot needs human input, show one prominent **Take control** action in the Sheet and an Action Needed message in the conversation.
+3. When that Bot needs human input, show one prominent **Take control** action in the panel and an Action Needed message in the conversation.
 4. While the user has control, replace it with **Return to Bot**. Re-observe before resuming the Bot.
 5. If another Bot is waiting, show **Waiting for computer** on that Bot only; do not expose queue mechanics.
 6. Keep **Emergency stop** as a global fail-safe in an overflow/settings menu or system shortcut. Surface a persistent warning and **Resume** only while the stop is active.
@@ -67,4 +67,4 @@ Treat per-Bot screens as a separate architecture investigation. It must decide h
 
 ## Conclusion
 
-The implemented solution is an internal global input arbiter with a quiet Computer Sheet and takeover controls rendered only when the state requires them. Grok's exact parallel model becomes appropriate only after omarchy-bot has genuine per-Bot screens.
+The implemented solution is an internal global input arbiter with a quiet right-side Computer panel and takeover controls rendered only when the state requires them. Grok's exact parallel model becomes appropriate only after omarchy-bot has genuine per-Bot screens.

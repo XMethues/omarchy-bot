@@ -18,20 +18,7 @@ import { api, apiErrorMessage } from "../lib/api.ts";
 import styles from "../lib/styles.ts";
 import { AvatarView } from "./AvatarView.tsx";
 
-const drawerStyles = stylex.create({
-  root: {
-    position: "fixed",
-    insetBlock: 0,
-    insetInlineEnd: 0,
-    height: "100dvh",
-    maxWidth: "100vw",
-    zIndex: 10,
-    backgroundColor: "var(--color-background-surface)",
-    boxShadow: "var(--shadow-high)",
-  },
-});
-
-export interface ProfileDrawerProps {
+export interface ProfilePanelProps {
   bot: BotViewDto;
   open: boolean;
   agentDisplayName: string;
@@ -43,15 +30,15 @@ export interface ProfileDrawerProps {
 type BusyAction = "save" | "variation" | "upload" | "recipe";
 type InvalidField = "name" | "avatarDescription";
 
-/** Right-side profile drawer for one bot. Its backing agent remains fixed. */
-export function ProfileDrawer({
+/** Right-side profile panel for one bot. Its backing agent remains fixed. */
+export function ProfilePanel({
   bot,
   agentDisplayName,
   open,
   returnFocusRef,
   onClose,
   onUpdated,
-}: ProfileDrawerProps): JSX.Element | null {
+}: ProfilePanelProps): JSX.Element | null {
   const [current, setCurrent] = useState<BotDto>(bot);
   const [name, setName] = useState(bot.name);
   const [instructions, setInstructions] = useState(bot.instructions);
@@ -189,7 +176,7 @@ export function ProfileDrawer({
       isScrollable
       label="Bot profile"
       role="complementary"
-      xstyle={drawerStyles.root}
+      style={{ width: "min(440px, 100vw)", minWidth: 0, maxWidth: "100vw" }}
     >
       <HStack gap={2} padding={4} vAlign="center">
         <StackItem size="fill">

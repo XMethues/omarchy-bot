@@ -1,5 +1,5 @@
 import type { JSX, ReactNode } from "react";
-import { AppShell } from "@astryxdesign/core/AppShell";
+import { AppShell, useAppShellMobile } from "@astryxdesign/core/AppShell";
 import { Banner } from "@astryxdesign/core/Banner";
 import { Button } from "@astryxdesign/core/Button";
 import { EmptyState } from "@astryxdesign/core/EmptyState";
@@ -19,9 +19,9 @@ import { ConversationHeader } from "../components/ConversationHeader.tsx";
 import { ChatPanel } from "../components/ChatPanel.tsx";
 import { CreateBotDialog } from "../components/CreateBotDialog.tsx";
 import { HistoryDialog } from "../components/HistoryDialog.tsx";
-import { ProfileDrawer } from "../components/ProfileDrawer.tsx";
+import { ProfilePanel } from "../components/ProfilePanel.tsx";
 import { SettingsDialog } from "../components/SettingsDialog.tsx";
-import { ComputerSheet } from "../components/ComputerSheet.tsx";
+import { ComputerPanel } from "../components/ComputerPanel.tsx";
 import { EmergencyComputerControl } from "../components/EmergencyComputerControl.tsx";
 import { useVoiceAutoSendSetting } from "../components/VoiceSettingsControl.tsx";
 import { TranscriptAttention } from "../components/TranscriptAttention.tsx";
@@ -45,6 +45,21 @@ const QUERY_KEYS: Tags = {
   turns: ["turns"],
   computer: ["computer"],
 };
+
+interface ConversationWorkspaceProps {
+  children: ReactNode;
+  panelOpen: boolean;
+}
+
+function ConversationWorkspace({ children, panelOpen }: ConversationWorkspaceProps): JSX.Element | null {
+  const { isMobile } = useAppShellMobile();
+  if (isMobile && panelOpen) return null;
+  return (
+    <LayoutContent padding={0} isScrollable={false} label="Conversation workspace">
+      {children}
+    </LayoutContent>
+  );
+}
 
 function HomeScreen(): JSX.Element {
   const qc = useQueryClient();
@@ -456,14 +471,14 @@ function HomeScreen(): JSX.Element {
           />
         }
         content={
-          <LayoutContent padding={0} isScrollable={false} label="Conversation workspace">
+          <ConversationWorkspace panelOpen={profileOpen || computerOpen}>
             {workspaceContent}
-          </LayoutContent>
+          </ConversationWorkspace>
         }
         end={
           bot !== undefined ? (
             profileOpen ? (
-              <ProfileDrawer
+              <ProfilePanel
                 bot={bot}
                 agentDisplayName={selectedAgent?.displayName ?? bot.agentId}
                 open
@@ -472,7 +487,7 @@ function HomeScreen(): JSX.Element {
                 onUpdated={() => invalidate("bots")}
               />
             ) : (
-              <ComputerSheet
+              <ComputerPanel
                 bot={bot}
                 view={
                   computer.data

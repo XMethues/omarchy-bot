@@ -86,7 +86,7 @@ The Agent picker lists every supported Agent. An unavailable Agent remains visib
 
 ### Profile editing
 
-The Bot avatar and name form one Conversation Header button that opens a right-side drawer at every window width. The profile surface identifies the Bot's immutable Agent as read-only context. The user may edit the Bot's name, Instructions, and avatar. Changing execution backend means creating another Bot.
+The Bot avatar and name form one Conversation Header button that opens a right-side Astryx `LayoutPanel` at every window width. The profile surface identifies the Bot's immutable Agent as read-only context. The user may edit the Bot's name, Instructions, and avatar. Changing execution backend means creating another Bot.
 
 ### Archive and delete
 
@@ -196,7 +196,7 @@ The current implementation has one real Omarchy screen shared by all Bots and th
 - Keep one invisible global input arbiter so clicks and typing cannot interleave.
 - Do not show lease holders, TTLs, queue depth, or engineering diagnostics in normal UI.
 - A Computer glyph is always present in the Conversation Header. It is visually quiet while inactive and gains state only while the Bot is using the computer or needs human input.
-- The glyph toggles a docked Computer drawer on desktop and opens an Astryx BottomSheet on narrow viewports, with a live preview and plain-language activity.
+- The glyph toggles a right-side Astryx `LayoutPanel` at every window width, with a live preview and plain-language activity.
 - Selecting the preview's expand icon opens the desktop image in an Astryx Lightbox modal.
 - Show **Take control** only when human input is relevant.
 - While the user controls the screen, show **Return to Bot**; re-observe before resuming automation.

@@ -97,6 +97,7 @@ export function ConversationHeader({
                 size="sm"
                 onClick={onOpenProfile}
                 data-testid="profile-open"
+                style={{ minWidth: 0, maxWidth: "min(220px, 45vw)", overflow: "hidden" }}
               >
                 <HStack gap={2} vAlign="center">
                   <AvatarView
@@ -124,6 +125,7 @@ export function ConversationHeader({
                 isDisabled={bot === undefined}
                 onClick={onOpenHistory}
                 data-testid="thread-history-trigger"
+                style={{ width: "100%", minWidth: 0, maxWidth: "100%", overflow: "hidden" }}
               >
                 <Text type="supporting" color="secondary" maxLines={1}>
                   {thread?.title ?? "New conversation"}

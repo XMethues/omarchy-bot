@@ -8,7 +8,7 @@
 
 - [x] A recognizable Computer glyph is always available in the conversation Header and is visually quiet while inactive.
 - [x] The control reflects only plain-language selected-Bot states such as using computer, waiting, needs you, or user control.
-- [x] The control toggles the docked Astryx drawer on desktop; narrow viewports use an Astryx BottomSheet.
+- [x] The control toggles a right-side Astryx `LayoutPanel` at every window width.
 - [x] The compact preview opens an Astryx Lightbox modal only after the user selects its expand icon.
 - [x] Take control appears only when human input is relevant and parks Bot desktop input before handing over the Shared Screen.
 - [x] Return to Bot re-observes the Shared Screen before resuming the parked work.
@@ -19,4 +19,4 @@
 
 ## Answer
 
-Implemented selected-Bot Computer state, globally serialized input, ownership-free observation, Takeover parking, Return-to-Bot re-observation, a docked desktop drawer, a narrow BottomSheet, modal preview expansion, and emergency control that appears only while input is active or stopped.
+Implemented selected-Bot Computer state, globally serialized input, ownership-free observation, Takeover parking, Return-to-Bot re-observation, a right-side `LayoutPanel` at every window width, modal preview expansion, and emergency control that appears only while input is active or stopped.

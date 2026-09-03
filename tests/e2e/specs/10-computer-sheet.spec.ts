@@ -24,7 +24,7 @@ async function fulfillJson(route: Route, body: unknown): Promise<void> {
   await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
 }
 
-test.describe("contextual computer sheet", () => {
+test.describe("contextual computer drawer", () => {
   test("shows selected-bot state, takeover handoff, preview, and no arbitration jargon", async ({ page }) => {
     let state: ComputerState = "idle";
     let activeBotId: string | undefined;
@@ -149,13 +149,16 @@ test.describe("contextual computer sheet", () => {
     expect(otherBotId).not.toBe(waitingBotId);
   });
 
-  test("uses a bottom sheet on a narrow screen", async ({ page }) => {
+  test("uses a right-side drawer on a narrow screen", async ({ page }) => {
     await page.route("**/api/computer/state**", (route) => fulfillJson(route, { state: "idle", activity: "The computer is ready." }));
     await page.route("**/api/computer/snapshot**", (route) => route.fulfill({ status: 200, contentType: "image/png", body: PNG }));
     await page.goto("/");
     await createBot(page, "Mobile Computer Bot");
     await page.setViewportSize({ width: 390, height: 780 });
     await page.getByRole("button", { name: "Open computer", exact: true }).click();
-    await expect(page.getByRole("dialog", { name: "Computer" })).toBeVisible();
+    const drawer = page.getByRole("complementary", { name: "Computer", exact: true });
+    await expect(drawer).toBeVisible();
+    await expect(page.getByRole("dialog", { name: "Computer" })).toHaveCount(0);
+    await expect.poll(() => drawer.evaluate((element) => element.getBoundingClientRect().right)).toBe(390);
   });
 });

@@ -361,7 +361,7 @@ test.describe("ticket 13 responsive, accessible, and visual QA", () => {
     await expect(profile).toBeHidden();
 
     await page.getByRole("button", { name: "Open computer", exact: true }).click();
-    const computer = page.getByRole("dialog", { name: "Computer" });
+    const computer = page.getByRole("complementary", { name: "Computer" });
     await expectInsideViewport(page, computer);
     await page.keyboard.press("Escape");
     await expect(computer).toBeHidden();
@@ -439,7 +439,7 @@ test.describe("ticket 13 responsive, accessible, and visual QA", () => {
     await expect(page.getByRole("heading", { level: 1, name: "Offline Researcher" })).toBeVisible();
   });
 
-  test("returns focus after profile drawer and computer Sheet dismissal", async ({ page }) => {
+  test("returns focus after profile and computer drawer dismissal", async ({ page }) => {
     await page.setViewportSize(desktopViewport);
     await seedWorkspaceApi(page);
     await gotoSeededWorkspace(page);
@@ -465,9 +465,9 @@ test.describe("ticket 13 responsive, accessible, and visual QA", () => {
     const computerTrigger = page.getByRole("button", { name: "Open computer", exact: true });
     await computerTrigger.focus();
     await computerTrigger.press("Enter");
-    await expect(page.getByRole("dialog", { name: "Computer" })).toBeVisible();
+    await expect(page.getByRole("complementary", { name: "Computer" })).toBeVisible();
     await page.keyboard.press("Escape");
-    await expect(page.getByRole("dialog", { name: "Computer" })).toBeHidden();
+    await expect(page.getByRole("complementary", { name: "Computer" })).toBeHidden();
     await expect(computerTrigger).toBeFocused();
 
     const mobileNavigationTrigger = page.getByRole("button", { name: "Open bot navigation" });

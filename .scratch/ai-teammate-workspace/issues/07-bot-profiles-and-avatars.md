@@ -7,7 +7,7 @@
 **Status:** resolved
 
 - [x] New Bots receive deterministic generated avatars without requiring another creation field.
-- [x] The combined Bot avatar and name in the conversation Header opens a right-side Profile drawer at every window width; it identifies the immutable Agent as read-only context while allowing name and Instructions updates.
+- [x] The combined Bot avatar and name in the conversation Header opens a right-side Astryx `LayoutPanel` at every window width; it identifies the immutable Agent as read-only context while allowing name and Instructions updates.
 - [x] Updated Instructions apply to every future turn for that Bot while existing messages remain unchanged.
 - [x] Users can choose another generated variation or upload a custom image.
 - [x] Uploaded images are decoded, safely re-encoded, and stored locally rather than served from arbitrary remote URLs.
