@@ -18,9 +18,11 @@ function composerInput(page: Page): Locator {
 
 async function archive(page: Page, botName: string): Promise<void> {
   await page.getByRole("navigation", { name: "Bot navigation" })
-    .getByRole("button", { name: `Actions for ${botName}` })
+    .getByRole("button", { name: "Settings", exact: true })
     .click();
-  await page.getByRole("menuitem", { name: /Archive/ }).click();
+  await page.getByRole("dialog", { name: "Settings" })
+    .getByRole("button", { name: `Archive ${botName}` })
+    .click();
 }
 
 test.describe("permanent archived Bot deletion", () => {
@@ -39,7 +41,6 @@ test.describe("permanent archived Bot deletion", () => {
       key: staleDraftKey,
       value: JSON.stringify({ text: "stale draft", cursor: 11, stagedIds: [] }),
     });
-    await page.getByRole("navigation", { name: "Bot navigation" }).getByRole("button", { name: "Settings", exact: true }).click();
     const settings = page.getByRole("dialog", { name: "Settings" });
     const deleteButton = settings.getByRole("button", { name: `Permanently delete ${botName}` });
     await expect(deleteButton).toBeVisible();

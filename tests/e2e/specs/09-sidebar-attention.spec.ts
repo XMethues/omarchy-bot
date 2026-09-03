@@ -55,34 +55,30 @@ async function scrollTranscriptToTop(page: Page): Promise<void> {
 }
 
 test.describe("Sidebar attention", () => {
-  test("pins without changing recency and startup still opens the most recently active Bot", async ({ page }) => {
+  test("orders by recency and startup opens the most recently active Bot", async ({ page }) => {
     await page.goto("/");
-    const pinnedBotName = `Pinned older ${Date.now()}`;
-    const pinnedBotId = await createBot(page, pinnedBotName);
+    const olderBotName = `Older ${Date.now()}`;
+    const olderBotId = await createBot(page, olderBotName);
     await sendAndWait(page, "say: older useful preview");
-    const pinnedThreadId = await currentThreadId(page);
+    const olderThreadId = await currentThreadId(page);
 
     const navigation = page.getByRole("navigation", { name: "Bot navigation" });
-    const pinnedBotActions = navigation.getByRole("button", { name: `Actions for ${pinnedBotName}` });
-    await pinnedBotActions.click();
-    await page.getByRole("menuitem", { name: /^Pin/ }).click();
-    await pinnedBotActions.click();
-    await expect(page.getByRole("menuitem", { name: /^Unpin/ })).toBeVisible();
-    await page.keyboard.press("Escape");
-    await expect(page.getByRole("button", { name: pinnedBotName, exact: true })).toBeVisible();
+    const olderBotRow = navigation.getByTestId(`sidebar-bot-${olderBotId}`);
+    await expect(olderBotRow).not.toHaveAttribute("draggable", "true");
+    await expect(navigation.getByTestId("sidebar-pinned-zone")).toHaveCount(0);
 
-    const recentBotName = `Recent unpinned ${Date.now()}`;
+    const recentBotName = `Recent ${Date.now()}`;
     const recentBotId = await createBot(page, recentBotName);
     await sendAndWait(page, "say: newest useful preview");
-    const orderedBots = page.getByRole("navigation", { name: "Bot navigation" })
-      .getByRole("button", { name: new RegExp(`^(?:${pinnedBotName}|${recentBotName})$`) });
-    await expect(orderedBots.first()).toHaveAccessibleName(pinnedBotName);
+    const orderedBots = navigation
+      .getByRole("button", { name: new RegExp(`^(?:${olderBotName}|${recentBotName})$`) });
+    await expect(orderedBots.first()).toHaveAccessibleName(recentBotName);
 
     await page.goto("/");
     await expect(page).toHaveURL(new RegExp(`(?:\\?|&)bot=${recentBotId}(?:&|$)`));
-    const pinnedThreads = await page.request.get(`/api/bots/${pinnedBotId}/threads`);
-    const threads = await pinnedThreads.json() as Array<{ id: string }>;
-    expect(threads[0]?.id).toBe(pinnedThreadId);
+    const olderThreads = await page.request.get(`/api/bots/${olderBotId}/threads`);
+    const threads = await olderThreads.json() as Array<{ id: string }>;
+    expect(threads[0]?.id).toBe(olderThreadId);
   });
 
   test("keeps unread above the latest output and clears it through the native latest control", async ({ page }) => {

@@ -17,11 +17,14 @@ function composerInput(page: Page): Locator {
   return page.getByRole("textbox", { name: "Message input" });
 }
 
-async function archiveFromSidebar(page: Page, botName: string): Promise<void> {
-  await page.getByRole("navigation", { name: "Bot navigation" })
-    .getByRole("button", { name: `Actions for ${botName}` })
-    .click();
-  await page.getByRole("menuitem", { name: /Archive/ }).click();
+async function archiveFromSettings(page: Page, botName: string): Promise<void> {
+  const settings = page.getByRole("dialog", { name: "Settings" });
+  if (!await settings.isVisible()) {
+    await page.getByRole("navigation", { name: "Bot navigation" })
+      .getByRole("button", { name: "Settings", exact: true })
+      .click();
+  }
+  await settings.getByRole("button", { name: `Archive ${botName}` }).click();
 }
 
 async function sendAndWait(page: Page, text: string): Promise<void> {
@@ -45,13 +48,12 @@ test.describe("archive and restore bots", () => {
     const draftKey = `draft:v1:${archivedBotId}:blank`;
     await expect.poll(() => page.evaluate((key) => sessionStorage.getItem(key), draftKey)).not.toBeNull();
 
-    await archiveFromSidebar(page, "Idle archive bot");
+    await archiveFromSettings(page, "Idle archive bot");
 
     await expect(page.getByRole("button", { name: "Idle archive bot", exact: true })).toHaveCount(0);
     await expect(page).toHaveURL(new RegExp(`(?:\\?|&)bot=${fallbackBotId}(?:&|$)`));
     await expect.poll(() => page.evaluate((key) => sessionStorage.getItem(key), draftKey)).toBeNull();
 
-    await page.getByRole("navigation", { name: "Bot navigation" }).getByRole("button", { name: "Settings", exact: true }).click();
     const settings = page.getByRole("dialog", { name: "Settings" });
     await expect(settings.getByRole("button", { name: "Restore Idle archive bot" })).toBeVisible();
     await settings.getByRole("button", { name: "Restore Idle archive bot" }).click();
@@ -74,7 +76,7 @@ test.describe("archive and restore bots", () => {
     await composerInput(page).press("Enter");
     await expect(page.getByTestId("streaming-message")).toContainText("hanging", { timeout: 15_000 });
 
-    await archiveFromSidebar(page, "Working archive bot");
+    await archiveFromSettings(page, "Working archive bot");
     const confirmation = page.getByRole("alertdialog", { name: "Stop work and archive?" });
     await expect(confirmation).toBeVisible();
     await expect(confirmation).toContainText("current work will be stopped");
@@ -84,13 +86,12 @@ test.describe("archive and restore bots", () => {
     await expect(page.getByRole("button", { name: "Working archive bot", exact: true })).toBeVisible();
     await expect(page.getByTestId("streaming-message")).toContainText("hanging");
 
-    await archiveFromSidebar(page, "Working archive bot");
+    await archiveFromSettings(page, "Working archive bot");
     await page.getByRole("button", { name: "Stop and archive" }).click();
 
     await expect(page.getByRole("button", { name: "Working archive bot", exact: true })).toHaveCount(0);
     await expect(page).toHaveURL(new RegExp(`(?:\\?|&)bot=${fallbackBotId}(?:&|$)`));
 
-    await page.getByRole("navigation", { name: "Bot navigation" }).getByRole("button", { name: "Settings", exact: true }).click();
     await expect(page.getByRole("dialog", { name: "Settings" }).getByRole("button", { name: "Restore Working archive bot" })).toBeVisible();
   });
 });

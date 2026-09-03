@@ -302,13 +302,17 @@ test.describe("ticket 13 responsive, accessible, and visual QA", () => {
     await expect(selectedPreview).toBeVisible();
 
     const selectedAvatar = selectedRow.getByTestId("avatar-view");
+    const selectedRowBox = await selectedRow.boundingBox();
     const selectedAvatarBox = await selectedAvatar.boundingBox();
-    const selectedNameBox = await selectedButton.getByText("Release Partner", { exact: true }).boundingBox();
+    const selectedName = selectedButton.getByText("Release Partner", { exact: true });
+    const selectedNameBox = await selectedName.boundingBox();
     const selectedPreviewBox = await selectedPreview.boundingBox();
-    if (!selectedAvatarBox || !selectedNameBox || !selectedPreviewBox) {
+    if (!selectedRowBox || !selectedAvatarBox || !selectedNameBox || !selectedPreviewBox) {
       throw new Error("Sidebar Bot summary geometry is unavailable");
     }
-    expect(selectedAvatarBox.width).toBeGreaterThanOrEqual(48);
+    expect(selectedRowBox.height).toBe(56);
+    expect(selectedAvatarBox.width).toBe(42);
+    expect(Number(await selectedName.evaluate((element) => getComputedStyle(element).fontWeight))).toBeGreaterThanOrEqual(600);
     expect(selectedPreviewBox.y).toBeGreaterThan(selectedNameBox.y);
 
     const selectedImage = selectedAvatar.getByTestId("avatar-shapes").locator("img");
@@ -322,6 +326,8 @@ test.describe("ticket 13 responsive, accessible, and visual QA", () => {
     const idleSrc = await idleAvatar.getByTestId("avatar-shapes").locator("img").getAttribute("src");
     const idleSvg = decodeURIComponent(idleSrc!.slice(idleSrc!.indexOf(",") + 1));
     expect(idleSvg).not.toContain("@keyframes");
+    await expect(page.getByTestId(`sidebar-bot-${SECONDARY_BOT_ID}`)
+      .getByRole("img", { name: "Unavailable" })).toHaveCount(0);
   });
 
 

@@ -407,16 +407,6 @@ function HomeScreen(): JSX.Element {
         setNotificationPermission(typeof Notification === "undefined" ? "unsupported" : Notification.permission);
         setSettingsOpen(true);
       }}
-      onPinBot={async (botId, pinned) => {
-        await api.pinBot(botId, { pinned });
-        invalidate("bots");
-      }}
-      onArchiveBot={(botId, body) => api.archiveBot(botId, body)}
-      onBotArchived={(botId) => {
-        qc.setQueryData(["bots"], (current: typeof bots.data) => current?.filter((candidate) => candidate.id !== botId));
-        invalidate("bots");
-        if (selectedBotId === botId) void navigate({ search: {}, replace: true });
-      }}
       safetyControl={
         <EmergencyComputerControl
           view={computerSafety.data ?? { state: "unavailable" }}
@@ -521,12 +511,12 @@ function HomeScreen(): JSX.Element {
         open={settingsOpen}
         mobileReturnFocusRef={mobileNavigationTriggerRef}
         onClose={() => setSettingsOpen(false)}
-        archivedBots={allBots.data ?? []}
-        {...(allBots.isPending ? { archivedBotsLoading: true } : {})}
+        bots={allBots.data ?? []}
+        {...(allBots.isPending ? { botsLoading: true } : {})}
         {...(allBots.error !== null
-          ? { archivedBotsError: apiErrorMessage(allBots.error, "Archived bots could not be loaded.") }
+          ? { botsError: apiErrorMessage(allBots.error, "Bots could not be loaded.") }
           : {})}
-        {...(allBots.error !== null ? { onRetryArchivedBots: () => void allBots.refetch() } : {})}
+        {...(allBots.error !== null ? { onRetryBots: () => void allBots.refetch() } : {})}
         agents={agents.data ?? []}
         {...(agents.isPending ? { agentsLoading: true } : {})}
         {...(agents.error !== null
@@ -546,6 +536,12 @@ function HomeScreen(): JSX.Element {
         notificationPermission={notificationPermission}
         onRequestNotifications={() => {
           void requestDesktopNotificationPermission().then(setNotificationPermission);
+        }}
+        onArchiveBot={(botId, body) => api.archiveBot(botId, body)}
+        onBotArchived={(botId) => {
+          qc.setQueryData(["bots"], (current: typeof bots.data) => current?.filter((candidate) => candidate.id !== botId));
+          invalidate("bots");
+          if (selectedBotId === botId) void navigate({ search: {}, replace: true });
         }}
         onRestoreBot={(botId) => api.restoreBot(botId)}
         onBotRestored={() => invalidate("bots")}

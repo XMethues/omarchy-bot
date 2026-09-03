@@ -53,7 +53,7 @@ test.describe("create bot flow", () => {
     await page.getByRole("button", { name: "Create bot" }).click();
 
     await expect(page.getByRole("button", { name: "E2E Bot", exact: true })).toBeVisible();
-    await expect(botNavigation(page).getByRole("button", { name: /^Actions for E2E Bot$/ })).toHaveCount(1);
+    await expect(botNavigation(page).getByRole("button", { name: /^Actions for E2E Bot$/ })).toHaveCount(0);
     await expect(page.getByRole("heading", { level: 1, name: "E2E Bot" })).toBeVisible();
     await expect(page).toHaveURL(/(?:\?|&)bot=bot_[0-9a-f]{32}(?:&|$)/);
     await expect(page).toHaveURL(/(?:\?|&)thread=blank(?:&|$)/);

@@ -58,16 +58,16 @@ The list has no visible section heading: the surrounding navigation already esta
 - a large avatar with the Bot's display name;
 - a one-line excerpt of that Bot's latest Agent output;
 - unread state;
-- working, waiting, action-needed, or error state when relevant.
+- one avatar activity marker when relevant.
 
 Behavior:
 
 - Bots sort by recent activity.
-- Pinned Bots remain above the recent list.
 - Threads are never expanded beneath Bot rows.
 - Opening a Bot and actually reaching its latest message clears unread. Merely selecting it while remaining above the latest message does not.
 - Archived Bots are absent from the normal list.
 - Settings is fixed at the bottom of the Sidebar.
+- Per-Bot lifecycle actions are absent from rows; archiving is managed in Settings.
 
 Desktop notifications are sent when a background Bot completes work or needs user action. They are suppressed while the user is already viewing that Bot in a focused window.
 
