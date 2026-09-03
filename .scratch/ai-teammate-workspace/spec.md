@@ -28,7 +28,7 @@ The product uses Astryx primitives, local managed storage for attachments and av
 6. As an Omarchy user, I want a newly created Bot to open a blank conversation, so that the workspace does not impose generic onboarding content.
 7. As an Omarchy user, I want several Bots to use the same Agent, so that one backend can power teammates with different identities and Jobs.
 8. As an Omarchy user, I want a Bot's Agent reference to remain fixed, so that an existing teammate and its conversation history do not silently change execution backend.
-9. As an Omarchy user, I want the Bot avatar and name to open a right-side Profile panel that identifies its immutable Agent while letting me edit its name, Job, and avatar, so that identity is truthful and can evolve without changing backend.
+9. As an Omarchy user, I want the Bot avatar and name to toggle a right-side Profile panel that identifies its immutable Agent while letting me edit its name, Job, and avatar, so that identity is truthful and can evolve without changing backend.
 10. As an Omarchy user, I want updated Instructions to affect future turns in all of that Bot's Threads, so that the teammate has one current Job.
 11. As an Omarchy user, I want existing messages to remain unchanged after Instructions are edited, so that history stays truthful.
 12. As an Omarchy user, I want to archive a Bot without losing its Threads, so that I can remove inactive teammates from daily navigation.

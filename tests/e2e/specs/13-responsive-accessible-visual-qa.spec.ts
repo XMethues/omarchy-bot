@@ -444,7 +444,7 @@ test.describe("ticket 13 responsive, accessible, and visual QA", () => {
     await seedWorkspaceApi(page);
     await gotoSeededWorkspace(page);
 
-    const profileTrigger = page.getByRole("button", { name: "Open profile for Release Partner" });
+    const profileTrigger = page.getByTestId("profile-open");
     await expect(page.getByRole("button", { name: "Edit bot profile" })).toHaveCount(0);
     await expect(profileTrigger.getByTestId("avatar-view")).toBeVisible();
     await expect(profileTrigger.getByRole("heading", { level: 1, name: "Release Partner" })).toBeVisible();
@@ -453,10 +453,20 @@ test.describe("ticket 13 responsive, accessible, and visual QA", () => {
     expect(identityBox).not.toBeNull();
     expect(sessionBox).not.toBeNull();
     expect(Math.abs(identityBox!.y + identityBox!.height / 2 - (sessionBox!.y + sessionBox!.height / 2))).toBeLessThan(2);
+    await expect(profileTrigger).toHaveAccessibleName("Open profile for Release Partner");
+    await expect(profileTrigger).toHaveAttribute("aria-expanded", "false");
     await profileTrigger.focus();
     await profileTrigger.press("Enter");
     const profileDrawer = page.getByRole("complementary", { name: "Bot profile" });
     await expect(profileDrawer.getByTestId("profile-drawer")).toBeVisible();
+    await expect(profileTrigger).toHaveAccessibleName("Close profile for Release Partner");
+    await expect(profileTrigger).toHaveAttribute("aria-expanded", "true");
+    await profileTrigger.click();
+    await expect(profileDrawer).toBeHidden();
+    await expect(profileTrigger).toHaveAccessibleName("Open profile for Release Partner");
+    await expect(profileTrigger).toHaveAttribute("aria-expanded", "false");
+    await profileTrigger.press("Enter");
+    await expect(profileDrawer).toBeVisible();
     await page.keyboard.press("Escape");
     await expect(profileDrawer).toBeHidden();
     await expect(profileTrigger).toBeFocused();

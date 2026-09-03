@@ -27,8 +27,9 @@ export interface ConversationHeaderProps {
   thread?: ThreadDto;
   computerState: ComputerViewDto["state"];
   computerOpen: boolean;
+  profileOpen: boolean;
   onOpenHistory: () => void;
-  onOpenProfile: () => void;
+  onToggleProfile: () => void;
   onToggleComputer: () => void;
   mobileNavigationTriggerRef: RefObject<HTMLButtonElement | null>;
   computerTriggerRef: RefObject<HTMLButtonElement | null>;
@@ -70,8 +71,9 @@ export function ConversationHeader({
   thread,
   computerState,
   computerOpen,
+  profileOpen,
   onOpenHistory,
-  onOpenProfile,
+  onToggleProfile,
   onToggleComputer,
   mobileNavigationTriggerRef,
   computerTriggerRef,
@@ -81,8 +83,6 @@ export function ConversationHeader({
     <LayoutHeader hasDivider label="Conversation">
       <HStack
         gap={3}
-        paddingInline={6}
-        paddingBlock={3}
         vAlign="center"
         data-testid="conversation-header"
       >
@@ -92,12 +92,13 @@ export function ConversationHeader({
             {bot !== undefined ? (
               <Button
                 ref={profileTriggerRef}
-                label={`Open profile for ${bot.name}`}
+                label={`${profileOpen ? "Close" : "Open"} profile for ${bot.name}`}
                 variant="ghost"
                 size="sm"
-                onClick={onOpenProfile}
+                onClick={onToggleProfile}
                 data-testid="profile-open"
                 style={{ minWidth: 0, maxWidth: "min(220px, 45vw)", overflow: "hidden" }}
+                aria-expanded={profileOpen}
               >
                 <HStack gap={2} vAlign="center">
                   <AvatarView
@@ -125,7 +126,7 @@ export function ConversationHeader({
                 isDisabled={bot === undefined}
                 onClick={onOpenHistory}
                 data-testid="thread-history-trigger"
-                style={{ width: "100%", minWidth: 0, maxWidth: "100%", overflow: "hidden" }}
+                style={{ minWidth: 0, maxWidth: "100%", overflow: "hidden" }}
               >
                 <Text type="supporting" color="secondary" maxLines={1}>
                   {thread?.title ?? "New conversation"}

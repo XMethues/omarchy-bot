@@ -455,9 +455,11 @@ function HomeScreen(): JSX.Element {
             {...(bot !== undefined ? { bot } : {})}
             {...(thread !== undefined ? { thread } : {})}
             onOpenHistory={() => setHistoryOpen(true)}
-            onOpenProfile={() => {
-              setComputerOpen(false);
-              setProfileOpen(true);
+            profileOpen={profileOpen}
+            onToggleProfile={() => {
+              const nextOpen = !profileOpen;
+              setProfileOpen(nextOpen);
+              if (nextOpen) setComputerOpen(false);
             }}
             computerState={computer.data?.state ?? "unavailable"}
             computerOpen={computerOpen}
