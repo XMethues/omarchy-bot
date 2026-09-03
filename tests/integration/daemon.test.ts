@@ -63,6 +63,24 @@ describe("integration: agents API", () => {
     expect(unavailable.length).toBeGreaterThan(0);
     for (const a of unavailable) expect(typeof a.guidance).toBe("string");
   });
+
+  test("keeps its worker environment when process configuration changes", async () => {
+    const foreignHome = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-foreign-home-"));
+    const priorHome = process.env.OMARCHY_BOT_HOME;
+    let imageCapability: boolean | undefined;
+    try {
+      process.env.OMARCHY_BOT_HOME = foreignHome;
+      await h.svc.supervisor.stopAgentWorker("pi");
+      imageCapability = (await h.svc.agents.recheck("pi")).capabilities?.attachments.image;
+    } finally {
+      if (priorHome === undefined) delete process.env.OMARCHY_BOT_HOME;
+      else process.env.OMARCHY_BOT_HOME = priorHome;
+      await h.svc.supervisor.stopAgentWorker("pi");
+      await h.svc.agents.recheck("pi");
+      rmSync(foreignHome, { recursive: true, force: true });
+    }
+    expect(imageCapability).toBeTrue();
+  }, 15_000);
 });
 
 describe("integration: bots API", () => {

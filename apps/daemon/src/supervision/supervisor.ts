@@ -53,11 +53,14 @@ export class Supervisor {
   #agentWorkers = new Map<AgentId, WorkerClient>();
   #computerWorkers = new Map<SurfaceId, ComputerWorkerEntry>();
   #restartTimers = new Map<AgentId, ReturnType<typeof setTimeout>>();
+  readonly #agentEnvironment: Record<string, string>;
 
   constructor(
     private readonly hooks: SupervisorHooks,
     private readonly workerDirs: { agents: string; computer: string },
-  ) {}
+  ) {
+    this.#agentEnvironment = sanitizedEnv();
+  }
 
   get agentsDir(): string {
     return this.workerDirs.agents;
@@ -70,7 +73,7 @@ export class Supervisor {
     w = new WorkerClient({
       name: `agent:${agentId}`,
       script: path.join(this.workerDirs.agents, agentId, "src", "worker.ts"),
-      env: sanitizedEnv(),
+      env: this.#agentEnvironment,
       onEvent: (e) => this.hooks.onAgentEvent(agentId, e),
       onRequest: (request, signal) =>
         this.hooks.onAgentComputerRequest(agentId, request, signal),

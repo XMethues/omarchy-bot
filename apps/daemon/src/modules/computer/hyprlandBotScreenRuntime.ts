@@ -434,6 +434,7 @@ export class HyprlandBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter 
         action: ComputerAction,
         inputAuthority?: ComputerInputAuthority,
       ): Promise<BotScreenActionResult> => {
+        if (action.name === "screenshot") return { image: await capture() };
         const result = await startedComputerWorker.act(action, inputAuthority);
         const workerImage = result.image === undefined
           ? undefined
