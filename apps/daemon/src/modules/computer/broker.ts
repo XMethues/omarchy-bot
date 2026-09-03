@@ -96,7 +96,7 @@ export class ComputerBroker {
   async acquire(actor: { botId: string }, turnId: string | undefined, ttlMs = this.cfg.leaseTtlMs): Promise<{ granted: boolean; token?: string; queued: boolean }> {
     if (this.#emergencyStopped) return { granted: false, queued: false };
     const l = this.#lease();
-    const expired = l !== undefined && new Date(l.expires_at).getTime() <= Date.now();
+    const expired = l !== undefined && l.holder_is_human === 0 && new Date(l.expires_at).getTime() <= Date.now();
     if (l === undefined || expired) {
       const token = randomUUID();
       const now = new Date();

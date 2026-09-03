@@ -18,7 +18,7 @@ import {
   type ComputerProbePayload,
   type ComputerResult,
 } from "@omarchy-bot/agent-contract";
-import { isInputAction } from "@omarchy-bot/domain";
+import { assertInputLease } from "./inputLease.ts";
 import { McpClient, type McpCallResult } from "./mcp.ts";
 
 const AGENT_ID = "computer";
@@ -92,6 +92,7 @@ async function runNative(command: string[]): Promise<string> {
 
 async function performAction(action: { name: string; args: Record<string, unknown> }, leaseToken?: string): Promise<ComputerActPayload> {
   const { name, args } = action;
+  assertInputLease(name, leaseToken);
 
   // Native extras handled without MCP (ADR-0001).
   if (name === "open_app") {
@@ -115,10 +116,6 @@ async function performAction(action: { name: string; args: Record<string, unknow
     const body = String(args.body ?? "");
     await runNative(["notify-send", title, body]);
     return { done: true, text: `notified: ${title}` };
-  }
-
-  if (isInputAction(name as never) && !leaseToken) {
-    throw new Error("input action refused: no lease token provided");
   }
 
   const mcp = await getClient();

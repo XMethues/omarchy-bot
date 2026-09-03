@@ -127,6 +127,15 @@ describe("contextual computer control", () => {
     expect(stateChanges.some((event) => event.cursor < resumed!.cursor)).toBeTrue();
   });
 
+  test("human takeover cannot expire into Bot input authority", async () => {
+    const botId = await makeBot(h, "Patient");
+    expect((await h.svc.computer.takeOver()).ok).toBeTrue();
+    h.svc.db.query(`UPDATE computer_leases SET expires_at = ? WHERE id = 1`).run("2000-01-01T00:00:00.000Z");
+
+    expect((await h.svc.computer.acquire({ botId }, undefined)).granted).toBeFalse();
+    expect(h.svc.computer.state().lease?.holder).toBe("human");
+  });
+
   test("input leases serialize bots while observation remains ownership-free", async () => {
     const firstBotId = await makeBot(h, "First");
     const secondBotId = await makeBot(h, "Second");
