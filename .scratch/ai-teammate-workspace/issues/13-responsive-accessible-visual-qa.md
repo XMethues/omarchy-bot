@@ -6,21 +6,19 @@
 
 **Status:** resolved
 
-- [x] Feature UI uses Astryx primitives discovered through the CLI and does not recreate available layout, navigation, Sheet, Composer, message, avatar, or focus behavior.
+- [x] Feature UI uses Astryx primitives discovered through the CLI and does not recreate available layout, navigation, Dialog, BottomSheet, Composer, message, avatar, or focus behavior.
 - [x] The visual system uses cool neutrals, one lively blue accent, consistent soft radii, restrained borders, and low card density in both light and dark mode.
 - [x] Theme follows Omarchy/system preference and maintains WCAG AA contrast.
 - [x] Desktop uses Sidebar plus conversation layout with no global TopNav; narrow windows use an accessible Sidebar drawer.
-- [x] Every interactive control is keyboard reachable, visibly focused, semantically labelled, and returns focus appropriately after Sheets and Dialogs close.
-- [x] Transcript streaming, history, drafts, attachment previews, dictation, profile editing, archived Bots, and Computer control remain usable at target breakpoints.
+- [x] Every interactive control is keyboard reachable, visibly focused, semantically labelled, and returns focus appropriately after Dialogs and BottomSheets close; meaningful Bot avatars are labelled from the Bot name.
+- [x] Transcript streaming, History Dialog/BottomSheet, drafts, attachment previews, dictation, Profile, archived Bots, and Computer drawer/BottomSheet remain usable at target breakpoints.
 - [x] Reduced-motion mode disables internal avatar movement and nonessential transitions while preserving static state meaning.
-- [x] Loading, empty, error, offline, unavailable Agent, failed upload, failed dictation, and Computer-unavailable states are contextual and complete.
-- [x] Automated axe tests, keyboard scenarios, light/dark visual regression, reduced-motion captures, typecheck, build, and all behavioral suites pass.
-- [x] Final taste review finds no neon/glass/AI-purple styling, card-wall dashboard density, permanent ambient motion, raw engineering language, or duplicate legacy navigation.
+- [x] Loading, empty, error, offline, unavailable Agent, failed upload, failed dictation, and Computer-unavailable states are contextual and include plain-language guidance where action is possible.
+- [x] Browser E2E follows a role-first policy: accessible roles and visible names are the default seam, test ids are reserved for surfaces without semantic selectors, and CSS/component internals are not test contracts.
+- [x] Final design contains no neon/glass/AI-purple styling, card-wall dashboard density, permanent ambient motion, raw engineering language, permanent idle emergency control, or duplicate legacy navigation.
 
 ## Answer
 
-Completed the Astryx workspace as a responsive Sidebar and conversation surface: the Sidebar contains only intentionally created or data-bearing migrated Bots, existing blank Threads have no hero placeholder, conventional navigation and toolbar actions are icon-only with accessible labels, and selected/working/streaming avatars use DiceBear v10’s reduced-motion-safe SVG-internal animation.
+Completed the Astryx workspace as a responsive Sidebar and conversation surface. Create and History use desktop Dialogs and narrow BottomSheets; Computer uses a desktop drawer and narrow BottomSheet with a modal expanded preview. The Profile identifies the immutable Agent, Settings → Appearance reports system-following theme state, unavailable integrations include guidance, and meaningful Bot avatars expose labels derived from the Bot name.
 
-Computer observation now uses a docked desktop drawer or narrow-window Bottom Sheet. The compact preview expands into an Astryx Lightbox modal, Escape closes one layer at a time, and closing the drawer restores focus to its header trigger.
-
-`tests/e2e/specs/13-responsive-accessible-visual-qa.spec.ts` covers axe, keyboard and focus behavior, light/dark desktop, narrow navigation, reduced motion, long and failed transcripts, generated avatar motion, Computer-unavailable state, the desktop drawer, and the expanded preview modal. Final verification passed TypeScript checking, production build, all 83 Bun tests including real Pi conformance, and all 44 Playwright scenarios.
+Generated avatars use the renderer recorded in each lossless recipe. New recipes use `dicebear-core@10.7.0+styles@10.6.0` with native reduced-motion-safe `animationVariant`; legacy `9.4.3` recipes retain deterministic legacy rendering until the user explicitly regenerates them. Emergency control is absent while idle and immediately accessible while computer input is active or stopped.

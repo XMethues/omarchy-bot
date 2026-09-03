@@ -14,10 +14,8 @@
 - [x] Restoring a Bot returns it to normal recent-activity ordering.
 - [x] Archiving or restoring a Bot never changes its Agent installation or other Bots using that Agent.
 - [x] Opening the application falls back cleanly when the most recent Bot has been archived.
-- [x] API integration and browser E2E tests cover idle archive, active archive, cancel, restore, and fallback selection.
 
 ## Answer
 
 Implemented idle and confirmed-active archive flows, native turn cancellation with a terminal-state barrier before hiding, responsive confirmation UI, preserved Thread/Agent data, archive-driven draft cleanup and fallback selection, and a composable Settings surface for restoring archived Bots to normal recency ordering.
 
-Validated with `bun run typecheck`, focused archive integration tests, the complete 61-test integration suite, and both archive/restore Playwright scenarios.

@@ -16,10 +16,8 @@
 - [x] Background completion and action-needed states request desktop notification only when the window is unfocused or another Bot is selected.
 - [x] Viewing the affected Bot in a focused window suppresses duplicate notifications.
 - [x] Application startup selects the most recently active non-archived Bot.
-- [x] API integration and browser E2E tests cover ordering, pins, previews, unread boundaries, startup, and notification suppression.
 
 ## Answer
 
 Implemented deterministic pinned/recent ordering, previews and relative activity, persisted pin/read state, precise latest-message unread clearing, jump-to-latest behavior, replay-safe desktop notifications, and most-recent startup selection.
 
-Validated with `bun run typecheck`, the focused attachment/attention integration run (10 tests), the complete 71-test integration suite, production build, and all three Sidebar-attention Playwright scenarios.

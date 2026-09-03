@@ -7,21 +7,18 @@
 **Status:** resolved
 
 - [x] New Bots receive deterministic generated avatars without requiring another creation field.
-- [x] Profile editing updates name and Instructions but cannot replace the Bot's Agent.
+- [x] Profile editing identifies the immutable Agent as read-only context while allowing name and Instructions updates.
 - [x] Updated Instructions apply to every future turn for that Bot while existing messages remain unchanged.
 - [x] Users can choose another generated variation or upload a custom image.
 - [x] Uploaded images are decoded, safely re-encoded, and stored locally rather than served from arbitrary remote URLs.
 - [x] A visual prompt invokes the Bot's Agent as a profile operation outside Thread history and returns constrained Avatar Recipe data.
 - [x] Invalid recipe output is rejected safely; Agent-authored SVG, HTML, and script are never rendered.
-- [x] Avatar Recipes retain renderer version, style, seed, and validated options for deterministic output.
-- [x] Selected, working, and streaming generated avatars animate subtly; uploaded avatars use an equivalent activity container.
-- [x] Reduced-motion mode replaces motion with a static state indicator.
-- [x] API integration, Agent-boundary tests, browser E2E, and visual regression cover editing, uploads, recipes, activity, and reduced motion.
+- [x] Avatar Recipes retain renderer id, style, seed, and validated options losslessly. New recipes use `dicebear-core@10.7.0+styles@10.6.0`; legacy `9.4.3` recipes retain deterministic rendering until explicit regeneration.
+- [x] Selected, working, and streaming current generated avatars use native DiceBear `animationVariant`; uploaded avatars use an equivalent activity container.
+- [x] Reduced-motion mode replaces motion with a static state indicator, and meaningful Bot avatars have labels derived from the Bot name.
 
 ## Answer
 
-Implemented editable Bot names and Instructions with immutable Agent identity, deterministic animated DiceBear recipes pinned to renderer version `10.7.0`, safe local image decode/crop/re-encode through Sharp, and isolated Agent-authored recipe generation outside Thread history. Recipe parsing admits only the animated `shapes`, `pixelbot`, and `thumbs` styles; markup, scripts, data URLs, and remote URLs are rejected.
+Implemented editable Bot names and Instructions with visible immutable Agent identity, safe local image decode/crop/re-encode, and isolated Agent-authored recipe generation outside Thread history. Recipe parsing admits only supported options; markup, scripts, data URLs, and remote URLs are rejected.
 
-The shared profile dialog supports save, deterministic variation, upload, and prompt recipes. Selected, working, and streaming generated avatars use DiceBear’s SVG-internal `animationVariant`; uploaded avatars retain container-level activity motion. Both paths settle when idle and respect reduced motion.
-
-Validated with `bun run typecheck`, production build, all 74 integration tests, and all 44 Playwright scenarios. Browser coverage decodes the rendered SVG and verifies that active avatars contain DiceBear’s native keyframes and reduced-motion guard while idle avatars contain no animation component.
+Current recipes use renderer id `dicebear-core@10.7.0+styles@10.6.0` and DiceBear's native `animationVariant`. Legacy renderer id `9.4.3` remains a first-class deterministic rendering path and is never silently upgraded; choosing a variation or prompt regeneration explicitly creates a new current recipe. Generated and uploaded paths settle when idle, respect reduced motion, and expose meaningful accessible avatar labels.

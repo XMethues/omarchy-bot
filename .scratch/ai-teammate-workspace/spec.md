@@ -1,34 +1,34 @@
 # AI teammate workspace
 
-Status: ready-for-agent
+Status: completed
 
 ## Problem Statement
 
-Omarchy Bot currently presents supported coding Agents as a fixed engineering dashboard: Agent identity and Bot identity are conflated, every Agent-backed record appears as a visible Bot, creation is represented by an unrelated multi-step Wizard draft, permissions and capabilities are filtered through an extra product policy, desktop coordination is exposed as lease mechanics, and the chat Composer supports only a narrow text flow.
+The redesign began with Omarchy Bot presenting supported coding Agents as a fixed engineering dashboard: Agent identity and Bot identity were conflated, every Agent-backed record appeared as a visible Bot, creation used an unrelated multi-step Wizard draft, permissions and capabilities were filtered through an extra product policy, desktop coordination exposed lease mechanics, and the chat Composer supported only a narrow text flow.
 
-A user cannot create several distinct teammates backed by the same Agent, give each teammate a durable identity and Job, manage conversation history naturally, attach local material, dictate with Omarchy's native voice tooling, steer active work, or understand background activity without reading implementation diagnostics. The current interface therefore feels like an operations console rather than a polished AI teammate workspace.
+That model prevented users from creating several distinct teammates backed by the same Agent, giving each teammate a durable identity and Job, managing conversation history naturally, attaching local material, dictating with Omarchy's native voice tooling, steering active work, or understanding background activity without implementation diagnostics.
 
-The old model and its documentation must be replaced rather than retained as a compatibility product. Existing user data must nevertheless migrate without losing conversations.
+The redesign replaces that model rather than retaining it as a compatibility product. Migration preserves user-owned conversation, profile, and configuration data; enabled Agent inventory is never converted into a Bot, and ambiguous legacy rows are preserved.
 
 ## Solution
 
-Replace the dashboard with a local-first conversation workspace built around user-created Bots. A Bot has its own Profile and immutable Agent reference; multiple Bots may use the same Agent. The application presents a Grok-like information architecture without copying Grok's visual styling: a Bot Sidebar, conversation Header, transcript, rich Composer, contextual history Sheet, and contextual Computer Sheet, with no global TopNav.
+The completed product is a local-first conversation workspace built around user-created Bots. A Bot has its own Profile and immutable Agent reference; multiple Bots may use the same Agent. The information architecture uses a Bot Sidebar, conversation Header, transcript, rich Composer, responsive Create and History surfaces, and a contextual Computer surface, with no global TopNav.
 
-Separate Agent discovery/readiness from Bot lifecycle. Preserve each Agent's native capabilities and approval behavior through a versioned Agent Capability Inventory instead of an omarchy-bot permission layer. Keep Shared Screen arbitration internal while exposing plain-language activity and Takeover only when relevant.
+Agent discovery/readiness is separate from Bot lifecycle. Each Agent adapter returns one compact `AgentCapabilityInventory` from its probe; it is the sole support-policy source while native capabilities and approval behavior remain the Agent's own. Shared Screen arbitration stays internal while plain-language activity and Takeover appear only when relevant.
 
-Use Astryx primitives for the product surface, local managed storage for attachments and avatars, Voxtype for speech-to-text, native steering for messages sent during active work, restrained animated avatars for state, and system-following light/dark themes. Migrate existing Agent-shaped records into the new model, then remove the obsolete Role, permission-policy, Wizard, capability-manifest, and dashboard paths rather than maintaining two models.
+The product uses Astryx primitives, local managed storage for attachments and avatars, Voxtype for speech-to-text, native steering for messages sent during active work, restrained animated avatars for state, and system-following light/dark themes. Migration retains only user-owned legacy Bot data, preserves ambiguous rows, removes only proven Agent-inventory rows, and then removes obsolete Role, permission-policy, Wizard, capability-manifest, and dashboard paths rather than maintaining two models.
 
 ## User Stories
 
 1. As an Omarchy user, I want to create a Bot with a name, Job, and Agent, so that I can define a teammate for a specific kind of work.
-2. As an Omarchy user, I want Bot creation to use one simple Sheet, so that setup feels immediate rather than like deployment configuration.
+2. As an Omarchy user, I want Bot creation to use a Dialog on desktop and a BottomSheet on narrow viewports, so that setup remains immediate and usable.
 3. As an Omarchy user, I want to see every supported Agent in the picker, so that I understand the available backend choices.
 4. As an Omarchy user, I want unavailable Agents to remain visible but disabled with setup guidance, so that absence is understandable rather than silent.
 5. As an Omarchy user, I want a new Bot to open automatically after creation, so that I can start talking to it immediately.
 6. As an Omarchy user, I want a newly created Bot to open a blank conversation, so that the workspace does not impose generic onboarding content.
 7. As an Omarchy user, I want several Bots to use the same Agent, so that one backend can power teammates with different identities and Jobs.
 8. As an Omarchy user, I want a Bot's Agent reference to remain fixed, so that an existing teammate and its conversation history do not silently change execution backend.
-9. As an Omarchy user, I want to edit a Bot's name, Job, and avatar, so that its Profile can evolve.
+9. As an Omarchy user, I want a Bot Profile to identify its immutable Agent while letting me edit its name, Job, and avatar, so that identity is truthful and can evolve without changing backend.
 10. As an Omarchy user, I want updated Instructions to affect future turns in all of that Bot's Threads, so that the teammate has one current Job.
 11. As an Omarchy user, I want existing messages to remain unchanged after Instructions are edited, so that history stays truthful.
 12. As an Omarchy user, I want to archive a Bot without losing its Threads, so that I can remove inactive teammates from daily navigation.
@@ -36,8 +36,8 @@ Use Astryx primitives for the product surface, local managed storage for attachm
 14. As an Omarchy user, I want to restore an archived Bot, so that archiving is reversible.
 15. As an Omarchy user, I want permanent deletion to live behind the archived-Bot surface and explicit confirmation, so that destructive cleanup is deliberate.
 16. As an Omarchy user, I want deleting a Bot to leave the referenced Agent installation untouched, so that other Bots remain usable.
-17. As an existing user, I want current Agent-backed conversations migrated into user-created Bots, so that redesigning the model does not erase my history.
-18. As an Omarchy user, I want the Sidebar to contain only Bots I intentionally created, so that it represents my team rather than an Agent inventory.
+17. As an existing user, I want legacy rows with user-owned conversation, profile, or configuration data preserved as Bots while Agent inventory remains only Agents, so that redesigning the model neither erases my work nor invents teammates.
+18. As an Omarchy user, I want the Sidebar to contain only user-created or conservatively preserved Bots, so that it represents my team rather than an Agent inventory.
 19. As an Omarchy user, I want each Bot row to show avatar, name, recent preview, time, unread state, and relevant activity, so that I can scan my team quickly.
 20. As an Omarchy user, I want Bots ordered by recent activity, so that current work stays easy to reach.
 21. As an Omarchy user, I want to pin important Bots above recency ordering, so that stable teammates remain accessible.
@@ -47,7 +47,7 @@ Use Astryx primitives for the product surface, local managed storage for attachm
 25. As an Omarchy user, I want a desktop notification when a background Bot completes or needs me, so that parallel work does not require polling.
 26. As an Omarchy user, I do not want notifications while already viewing that Bot in a focused window, so that the application does not duplicate visible feedback.
 27. As an Omarchy user, I want to open Thread history from the conversation title, so that history remains contextual to one Bot.
-28. As an Omarchy user, I want the history Sheet to offer New conversation, recent Threads, and search, so that I can navigate without expanding the Sidebar.
+28. As an Omarchy user, I want the History Dialog or BottomSheet to offer New conversation, recent Threads, and search, so that I can navigate without expanding the Sidebar.
 29. As an Omarchy user, I want abandoned blank conversations omitted from history, so that New conversation does not create clutter.
 30. As an Omarchy user, I want the first user message to produce a concise local Thread title, so that history is identifiable without an extra model call.
 31. As an Omarchy user, I want native Thread actions to appear only when the active Agent actually supports them, so that the interface does not pretend to rename, delete, fork, or compact native sessions.
@@ -89,24 +89,24 @@ Use Astryx primitives for the product surface, local managed storage for attachm
 67. As an Omarchy user, I want every new Bot to receive a deterministic generated avatar, so that it has an identity without extra setup.
 68. As an Omarchy user, I want to upload a custom avatar, so that a Bot can use my preferred image.
 69. As an Omarchy user, I want to describe an avatar in natural language, so that the Bot's Agent can produce a matching DiceBear Avatar Recipe.
-70. As a security-conscious user, I want Agent-produced avatar data validated rather than rendering Agent-authored SVG, so that profile customization cannot inject executable content.
+70. As a security-conscious user, I want Agent-produced avatar data validated and each renderer version preserved rather than rendering Agent-authored SVG or silently upgrading a recipe, so that profile customization stays safe and deterministic.
 71. As an Omarchy user, I want selected and working generated avatars to animate subtly, so that active teammates feel alive.
 72. As an Omarchy user with an uploaded avatar, I want the same activity communicated through a restrained container treatment, so that custom images retain state parity.
 73. As an Omarchy user, I want the assistant avatar to animate while output streams and settle afterward, so that motion communicates real state.
 74. As a motion-sensitive user, I want reduced-motion mode to replace animation with static indicators, so that the workspace remains comfortable.
 75. As an Omarchy user, I want a Computer icon consistently available in the conversation Header, so that the selected Bot's screen context is discoverable.
 76. As an Omarchy user, I want the Computer icon quiet while inactive and stateful only when relevant, so that it does not create permanent operational noise.
-77. As an Omarchy user, I want the Computer icon to open a docked desktop drawer or narrow-window Bottom Sheet with a preview that expands into a modal Lightbox, so that I can observe desktop work without lease terminology and enlarge it only when needed.
+77. As an Omarchy user, I want the Computer icon to open a docked desktop drawer or narrow-window BottomSheet with a preview that expands into a modal Lightbox, so that I can observe desktop work without lease terminology and enlarge it only when needed.
 78. As an Omarchy user, I want Take control shown only when human input is relevant, so that takeover is contextual.
 79. As an Omarchy user, I want Return to Bot while I control the Shared Screen, so that the handoff has a clear end.
 80. As an Omarchy user, I want the computer re-observed before the Bot resumes, so that automation continues from current desktop state.
 81. As an Omarchy user, I want a waiting Bot to say Waiting for computer without exposing queue mechanics, so that contention is understandable but quiet.
 82. As an Omarchy user, I want desktop input globally serialized on the current Shared Screen, so that Bots and the user cannot interleave clicks and typing.
-83. As an Omarchy user, I want emergency stop retained as a global fail-safe outside normal conversation controls, so that I can halt unsafe desktop input.
+83. As an Omarchy user, I want emergency control immediately available while computer input is active or stopped, but absent as permanent idle Sidebar chrome, so that the fail-safe is reachable without persistent operational noise.
 84. As an Omarchy user, I want Agent-native approvals preserved, so that Omarchy Bot neither weakens nor duplicates my Agent's behavior.
-85. As an Omarchy user, I want a tested Agent Capability Inventory to drive contextual native actions, so that the UI reflects the installed Agent version truthfully.
-86. As an Omarchy user, I want light and dark themes to follow Omarchy or system preference, so that the workspace fits my desktop.
-87. As a keyboard user, I want complete navigation, visible focus, and semantic controls, so that the workspace is operable without a pointer.
+85. As an Omarchy user, I want the probed Agent Capability Inventory to drive steering, abort, deletion, Thread actions, attachment modalities, and native events, so that every layer reflects installed Agent support truthfully.
+86. As an Omarchy user, I want Settings → Appearance to show that light and dark themes follow Omarchy or system preference, so that the workspace's theme source is clear.
+87. As a keyboard or screen-reader user, I want complete navigation, visible focus, semantic controls, and meaningful Bot avatar labels, so that the workspace is operable and understandable without a pointer or image recognition.
 88. As a mobile-width user, I want the Sidebar to become a drawer while preserving conversation controls, so that the workspace remains usable in a narrow window.
 89. As an Omarchy user, I want cool neutral surfaces, one lively blue accent, low card density, and restrained motion, so that the product feels future-facing without generic AI styling.
 90. As an Omarchy user, I want the interface in English, so that terminology remains consistent with the product specification.
@@ -116,9 +116,9 @@ Use Astryx primitives for the product surface, local managed storage for attachm
 - Replace the fixed Agent-shaped Bot registry with two aggregates: an Agent registry for installation/readiness/version/inventory and user-created Bot records for identity, Instructions, avatar, archive state, and immutable Agent reference.
 - Give Bots independent identifiers that never alias Agent identifiers. Multiple Bot records may reference one Agent.
 - Remove the old Role abstraction from the direct conversation product model. A Thread belongs directly to one Bot, and its native session mapping is resolved through that Bot's Agent.
-- Migrate existing Agent-shaped Bot records and their Threads into the new schema before removing obsolete tables and fields. Preserve message order, timestamps, native session mappings, and attachment/artifact references. Do not retain a parallel legacy read path after migration.
+- Migrate only legacy rows with user-owned conversations, profile changes, or configuration into the Bot model. Record internal provenance as `user_created`, `legacy_conversation`, or `legacy_inventory`; delete only rows proven to be `legacy_inventory`, preserve ambiguous rows, and repair databases where the earlier broad migration is already marked applied. Preserve message order, timestamps, native session mappings, attachments/artifacts, and Avatar Recipes without a legacy dual-read path.
 - Remove per-Bot permission policy, the omarchy-bot Agent permission gate, permission endpoints, permission UI, and capability-manifest drafts. Native Agent approvals and controls remain inside each adapter's official lifecycle.
-- Maintain a versioned Agent Capability Inventory containing exercised native operations and event types. Inventory metadata describes support and evidence; it never grants or denies tool use.
+- Return a compact adapter-owned `AgentCapabilityInventory` from the probe protocol. It is the sole support-policy source for steering, abort, session deletion, Thread actions, supported attachment modalities, and native event families; it describes support and evidence but never grants tool use.
 - Keep Agent workers isolated and started by Agent identity rather than Bot identity. Independent native sessions preserve separation when several Bots share one Agent worker.
 - Extend the worker protocol with native steering and typed native commands while preserving unknown native envelopes with sensitivity metadata.
 - Use native steering for a message sent to a working Thread. Use native abort only for explicit cancellation behavior such as confirmed archiving of an active Bot.
@@ -128,20 +128,20 @@ Use Astryx primitives for the product surface, local managed storage for attachm
 - Make Thread creation lazy until first send. Selecting New conversation creates window-local draft state first, then persists a Thread atomically with its initial message.
 - List Threads by Bot and recent activity. Derive the first title locally from normalized first-message text and permit contextual native actions according to inventory.
 - Store Composer Drafts per Thread and application-window identifier in window session storage. Text and staged attachment references restore in the same window and do not synchronize across windows.
-- Introduce an attachment service with staged and sent lifecycle states, managed local snapshots, media metadata, bounded upload handling, message association, history access, and deletion cleanup.
-- Pass attachments to the active Agent only in forms claimed by its capability inventory and supported by its adapter. Do not silently transform an unsupported native operation into a different Agent feature.
+- Use an attachment service with staged and sent lifecycle states, managed local snapshots, media metadata, bounded upload handling, message association, history access, and deletion cleanup.
+- Before sending, the attachment service enforces the selected Bot's probed `AgentCapabilityInventory`. Unsupported modalities are rejected contextually and are neither transformed nor forwarded; Pi image input remains unsupported while provider conformance reports it unsupported.
 - Introduce a daemon-owned dictation service that probes Voxtype, serializes one recording, allocates runtime transcript files, parses documented JSON outcomes, cleans up runtime artifacts, and emits non-sensitive recording state.
 - Start app-owned dictation with file output and explicit no-auto-submit/no-smart-auto-submit overrides. The application inserts returned text into the owning draft and optionally executes its own Thread-scoped send command based on the user setting.
 - Preserve external Omarchy Voxtype shortcuts and user configuration. Do not implement browser speech recognition or raw-audio upload.
 - Store the Voice auto-send preference in application settings, defaulting off.
-- Store uploaded avatars locally after safe image decoding/re-encoding. Store generated avatars as versioned, validated DiceBear v10 Avatar Recipes using animated styles only.
-- Use the Bot's selected Agent for prompt-to-recipe generation as a profile operation outside Thread history. Render only application-generated DiceBear output.
-- Animate generated SVG internals with DiceBear's native `animationVariant`, or an uploaded-avatar activity container, only for selected, working, or streaming states. Gate movement behind reduced-motion preference.
-- Keep the Computer Broker as the exclusive Shared Screen input coordinator, but replace public lease/TTL/queue diagnostics with a docked desktop drawer, narrow-window Bottom Sheet, and modal expanded preview for the selected Bot.
-- Keep Takeover, Return to Bot, waiting state, re-observation, and emergency stop semantics. Remove the separate omarchy-bot approval check for desktop actions; coordination remains distinct from Agent permissions.
+- Store uploaded avatars locally after safe image decoding/re-encoding. Generated Avatar Recipes store renderer id, style, seed, and validated options losslessly. New recipes use exactly `dicebear-core@10.7.0+styles@10.6.0`; recipes with legacy renderer id `9.4.3` retain deterministic legacy rendering until an explicit user-requested variation or prompt regeneration creates a new current recipe.
+- Use the Bot's selected Agent for prompt-to-recipe generation as a profile operation outside Thread history. The Profile shows that immutable Agent identity as read-only context and renders only application-generated DiceBear output.
+- Animate new generated SVG internals with DiceBear's native `animationVariant`, or use an uploaded-avatar activity container, only for selected, working, or streaming states. Gate movement behind reduced-motion preference and give meaningful Bot avatars accessible names derived from the Bot name.
+- Keep the Computer Broker as the exclusive Shared Screen input coordinator. Create and History use Dialog on desktop and BottomSheet on narrow viewports; Computer uses a docked desktop drawer and a narrow BottomSheet, with a modal expanded preview.
+- Keep Takeover, Return to Bot, waiting state, and re-observation semantics. Emergency control appears immediately while computer input is active and remains available while stopped, but is not a permanent idle Sidebar affordance. Remove the separate omarchy-bot approval check for desktop actions; coordination remains distinct from Agent permissions.
 - Publish ordered Bot, Thread, turn/activity, dictation, and Computer state through the existing replayable WebSocket seam. Do not broadcast transcript text from dictation to non-owning clients.
-- Build the layout with Astryx SideNav, layout, Sheet/Dialog, ChatMessageList, ChatComposer, Avatar, selection, and status primitives discovered through the Astryx CLI. Do not retain TopNav or recreate Astryx primitives by hand.
-- Use one cool-neutral visual system with one blue accent, system-following light/dark themes, soft consistent radii, low card density, and state-motivated motion.
+- Build the layout with Astryx SideNav, layout, Dialog, BottomSheet, ChatMessageList, ChatComposer, Avatar, selection, and status primitives discovered through the Astryx CLI. Do not retain TopNav or recreate Astryx primitives by hand.
+- Use one cool-neutral visual system with one blue accent, system-following light/dark themes, soft consistent radii, low card density, and state-motivated motion. Settings → Appearance exposes the current system-following theme state.
 - Use a conversation-local Header for title/history, Computer, and contextual Bot actions. Keep global Settings at the Sidebar footer.
 - Treat the normal blank Thread as an intentionally empty transcript region plus Composer, not an onboarding hero.
 - Use contextual inline errors and skeletons shaped like final content. Use notifications only for background completion and action-needed states.
@@ -151,12 +151,12 @@ Use Astryx primitives for the product surface, local managed storage for attachm
 
 - Tests assert externally observable behavior rather than private classes, SQL statements, React component structure, or implementation call order. Refactoring an internal module without changing product behavior must not require rewriting the test.
 - The primary seam is the localhost REST/WebSocket API against a real daemon process with fake Agent, Computer, and Voxtype boundaries. This seam verifies schema migration, Agent/Bot separation, Bot lifecycle, Thread and message behavior, native steering routing, attachment lifecycle, dictation outcomes, event replay, background state, and Computer coordination.
-- Migration tests start from a representative legacy database, boot the current daemon, and verify the migrated product exclusively through public API responses. They also verify that a second boot is idempotent and does not expose a legacy model.
+- Migration tests start from representative legacy databases before and after the earlier broad migration, boot the current daemon, and verify behavior only through public API responses. They defend conservative provenance, lossless retained user data, removal of proven inventory, preservation of ambiguous rows, and repeat-boot idempotence.
 - API integration tests extend the existing daemon harness and fake worker prior art. Fakes model public worker/subprocess protocols, not daemon internals.
-- Browser E2E is the user seam for Sidebar ordering/pinning/unread, Bot creation and editing, history Sheet, blank Thread, window-local drafts, attachment staging, dictation states, streaming scroll behavior, collapsed Activity, Computer drawer/Bottom Sheet and preview Lightbox, responsive navigation drawer, keyboard navigation, focus restoration, light/dark themes, and reduced motion.
-- Browser tests interact by accessible roles and visible labels rather than CSS selectors or component names. Accessibility checks include automated axe coverage plus focused keyboard scenarios.
-- Visual regression covers representative light/dark desktop and narrow-window states, selected/working DiceBear avatar states, reduced motion, long transcript, errors, the docked Computer drawer, expanded preview modal, and contextual Takeover.
-- Agent worker conformance remains the adapter seam. It verifies the exact installed version's session lifecycle, stream boundaries, attachments, native cancellation, steering where claimed, native events, capability inventory evidence, and restart recovery.
+- Browser E2E is the user seam for Sidebar ordering/pinning/unread, Bot creation and editing, responsive History, blank Thread, window-local drafts, attachment staging, dictation states, streaming scroll behavior, collapsed Activity, responsive Computer and preview Lightbox, navigation drawer, keyboard navigation, focus restoration, Appearance/system theme, accessible avatars, and reduced motion.
+- Browser E2E is role-first: interact through accessible roles and visible names, use test ids only when no semantic seam exists, and never depend on CSS classes or component implementation names. Accessibility checks include automated axe coverage plus focused keyboard scenarios.
+- Visual regression covers representative light/dark desktop and narrow-window states, selected/working current and legacy DiceBear avatar states, reduced motion, long transcript, errors, the docked Computer drawer, expanded preview modal, and contextual Takeover.
+- Agent worker conformance is the adapter seam. It verifies the exact installed version's session lifecycle, stream boundaries, attachments, native cancellation, steering where claimed, native events, capability inventory evidence, restart recovery, and truthful unsupported modalities such as Pi image input.
 - Unsupported capability entries are tested as truthful absence, not as mocked emulation.
 - Computer tests verify that observation remains available without input ownership, input cannot interleave, Takeover parks Bot input, Return to Bot re-observes, waiting state is scoped to the affected Bot, and emergency stop revokes input.
 - Voxtype tests use a fake executable that produces documented `ok`, `empty`, `timeout`, `error`, busy, cancel, and unavailable outcomes. At least one local smoke test probes the installed Voxtype integration contract without recording audio.
