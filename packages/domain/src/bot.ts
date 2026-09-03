@@ -14,7 +14,7 @@ export interface AgentReadiness {
 }
 
 /** Bot activity as derived from its active turn + Agent readiness. */
-export type BotActivityStatus = "idle" | "working" | "waiting" | "needs_you" | "error" | "unavailable";
+export type BotActivityStatus = "idle" | "working" | "needs_you" | "error" | "unavailable";
 
 export interface AvatarRecipe {
   rendererVersion: string;

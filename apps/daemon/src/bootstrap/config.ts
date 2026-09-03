@@ -19,8 +19,6 @@ export interface Config {
   /** Voxtype binary override (defaults to `voxtype` on PATH). */
   voxtypeBin?: string;
   port: number;
-  /** TTL for bot-held computer leases; human leases never auto-expire. */
-  leaseTtlMs: number;
   turnTimeoutMs: number;
 }
 
@@ -45,7 +43,6 @@ export function loadConfig(): Config {
     statusPath: path.join(stateDir, "status.json"),
     ...(voxtypeBin !== undefined ? { voxtypeBin } : {}),
     port: Number(process.env.OMARCHY_BOT_PORT ?? 7321),
-    leaseTtlMs: Number(process.env.OMARCHY_BOT_LEASE_TTL_MS ?? 120_000),
     turnTimeoutMs: Number(process.env.OMARCHY_BOT_TURN_TIMEOUT_MS ?? 600_000),
   };
   mkdirSync(dataDir, { recursive: true });

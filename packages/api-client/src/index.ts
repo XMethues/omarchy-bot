@@ -230,12 +230,6 @@ export class ApiClient {
   returnToBot(owner: ComputerSurfaceOwner): Promise<ComputerViewDto> {
     return this.req(this.computerPath("/api/computer/return-to-bot", owner), { method: "POST" });
   }
-  emergencyStop(owner: ComputerSurfaceOwner): Promise<ComputerViewDto> {
-    return this.req(this.computerPath("/api/computer/emergency-stop", owner), { method: "POST" });
-  }
-  resumeComputer(owner: ComputerSurfaceOwner): Promise<ComputerViewDto> {
-    return this.req(this.computerPath("/api/computer/resume", owner), { method: "POST" });
-  }
   computerProjectionUrl(owner: ComputerSurfaceOwner): string {
     return `${this.base}${this.computerPath("/api/computer/projection", owner)}`;
   }

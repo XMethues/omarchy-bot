@@ -143,11 +143,7 @@ export class BotsService {
     const agentReady = this.agents.status(r.agent_id as AgentId) === "ready";
     let status: BotViewDto["status"] = "idle";
     if (active !== undefined) {
-      status =
-        active.status === "working" ? "working"
-        : active.status === "waiting_for_input" ? "needs_you"
-        : active.status === "failed" ? "error"
-        : "waiting";
+      status = "working";
     } else if (!agentReady) {
       status = "unavailable";
     } else if (st?.last_activity_at && Date.now() - new Date(st.last_activity_at).getTime() < 60_000 && this.#recentlyFailed(r.id)) {

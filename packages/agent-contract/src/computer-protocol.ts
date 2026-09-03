@@ -1,29 +1,28 @@
 import type { ComputerAction, SurfaceId } from "@omarchy-bot/domain";
 import type { Hello } from "./shared.ts";
 
+/** Daemon-issued authority for one Bot-bound input action. */
+export interface ComputerInputAuthority {
+  surfaceId: SurfaceId;
+  botId: string;
+  turnId: string;
+}
+
 export type ComputerCommand =
-  | { type: "probe"; requestId: string }
   | {
       type: "act";
       requestId: string;
       surfaceId: SurfaceId;
       runtimeGeneration: number;
       action: ComputerAction;
-      /** Set for input actions. Worker refuses input without it (defense in depth). */
-      lease?: { surfaceId: SurfaceId; holder: { botId: string } | "human"; turnId?: string; token: string };
+      /** Input actions fail closed when the owning Bot context is absent. */
+      inputAuthority?: ComputerInputAuthority;
     }
   | { type: "shutdown"; requestId: string };
 
-export interface ComputerProbePayload {
-  agentId: string;
-  installed: boolean;
-  agentVersion: string;
-  sdkOk: boolean;
-  reason?: string;
-}
 
 export type ComputerResult =
-  | { requestId: string; ok: true; payload: ComputerActPayload | ComputerProbePayload }
+  | { requestId: string; ok: true; payload: ComputerActPayload }
   | { requestId: string; ok: false; error: string };
 
 export interface ComputerActPayload {
@@ -38,5 +37,4 @@ export interface ComputerActPayload {
 export type ComputerWorkerOutbound =
   | Hello
   | { type: "heartbeat" }
-  | ComputerResult
-  | { type: "event"; event: { type: "native"; capability: string; payload: unknown; sensitivity: "public" | "diagnostic" | "secret" } };
+  | ComputerResult;

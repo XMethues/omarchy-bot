@@ -35,7 +35,7 @@ export interface SurfaceComputerWorker {
   surfaceId: SurfaceId;
   runtimeGeneration: number;
   exited: Promise<Error>;
-  act(action: ComputerActCommand["action"], lease?: ComputerActCommand["lease"]): Promise<ComputerActPayload>;
+  act(action: ComputerActCommand["action"], inputAuthority?: ComputerActCommand["inputAuthority"]): Promise<ComputerActPayload>;
   stop(): Promise<void>;
 }
 
@@ -144,7 +144,7 @@ export class Supervisor {
       surfaceId: scope.surfaceId,
       runtimeGeneration: scope.runtimeGeneration,
       exited,
-      act: async (action, lease) => {
+      act: async (action, inputAuthority) => {
         if (this.#computerWorkers.get(scope.surfaceId) !== entry || !client.alive) {
           throw new Error("Computer worker context is no longer active");
         }
@@ -153,7 +153,7 @@ export class Supervisor {
           surfaceId: scope.surfaceId,
           runtimeGeneration: scope.runtimeGeneration,
           action,
-          ...(lease === undefined ? {} : { lease }),
+          ...(inputAuthority === undefined ? {} : { inputAuthority }),
         }, 30_000) as Promise<ComputerActPayload>;
       },
       stop: () => this.stopComputerWorker(scope.surfaceId, scope.runtimeGeneration),

@@ -268,15 +268,13 @@ async function handleMessage(cmd: AgentCommand): Promise<void> {
         const entry = sessionEntry(cmd.sessionId);
         if (entry.session.isStreaming) throw new Error("session busy: a turn is already running");
         if (
-          cmd.computer !== undefined
-          && (
-            cmd.computer.botId !== entry.botId
-            || cmd.computer.workerSessionId !== cmd.sessionId
-            || cmd.computer.turnId !== cmd.turnId
-            || !isSurfaceId(cmd.computer.surfaceId)
-          )
+          cmd.computer === undefined
+          || cmd.computer.botId !== entry.botId
+          || cmd.computer.workerSessionId !== cmd.sessionId
+          || cmd.computer.turnId !== cmd.turnId
+          || !isSurfaceId(cmd.computer.surfaceId)
         ) {
-          throw new Error("computer tool binding does not match Agent command");
+          throw new Error("Bot Screen binding is required and must match the Agent command");
         }
         const images =
           cmd.message.attachments && cmd.message.attachments.length > 0

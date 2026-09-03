@@ -37,7 +37,7 @@ export async function main(options: MainOptions = {}): Promise<{
 }> {
   const cfg = loadConfig();
   const db = openDb(cfg);
-  recoverOnStartup(db); // leases never survive a restart as bot-held
+  recoverOnStartup(db);
   const runtimeDir = process.env.XDG_RUNTIME_DIR;
   const hostWaylandDisplay = process.env.WAYLAND_DISPLAY;
   const workersDir = process.env.OMARCHY_BOT_WORKERS_DIR ?? path.resolve(import.meta.dir, "../../../../workers");
@@ -96,9 +96,8 @@ export async function main(options: MainOptions = {}): Promise<{
   const computer = new ComputerBroker(
     db,
     events,
-    turns,
     screens,
-    cfg,
+    cfg.artifactsDir,
     (surfaceId) => projections.revokeControl(surfaceId),
   );
   projections = new ScreenProjectionService(

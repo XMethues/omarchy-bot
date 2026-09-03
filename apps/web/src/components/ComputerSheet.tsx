@@ -49,12 +49,10 @@ export interface ComputerSheetProps {
 const STATE_LABELS: Record<ComputerViewDto["state"], string> = {
   starting: "Screen starting",
   ready: "Screen ready",
-  "bot-using": "Using computer",
-  waiting: "Waiting for computer",
+  "bot-using": "Bot using screen",
   "needs-you": "Needs you",
   "user-control": "You have control",
-  "emergency-stopped": "Computer control stopped",
-  unavailable: "Computer unavailable",
+  unavailable: "Screen unavailable",
 };
 
 const PROJECTION_LABELS: Record<ScreenProjectionState, string> = {
@@ -130,26 +128,26 @@ function ComputerSheetContent({
 
   return (
     <VStack gap={4} padding={4} aria-busy={loading || busy || projectionWaiting || undefined} data-testid="computer-sheet">
-      {compactHeading ? <Heading level={2}>Computer</Heading> : null}
+      {compactHeading ? <Heading level={2}>Computer Surface</Heading> : null}
       {!loading && view.state !== "unavailable" ? (
         <VStack gap={1}>
           <Heading level={3}>{STATE_LABELS[view.state]}</Heading>
-          <Text color="secondary">{view.activity ?? `${bot.name}’s computer.`}</Text>
+          <Text color="secondary">{view.activity ?? `${bot.name}’s Bot Screen.`}</Text>
         </VStack>
       ) : null}
       {error !== undefined ? <Banner status="error" title={error} /> : null}
       {loading ? (
         <EmptyState
           icon={<Icon icon="clock" size="lg" />}
-          title="Checking the computer"
-          description="The latest computer state will appear here."
+          title="Checking the Bot Screen"
+          description="The latest Bot Screen state will appear here."
           isCompact
         />
       ) : view.state === "unavailable" ? (
         <EmptyState
           icon={<Icon icon="warning" size="lg" />}
-          title="Computer unavailable"
-          description={view.activity ?? "This bot’s computer isn’t available right now."}
+          title="Screen unavailable"
+          description={view.activity ?? "This Bot Screen isn’t available right now."}
           {...(onRetry !== undefined
             ? { actions: <Button label="Check again" variant="secondary" onClick={onRetry} /> }
             : {})}
@@ -165,7 +163,7 @@ function ComputerSheetContent({
             {frameUrl === undefined ? null : (
               <img
                 src={frameUrl}
-                alt={`Latest computer preview for ${bot.name}`}
+                alt={`Computer Preview for ${bot.name}`}
                 {...stylex.props(localStyles.image)}
                 data-testid="computer-preview"
               />
@@ -173,8 +171,8 @@ function ComputerSheetContent({
             {onExpandPreview !== undefined && frameUrl !== undefined ? (
               <div {...stylex.props(localStyles.previewAction)}>
                 <IconButton
-                  label="Expand desktop preview"
-                  tooltip="Expand desktop preview"
+                  label="Open Web Control"
+                  tooltip="Open Web Control"
                   icon={<Icon icon={Maximize2} size="sm" />}
                   variant="secondary"
                   onClick={onExpandPreview}
@@ -186,7 +184,7 @@ function ComputerSheetContent({
               <div {...stylex.props(localStyles.previewState)}>
                 <EmptyState
                   icon={<Icon icon={projectionUnavailable ? "warning" : "clock"} size="lg" />}
-                  title={projectionUnavailable ? "Projection unavailable" : PROJECTION_LABELS[projectionState]}
+                  title={projectionUnavailable ? "Screen Projection unavailable" : PROJECTION_LABELS[projectionState]}
                   description={
                     projectionUnavailable
                       ? "The Computer Surface may still be available. Try the Screen Projection again."
@@ -439,11 +437,11 @@ export function ComputerSheet({
       onOpenChange={setPreviewExpanded}
       media={{
         src: frameUrl,
-        alt: `Expanded computer preview for ${bot.name}`,
+        alt: `Web Control for ${bot.name}`,
         caption:
           view.takeover === "active" ? (
             <HStack gap={2} vAlign="center">
-              <Text>{bot.name} computer — Web Control</Text>
+              <Text>{bot.name} Bot Screen — Web Control</Text>
               <Button
                 label="I'm done"
                 variant="primary"
@@ -453,7 +451,7 @@ export function ComputerSheet({
               />
             </HStack>
           ) : (
-            `${bot.name} computer — Web Control`
+            `${bot.name} Bot Screen — Web Control`
           ),
       }}
       {...(previewExpanded
@@ -477,7 +475,7 @@ export function ComputerSheet({
   if (isSmallScreen) {
     return (
       <BottomSheetWithReturnFocus
-        label="Computer"
+        label="Computer Surface"
         returnFocusRef={returnFocusRef}
         isOpen={open}
         onOpenChange={(nextOpen) => !nextOpen && onClose()}
@@ -491,14 +489,14 @@ export function ComputerSheet({
 
   return (
     <>
-      <LayoutPanel width={380} padding={0} hasDivider label="Computer" role="complementary">
+      <LayoutPanel width={380} padding={0} hasDivider label="Computer Surface" role="complementary">
         <HStack gap={2} padding={4} vAlign="center">
           <StackItem size="fill">
-            <Heading level={2}>Computer</Heading>
+            <Heading level={2}>Computer Surface</Heading>
           </StackItem>
           <IconButton
-            label="Close computer drawer"
-            tooltip="Close computer drawer"
+            label="Close Computer Surface"
+            tooltip="Close Computer Surface"
             icon={<Icon icon="close" size="md" />}
             variant="ghost"
             onClick={closePanel}

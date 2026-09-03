@@ -1,5 +1,6 @@
 import type { Database } from "bun:sqlite";
 import type { ComputerAction, SurfaceId } from "@omarchy-bot/domain";
+import type { ComputerInputAuthority } from "@omarchy-bot/agent-contract";
 import type { ComputerSurfaceOwner } from "./broker.ts";
 
 export type BotScreenLifecycleState = "stopped" | "starting" | "ready" | "failed";
@@ -22,12 +23,6 @@ export type BotScreenInputEvent =
   | { type: "key"; keyCode: number; state: "pressed" | "released" }
   | { type: "paste"; text: string };
 
-export interface BotScreenInputLease {
-  surfaceId: SurfaceId;
-  holder: { botId: string } | "human";
-  turnId?: string;
-  token: string;
-}
 
 export interface BotScreenProvision {
   surfaceId: SurfaceId;
@@ -55,7 +50,7 @@ export interface BotScreenProjectionSource {
 /** Internal platform seam. Runtime handles keep process and socket facts private. */
 export interface BotScreenRuntime {
   capture(): Promise<BotScreenCapture>;
-  act(action: ComputerAction, lease?: BotScreenInputLease): Promise<BotScreenActionResult>;
+  act(action: ComputerAction, inputAuthority?: ComputerInputAuthority): Promise<BotScreenActionResult>;
   input(event: BotScreenInputEvent): Promise<void>;
   releaseInput(): Promise<void>;
   /** Resolves only when the runtime exits; deliberate stops are ignored by the manager. */
@@ -248,10 +243,10 @@ export class BotScreenManager {
   async act(
     owner: ComputerSurfaceOwner,
     action: ComputerAction,
-    lease?: BotScreenInputLease,
+    inputAuthority?: ComputerInputAuthority,
   ): Promise<BotScreenActionResult> {
-    if (lease !== undefined && lease.surfaceId !== owner.surfaceId) {
-      throw new Error("input lease does not belong to this Computer Surface");
+    if (inputAuthority !== undefined && inputAuthority.surfaceId !== owner.surfaceId) {
+      throw new Error("input authority does not belong to this Computer Surface");
     }
     return this.#serialize(owner.surfaceId, async () => {
       const runtime = await this.#readyRuntime(owner);
@@ -259,7 +254,7 @@ export class BotScreenManager {
       if (runtime === undefined || entry?.runtime !== runtime) {
         throw new Error(this.state(owner).failure ?? "Bot Screen is unavailable");
       }
-      return this.#invoke(owner.surfaceId, entry, () => runtime.act(action, lease));
+      return this.#invoke(owner.surfaceId, entry, () => runtime.act(action, inputAuthority));
     });
   }
 

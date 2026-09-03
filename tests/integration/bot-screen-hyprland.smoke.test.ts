@@ -116,20 +116,24 @@ platformTest("two real nested Hyprland Screens act and capture concurrently with
       }
     }
 
-    const leases = await Promise.all(owners.map((owner) =>
-      harness.svc.computer.acquire(owner, undefined)
-    ));
-    expect(leases.every((lease) => lease.granted && lease.token !== undefined)).toBeTrue();
     await Promise.all([
-      harness.svc.computer.act(owners[0]!, undefined, { name: "type", args: { text: "FIRST-SCREEN-PIXELS" } }),
-      harness.svc.computer.act(owners[1]!, undefined, { name: "type", args: { text: "SECOND-SCREEN-PIXELS" } }),
+      harness.svc.screens.act(
+        owners[0]!,
+        { name: "type", args: { text: "FIRST-SCREEN-PIXELS" } },
+        { ...owners[0]!, turnId: "smoke-first-screen" },
+      ),
+      harness.svc.screens.act(
+        owners[1]!,
+        { name: "type", args: { text: "SECOND-SCREEN-PIXELS" } },
+        { ...owners[1]!, turnId: "smoke-second-screen" },
+      ),
     ]);
     const activeViews = await Promise.all(owners.map((owner) =>
       fetch(
         `${harness.baseUrl}/api/computer/state?botId=${encodeURIComponent(owner.botId)}&surfaceId=${encodeURIComponent(owner.surfaceId)}`,
       ).then((response) => response.json()) as Promise<{ state: string }>
     ));
-    expect(activeViews.map((view) => view.state)).toEqual(["bot-using", "bot-using"]);
+    expect(activeViews.map((view) => view.state)).toEqual(["ready", "ready"]);
 
     const previews = await Promise.all(owners.map(async (owner) => {
       const response = await fetch(
@@ -182,9 +186,6 @@ platformTest("two real nested Hyprland Screens act and capture concurrently with
 
     expect(await run(["hyprctl", "-j", "cursorpos"])).toBe(hostPointerBefore);
 
-    for (const [index, owner] of owners.entries()) {
-      harness.svc.computer.release(owner, leases[index]!.token!);
-    }
 
     const archivedFirst = await api<{ surfaceId: string; archived: boolean }>(
       harness,

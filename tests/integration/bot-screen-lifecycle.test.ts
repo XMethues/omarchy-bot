@@ -117,17 +117,17 @@ describe("Bot Screen lifecycle", () => {
       await waitForState(h, first, "ready");
     }
 
-    const cachedPreview = await fetch(
+    const livePreview = await fetch(
       `${h.baseUrl}/api/computer/snapshot?botId=${encodeURIComponent(first.id)}&surfaceId=${encodeURIComponent(first.surfaceId)}`,
     );
-    expect(cachedPreview.status).toBe(200);
+    expect(livePreview.status).toBe(200);
 
     adapter.crash(first.surfaceId, "fake capture helper crashed");
     await waitForState(h, first, "unavailable");
-    const stalePreview = await fetch(
+    const unavailablePreview = await fetch(
       `${h.baseUrl}/api/computer/snapshot?botId=${encodeURIComponent(first.id)}&surfaceId=${encodeURIComponent(first.surfaceId)}`,
     );
-    expect(stalePreview.status).toBe(503);
+    expect(unavailablePreview.status).toBe(503);
     expect(await waitForState(h, second, "ready")).toMatchObject({
       botId: second.id,
       surfaceId: second.surfaceId,
@@ -141,7 +141,7 @@ describe("Bot Screen lifecycle", () => {
     expect(adapter.running(first.surfaceId)).toBeUndefined();
     expect(adapter.running(second.surfaceId)).toBeUndefined();
     expect(adapter.destroyed).toEqual(new Set([first.surfaceId, second.surfaceId]));
-    for (const table of ["bot_surfaces", "computer_leases", "artifacts", "input_diagnostics", "bot_deletions"]) {
+    for (const table of ["bot_surfaces", "artifacts", "input_diagnostics", "bot_deletions"]) {
       expect(h.svc.db.query(`SELECT COUNT(*) AS count FROM ${table}`).get()).toEqual({ count: 0 });
     }
   });

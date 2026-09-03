@@ -2,29 +2,10 @@ import { randomUUID } from "node:crypto";
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { Database } from "bun:sqlite";
-import { isInputAction, type ComputerAction, type ComputerLease, type SurfaceId } from "@omarchy-bot/domain";
+import { isInputAction, isSurfaceId, type ComputerAction, type SurfaceId } from "@omarchy-bot/domain";
 import type { EventLog } from "../events/eventLog.ts";
-import type { TurnService } from "../turns/turns.ts";
-import type { BotScreenInputLease, BotScreenManager } from "./botScreenManager.ts";
-import type { Config } from "../../bootstrap/config.ts";
+import type { BotScreenManager } from "./botScreenManager.ts";
 
-interface LeaseRow {
-  surface_id: SurfaceId;
-  holder_is_human: number;
-  holder_bot_id: string;
-  turn_id: string | null;
-  token: string;
-  acquired_at: string;
-  expires_at: string;
-}
-interface ParkedBot {
-  turnId?: string;
-}
-interface SnapshotCache {
-  checkedAt: number;
-  mediaType: string;
-  bytes: Uint8Array;
-}
 
 type AgentToolOutput = {
   text?: string;
@@ -50,7 +31,6 @@ function deferred<T>(): Deferred<T> {
   return { promise, resolve, reject };
 }
 
-
 interface PendingAgentTool {
   owner: ComputerSurfaceOwner;
   turnId: string;
@@ -67,9 +47,7 @@ export type WebControlRevoker = (surfaceId: SurfaceId) => Promise<void>;
 export interface ComputerBrokerState {
   botId: string;
   surfaceId: SurfaceId;
-  lease: ComputerLease | null;
-  queuedTurnIds: string[];
-  emergencyStopped: boolean;
+  screenUse: "idle" | "bot" | "human";
   takeover: "unavailable" | "available" | "active";
   lastImageAt?: string;
 }
@@ -79,34 +57,29 @@ export interface ComputerSurfaceOwner {
   surfaceId: SurfaceId;
 }
 
-
 /**
- * Surface-scoped input coordination. BotScreenManager owns runtime lifecycle
- * and execution; this module keeps leases, queues, and artifacts Bot-scoped.
+ * Coordinates Bot and Web Control for each Computer Surface independently.
+ * BotScreenManager owns runtime lifecycle and operation serialization.
  */
 export class ComputerBroker {
-  #queues = new Map<SurfaceId, ParkedBot[]>();
-  #parkedForEmergency = new Map<SurfaceId, ParkedBot>();
-  #emergencyStopped = new Set<SurfaceId>();
-  #snapshotCaches = new Map<SurfaceId, SnapshotCache>();
-  #agentOperations = new Map<SurfaceId, Promise<void>>();
+  #surfaceOperations = new Map<SurfaceId, Promise<void>>();
   #pendingAgentTools = new Map<SurfaceId, PendingAgentTool>();
   #unsubscribeScreens: () => void;
 
   constructor(
     private readonly db: Database,
     private readonly events: EventLog,
-    private readonly turns: TurnService,
     private readonly screens: BotScreenManager,
-    private readonly cfg: Config,
+    private readonly artifactsDir: string,
     private readonly revokeWebControl: WebControlRevoker,
   ) {
     this.events.subscribe((event) => {
       if (event.aggregateType !== "bot" || (event.type !== "bot.archived" && event.type !== "bot.deleted")) return;
       const payload = event.payload as { surfaceId?: unknown } | undefined;
-      if (typeof payload?.surfaceId === "string") {
-        this.#clearSurface(payload.surfaceId as SurfaceId, "Computer Surface was removed during pending tool");
+      if (typeof payload?.surfaceId !== "string" || !isSurfaceId(payload.surfaceId)) {
+        throw new Error("Bot lifecycle event requires a valid Surface");
       }
+      this.#clearSurface(payload.surfaceId, "Computer Surface was removed during pending tool");
     });
     this.#unsubscribeScreens = this.screens.subscribe((transition) => {
       if (transition.state === "failed") {
@@ -129,17 +102,6 @@ export class ComputerBroker {
     return row === null ? undefined : { botId, surfaceId: row.surface_id };
   }
 
-  ownerForBot(botId: string): ComputerSurfaceOwner | undefined {
-    const row = this.db
-      .query(
-        `SELECT bot_surfaces.surface_id
-         FROM bot_surfaces
-         JOIN bots ON bots.id = bot_surfaces.bot_id
-         WHERE bot_surfaces.bot_id = ? AND bots.archived = 0`,
-      )
-      .get(botId) as { surface_id: SurfaceId } | null;
-    return row === null ? undefined : { botId, surfaceId: row.surface_id };
-  }
 
   #requireOwner(owner: ComputerSurfaceOwner): ComputerSurfaceOwner {
     const resolved = this.resolveOwner(owner.botId, owner.surfaceId);
@@ -147,57 +109,12 @@ export class ComputerBroker {
     return resolved;
   }
 
-  #lease(surfaceId: SurfaceId): LeaseRow | undefined {
-    return (this.db.query(`SELECT * FROM computer_leases WHERE surface_id = ?`).get(surfaceId) ?? undefined) as
-      | LeaseRow
-      | undefined;
-  }
-
-  #writeLease(owner: ComputerSurfaceOwner, lease: LeaseRow | undefined): void {
-    if (lease === undefined) {
-      this.db.query(`DELETE FROM computer_leases WHERE surface_id = ?`).run(owner.surfaceId);
-      return;
-    }
-    this.db
-      .query(
-        `INSERT INTO computer_leases
-           (surface_id, holder_is_human, holder_bot_id, turn_id, token, acquired_at, expires_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(surface_id) DO UPDATE SET
-           holder_is_human=excluded.holder_is_human,
-           holder_bot_id=excluded.holder_bot_id,
-           turn_id=excluded.turn_id,
-           token=excluded.token,
-           acquired_at=excluded.acquired_at,
-           expires_at=excluded.expires_at`,
-      )
-      .run(
-        lease.surface_id,
-        lease.holder_is_human,
-        lease.holder_bot_id,
-        lease.turn_id,
-        lease.token,
-        lease.acquired_at,
-        lease.expires_at,
-      );
-  }
-
   #event(owner: ComputerSurfaceOwner): void {
     this.events.append("computer", owner.surfaceId, "computer.state.changed", owner);
   }
 
-  #queue(surfaceId: SurfaceId): ParkedBot[] {
-    let queue = this.#queues.get(surfaceId);
-    if (queue === undefined) {
-      queue = [];
-      this.#queues.set(surfaceId, queue);
-    }
-    return queue;
-  }
-
   state(input: ComputerSurfaceOwner): ComputerBrokerState {
     const owner = this.#requireOwner(input);
-    const lease = this.#lease(owner.surfaceId);
     const surface = this.db
       .query(`SELECT last_image_at FROM bot_surfaces WHERE surface_id = ?`)
       .get(owner.surfaceId) as { last_image_at: string | null };
@@ -208,23 +125,13 @@ export class ComputerBroker {
         : pending?.phase === "running" || pending?.phase === "takeover-requested"
           ? "available" as const
           : "unavailable" as const;
+    const screenUse = takeover === "active" ? "human" as const
+      : takeover === "available" ? "bot" as const
+      : "idle" as const;
     return {
       ...owner,
-      lease:
-        lease === undefined
-          ? null
-          : {
-              surfaceId: owner.surfaceId,
-              holder: lease.holder_is_human ? ("human" as const) : { botId: owner.botId },
-              ...(lease.turn_id !== null ? { turnId: lease.turn_id } : {}),
-              acquiredAt: lease.acquired_at,
-              expiresAt: lease.expires_at,
-            },
-      queuedTurnIds: this.#queue(owner.surfaceId).flatMap((entry) =>
-        entry.turnId === undefined ? [] : [entry.turnId]
-      ),
+      screenUse,
       takeover,
-      emergencyStopped: this.#emergencyStopped.has(owner.surfaceId),
       ...(surface.last_image_at !== null ? { lastImageAt: surface.last_image_at } : {}),
     };
   }
@@ -238,57 +145,6 @@ export class ComputerBroker {
       )
       .all() as Array<{ bot_id: string; surface_id: SurfaceId }>;
     return owners.map((owner) => this.state({ botId: owner.bot_id, surfaceId: owner.surface_id }));
-  }
-
-  async acquire(input: ComputerSurfaceOwner, turnId: string | undefined, ttlMs = this.cfg.leaseTtlMs): Promise<{ granted: boolean; token?: string; queued: boolean }> {
-    const owner = this.#requireOwner(input);
-    if (this.#emergencyStopped.has(owner.surfaceId)) return { granted: false, queued: false };
-    const lease = this.#lease(owner.surfaceId);
-    const expired = lease !== undefined && new Date(lease.expires_at).getTime() <= Date.now();
-    if (lease === undefined || expired) {
-      const token = randomUUID();
-      const now = new Date();
-      this.#writeLease(owner, {
-        surface_id: owner.surfaceId,
-        holder_is_human: 0,
-        holder_bot_id: owner.botId,
-        turn_id: turnId ?? null,
-        token,
-        acquired_at: now.toISOString(),
-        expires_at: new Date(now.getTime() + ttlMs).toISOString(),
-      });
-      this.#event(owner);
-      return { granted: true, token, queued: false };
-    }
-    if (!lease.holder_is_human && (turnId === undefined || lease.turn_id === turnId)) {
-      return { granted: true, token: lease.token, queued: false };
-    }
-    const queue = this.#queue(owner.surfaceId);
-    if (!queue.some((entry) => entry.turnId === turnId)) {
-      queue.push(turnId === undefined ? {} : { turnId });
-      this.#event(owner);
-      if (turnId !== undefined) this.turns.parkForComputer(turnId);
-    }
-    return { granted: false, queued: true };
-  }
-
-  renew(input: ComputerSurfaceOwner, turnId: string | undefined, ttlMs = this.cfg.leaseTtlMs): boolean {
-    const owner = this.#requireOwner(input);
-    const lease = this.#lease(owner.surfaceId);
-    if (lease === undefined || lease.holder_is_human || (turnId !== undefined && lease.turn_id !== turnId)) return false;
-    lease.expires_at = new Date(Date.now() + ttlMs).toISOString();
-    this.#writeLease(owner, lease);
-    return true;
-  }
-
-  release(input: ComputerSurfaceOwner, token: string, actor: "bot" | "human" = "bot"): void {
-    const owner = this.#requireOwner(input);
-    const lease = this.#lease(owner.surfaceId);
-    if (lease === undefined) return;
-    if (actor === "human" ? !lease.holder_is_human : lease.holder_is_human || lease.token !== token) return;
-    this.#writeLease(owner, undefined);
-    this.#event(owner);
-    void this.#grantNext(owner);
   }
 
   async takeOver(input: ComputerSurfaceOwner): Promise<{ ok: boolean }> {
@@ -313,16 +169,6 @@ export class ComputerBroker {
       return { ok: false };
     }
     if (pending.phase === "takeover-requested") {
-      const now = new Date();
-      this.#writeLease(owner, {
-        surface_id: owner.surfaceId,
-        holder_is_human: 1,
-        holder_bot_id: owner.botId,
-        turn_id: pending.turnId,
-        token: randomUUID(),
-        acquired_at: now.toISOString(),
-        expires_at: new Date(now.getTime() + 24 * 3600_000).toISOString(),
-      });
       pending.phase = "held";
       pending.activated.resolve();
       this.#event(owner);
@@ -341,9 +187,9 @@ export class ComputerBroker {
     try {
       await this.revokeWebControl(owner.surfaceId);
       if (pending.cancellation !== undefined) throw pending.cancellation;
-      const context = await this.act(owner, pending.turnId, { name: "observe", args: {} }, "human");
+      const context = await this.#act(owner, pending.turnId, { name: "observe", args: {} });
       if (pending.cancellation !== undefined) throw pending.cancellation;
-      const screenshot = await this.act(owner, pending.turnId, { name: "screenshot", args: {} }, "human");
+      const screenshot = await this.#act(owner, pending.turnId, { name: "screenshot", args: {} });
       if (pending.cancellation !== undefined) throw pending.cancellation;
       const result = await this.#withImageFile(owner, {
         ...context,
@@ -352,7 +198,6 @@ export class ComputerBroker {
         ...(context.windowList === undefined ? {} : { windowList: context.windowList }),
       });
       pending.phase = "settled";
-      this.#releaseHumanLease(pending);
       pending.completion.resolve(result);
       this.#event(owner);
       return result.text === undefined ? {} : { observation: result.text };
@@ -364,89 +209,30 @@ export class ComputerBroker {
       throw error;
     }
   }
+
   canAcceptWebControl(input: ComputerSurfaceOwner): boolean {
     const owner = this.resolveOwner(input.botId, input.surfaceId);
     if (owner === undefined) return false;
     const pending = this.#pendingAgentTools.get(owner.surfaceId);
-    if (pending !== undefined) return pending.phase === "held";
-    return this.#lease(owner.surfaceId) === undefined;
+    return pending === undefined || pending.phase === "held";
   }
 
-  async #grantNext(owner: ComputerSurfaceOwner): Promise<void> {
-    const next = this.#queue(owner.surfaceId).shift();
-    if (next === undefined) return;
-    const result = await this.acquire(owner, next.turnId);
-    if (result.granted) this.turns.resumeAfterComputer(next.turnId);
-  }
-
-  emergencyStop(input: ComputerSurfaceOwner): void {
-    const owner = this.#requireOwner(input);
-    this.#emergencyStopped.add(owner.surfaceId);
-    const lease = this.#lease(owner.surfaceId);
-    if (lease !== undefined && !lease.holder_is_human) {
-      const parked = lease.turn_id === null ? {} : { turnId: lease.turn_id };
-      this.#parkedForEmergency.set(owner.surfaceId, parked);
-      if (parked.turnId !== undefined) this.turns.parkForHuman(parked.turnId);
-    } else {
-      this.#parkedForEmergency.delete(owner.surfaceId);
-    }
-    this.#writeLease(owner, undefined);
-    this.#event(owner);
-  }
-
-  async resumeAfterEmergencyStop(input: ComputerSurfaceOwner): Promise<void> {
-    const owner = this.#requireOwner(input);
-    if (!this.#emergencyStopped.has(owner.surfaceId)) return;
-    const parked = this.#parkedForEmergency.get(owner.surfaceId);
-    if (parked !== undefined || this.#queue(owner.surfaceId).length > 0) {
-      await this.act(owner, undefined, { name: "observe", args: {} });
-    }
-    this.#parkedForEmergency.delete(owner.surfaceId);
-    this.#emergencyStopped.delete(owner.surfaceId);
-    if (parked !== undefined) {
-      const restored = await this.acquire(owner, parked.turnId);
-      if (restored.granted) this.turns.resumeAfterHuman(parked.turnId);
-    } else {
-      await this.#grantNext(owner);
-    }
-    this.#event(owner);
-  }
-
-  async act(
+  async #act(
     input: ComputerSurfaceOwner,
-    turnId: string | undefined,
+    turnId: string,
     action: ComputerAction,
-    actor: "bot" | "human" = "bot",
   ): Promise<{ text?: string; imageRef?: string; windowList?: unknown }> {
     const owner = this.#requireOwner(input);
-    if (this.#emergencyStopped.has(owner.surfaceId) && isInputAction(action.name)) {
-      throw new Error("computer input is emergency-stopped");
-    }
-    const lease = this.#lease(owner.surfaceId);
-    if (isInputAction(action.name)) {
-      if (lease === undefined) throw new Error("no active input lease");
-      if (actor === "human") {
-        if (!lease.holder_is_human) throw new Error("input lease is not held by human");
-      } else if (lease.holder_is_human || (turnId !== undefined && lease.turn_id !== turnId)) {
-        throw new Error(`input lease held by ${lease.holder_is_human ? "human" : owner.botId}`);
-      }
-    }
-
-    const screenLease: BotScreenInputLease | undefined = !isInputAction(action.name) || lease === undefined
-      ? undefined
-      : {
-          surfaceId: owner.surfaceId,
-          holder: actor === "human" ? "human" : { botId: owner.botId },
-          ...(lease.turn_id === null ? {} : { turnId: lease.turn_id }),
-          token: lease.token,
-        };
-    const result = await this.screens.act(owner, action, screenLease);
+    const inputAuthority = isInputAction(action.name)
+      ? { surfaceId: owner.surfaceId, botId: owner.botId, turnId }
+      : undefined;
+    const result = await this.screens.act(owner, action, inputAuthority);
 
     let imageRef: string | undefined;
     if (result.image !== undefined) {
       const id = randomUUID();
       const extension = result.image.mediaType === "image/png" ? "png" : "jpg";
-      const artifactPath = path.join(this.cfg.artifactsDir, `snapshot-${id}.${extension}`);
+      const artifactPath = path.join(this.artifactsDir, `snapshot-${id}.${extension}`);
       const observedAt = new Date().toISOString();
       await writeFile(artifactPath, result.image.bytes);
       this.db
@@ -457,16 +243,13 @@ export class ComputerBroker {
     }
     this.#event(owner);
     return {
-      ...(result?.text !== undefined ? { text: result.text } : {}),
+      ...(result.text !== undefined ? { text: result.text } : {}),
       ...(imageRef !== undefined ? { imageRef } : {}),
-      ...(result?.windowList !== undefined ? { windowList: result.windowList } : {}),
+      ...(result.windowList !== undefined ? { windowList: result.windowList } : {}),
     };
   }
 
-  /**
-   * Executes one SDK computer tool call under Surface-scoped coordination.
-   * The queue is per Surface, so separate Bot Screens remain independent.
-   */
+  /** Executes one SDK computer tool call for its authoritative Bot Screen. */
   async agentToolAct(
     input: ComputerSurfaceOwner,
     turnId: string,
@@ -475,30 +258,9 @@ export class ComputerBroker {
     signal: AbortSignal,
   ): Promise<AgentToolOutput> {
     const owner = this.#requireOwner(input);
-    return this.#serializeAgentOperation(owner.surfaceId, async () => {
+    return this.#serializeSurfaceOperation(owner.surfaceId, async () => {
       signal.throwIfAborted();
       this.#requireOwner(owner);
-
-      let acquiredToken: string | undefined;
-      if (isInputAction(action.name)) {
-        const lease = this.#lease(owner.surfaceId);
-        const expired = lease !== undefined
-          && new Date(lease.expires_at).getTime() <= Date.now();
-        if (
-          lease !== undefined
-          && !expired
-          && (lease.holder_is_human || lease.turn_id !== turnId)
-        ) {
-          throw new Error("Computer Surface input is busy");
-        }
-        if (lease === undefined || expired) {
-          const acquired = await this.acquire(owner, turnId);
-          if (!acquired.granted || acquired.token === undefined) {
-            throw new Error("Computer Surface input is busy");
-          }
-          acquiredToken = acquired.token;
-        }
-      }
 
       const pending: PendingAgentTool = {
         owner,
@@ -526,7 +288,7 @@ export class ComputerBroker {
         try {
           await this.revokeWebControl(owner.surfaceId);
           signal.throwIfAborted();
-          initial = await this.#withImageFile(owner, await this.act(owner, turnId, action));
+          initial = await this.#withImageFile(owner, await this.#act(owner, turnId, action));
           signal.throwIfAborted();
         } catch (error) {
           pending.actionError = error;
@@ -544,40 +306,25 @@ export class ComputerBroker {
         if (this.#pendingAgentTools.get(owner.surfaceId) === pending) {
           this.#pendingAgentTools.delete(owner.surfaceId);
         }
-        if (acquiredToken !== undefined) this.release(owner, acquiredToken);
         this.#event(owner);
       }
     });
   }
+
   async snapshot(input: ComputerSurfaceOwner): Promise<{ bytes: Uint8Array; mediaType: string } | undefined> {
     const owner = this.#requireOwner(input);
-    const cached = this.#snapshotCaches.get(owner.surfaceId);
-    if (
-      this.screens.state(owner).state === "ready"
-      && cached !== undefined
-      && Date.now() - cached.checkedAt < 400
-    ) {
-      return { mediaType: cached.mediaType, bytes: cached.bytes };
-    }
     const result = await this.screens.capture(owner).catch(() => undefined);
     if (result === undefined) return undefined;
-    const checkedAt = Date.now();
-    const next = {
-      checkedAt,
-      mediaType: result.mediaType,
-      bytes: result.bytes,
-    };
-    this.#snapshotCaches.set(owner.surfaceId, next);
+    const observedAt = new Date().toISOString();
     this.db
       .query(`UPDATE bot_surfaces SET last_image_at = ? WHERE surface_id = ?`)
-      .run(new Date(checkedAt).toISOString(), owner.surfaceId);
+      .run(observedAt, owner.surfaceId);
     this.#event(owner);
-    return { mediaType: next.mediaType, bytes: next.bytes };
+    return { mediaType: result.mediaType, bytes: result.bytes };
   }
 
   shutdown(): void {
     this.#unsubscribeScreens();
-    this.db.exec(`DELETE FROM computer_leases`);
     for (const pending of this.#pendingAgentTools.values()) {
       const error = new Error("daemon stopped during pending computer tool");
       pending.cancellation = error;
@@ -586,10 +333,7 @@ export class ComputerBroker {
       pending.completion.reject(error);
     }
     this.#pendingAgentTools.clear();
-    this.#queues.clear();
-    this.#parkedForEmergency.clear();
-    this.#emergencyStopped.clear();
-    this.#snapshotCaches.clear();
+    this.#surfaceOperations.clear();
   }
 
   #clearSurface(surfaceId: SurfaceId, reason: string): void {
@@ -597,12 +341,8 @@ export class ComputerBroker {
     if (pending !== undefined) {
       void this.#cancelPending(pending, new Error(reason));
     }
-    this.db.query(`DELETE FROM computer_leases WHERE surface_id = ?`).run(surfaceId);
-    this.#queues.delete(surfaceId);
-    this.#parkedForEmergency.delete(surfaceId);
-    this.#emergencyStopped.delete(surfaceId);
-    this.#snapshotCaches.delete(surfaceId);
   }
+
   async #withImageFile(
     owner: ComputerSurfaceOwner,
     result: { text?: string; imageRef?: string; windowList?: unknown },
@@ -628,44 +368,29 @@ export class ComputerBroker {
     pending.cancellation = error;
     const held = pending.phase === "held" || pending.phase === "completing";
     pending.phase = "settled";
-    if (held) {
-      await this.revokeWebControl(pending.owner.surfaceId).catch(() => {});
-      this.#releaseHumanLease(pending);
-    }
+    if (held) await this.revokeWebControl(pending.owner.surfaceId).catch(() => {});
     pending.activated.reject(error);
     pending.completion.reject(error);
     this.#event(pending.owner);
   }
 
-  #releaseHumanLease(pending: PendingAgentTool): void {
-    const lease = this.#lease(pending.owner.surfaceId);
-    if (
-      lease?.holder_is_human
-      && lease.turn_id === pending.turnId
-    ) {
-      this.#writeLease(pending.owner, undefined);
-    }
-  }
-
-  async #serializeAgentOperation<T>(
+  async #serializeSurfaceOperation<T>(
     surfaceId: SurfaceId,
     operation: () => Promise<T>,
   ): Promise<T> {
-    const previous = this.#agentOperations.get(surfaceId) ?? Promise.resolve();
+    const previous = this.#surfaceOperations.get(surfaceId) ?? Promise.resolve();
     const result = previous.catch(() => {}).then(operation);
     const settled = result.then(
       () => {},
       () => {},
     );
-    this.#agentOperations.set(surfaceId, settled);
+    this.#surfaceOperations.set(surfaceId, settled);
     try {
       return await result;
     } finally {
-      if (this.#agentOperations.get(surfaceId) === settled) {
-        this.#agentOperations.delete(surfaceId);
+      if (this.#surfaceOperations.get(surfaceId) === settled) {
+        this.#surfaceOperations.delete(surfaceId);
       }
     }
   }
-
 }
-

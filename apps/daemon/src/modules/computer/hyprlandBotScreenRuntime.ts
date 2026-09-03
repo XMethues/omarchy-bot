@@ -9,13 +9,13 @@ import {
 } from "node:fs";
 import path from "node:path";
 import type { ComputerAction, SurfaceId } from "@omarchy-bot/domain";
+import type { ComputerInputAuthority } from "@omarchy-bot/agent-contract";
 import type { SurfaceComputerWorker, Supervisor } from "../../supervision/supervisor.ts";
 import { ensureInputHelper } from "../../../native/pointer-helper/build.ts";
 import { ApplicationUnits } from "../../supervision/applicationUnits.ts";
 import type {
   BotScreenActionResult,
   BotScreenCapture,
-  BotScreenInputLease,
   BotScreenInputEvent,
   BotScreenProvision,
   BotScreenRuntime,
@@ -432,9 +432,9 @@ export class HyprlandBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter 
       };
       const act = async (
         action: ComputerAction,
-        lease?: BotScreenInputLease,
+        inputAuthority?: ComputerInputAuthority,
       ): Promise<BotScreenActionResult> => {
-        const result = await startedComputerWorker.act(action, lease);
+        const result = await startedComputerWorker.act(action, inputAuthority);
         const workerImage = result.image === undefined
           ? undefined
           : {

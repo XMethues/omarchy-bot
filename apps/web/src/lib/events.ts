@@ -20,15 +20,13 @@ export interface NotificationContext {
 
 interface NotificationDecision {
   botId: string;
-  kind: "completed" | "needs_you";
 }
 
 function notificationDecision(envelope: EventEnvelope): NotificationDecision | undefined {
   if (envelope.type !== "turn.status") return undefined;
   const payload = payloadOf(envelope);
   if (typeof payload.botId !== "string") return undefined;
-  if (payload.to === "completed") return { botId: payload.botId, kind: "completed" };
-  if (payload.to === "waiting_for_input") return { botId: payload.botId, kind: "needs_you" };
+  if (payload.to === "completed") return { botId: payload.botId };
   return undefined;
 }
 
@@ -69,10 +67,10 @@ export function notifyForAttentionEvent(
 
   const name = context.botName?.(decision.botId) ?? "Bot";
   return new Notification(
-    decision.kind === "completed" ? `${name} finished working` : `${name} needs you`,
+    `${name} finished working`,
     {
-      body: decision.kind === "completed" ? "Background work is complete." : "Your input is needed to continue.",
-      tag: `omarchy-bot:${decision.botId}:${decision.kind}`,
+      body: "Background work is complete.",
+      tag: `omarchy-bot:${decision.botId}:completed`,
     },
   );
 }

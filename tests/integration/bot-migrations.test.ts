@@ -219,7 +219,7 @@ describe("integration: Bot provenance migrations", () => {
     }
   });
 
-  test("assigns migrated Bots stable unique Surfaces once and exposes them through the daemon API", async () => {
+  test("assigns migrated Bots stable unique Surfaces once and removes unscoped control persistence", async () => {
     const { db, dbPath, home } = databaseThrough("0009-current-avatar-renderer-only");
     const now = "2026-09-01T00:02:00.000Z";
     const recipe = JSON.stringify({
@@ -240,11 +240,6 @@ describe("integration: Bot provenance migrations", () => {
       db.query(`INSERT INTO bot_state (bot_id) VALUES (?), (?)`)
         .run("bot_11111111111111111111111111111111", "bot_22222222222222222222222222222222");
       db.query(
-        `INSERT INTO computer_leases
-           (id, holder_is_human, holder_bot_id, turn_id, token, acquired_at, expires_at)
-         VALUES (1, 0, 'bot_11111111111111111111111111111111', NULL, 'legacy-token', ?, ?)`,
-      ).run(now, "2026-09-01T00:04:00.000Z");
-      db.query(
         `INSERT INTO artifacts (id, kind, media_type, path, created_at)
          VALUES ('legacy-artifact', 'snapshot', 'image/png', '/tmp/legacy-snapshot.png', ?)`,
       ).run(now);
@@ -258,12 +253,11 @@ describe("integration: Bot provenance migrations", () => {
       expect(surfaces[1]!.surface_id).toMatch(/^surf_[0-9a-f]{32}$/);
       expect(surfaces[1]!.surface_id).not.toBe(surfaces[0]!.surface_id);
       expect(
-        migrated.query(`SELECT surface_id FROM computer_leases WHERE holder_bot_id = ?`)
-          .get("bot_11111111111111111111111111111111"),
-      ).toEqual({ surface_id: surfaces[0]!.surface_id });
+        migrated.query(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'computer_leases'`).get(),
+      ).toBeNull();
       expect(
-        migrated.query(`SELECT id, path FROM legacy_unscoped_artifacts WHERE id = 'legacy-artifact'`).get(),
-      ).toEqual({ id: "legacy-artifact", path: "/tmp/legacy-snapshot.png" });
+        migrated.query(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'legacy_unscoped_artifacts'`).get(),
+      ).toBeNull();
       expect(
         (migrated.query(`PRAGMA table_info(artifacts)`).all() as Array<{ name: string; notnull: number }>)
           .find((column) => column.name === "surface_id"),

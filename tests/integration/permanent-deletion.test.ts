@@ -53,18 +53,15 @@ describe("permanent archived Bot deletion", () => {
     const botId = await makeBot(h, "Delete all owned data");
     const siblingId = await makeBot(h, "Shared Agent sibling survives");
     const deletedBot = await api<BotViewDto>(h, "GET", `/api/bots/${botId}`);
-    await h.svc.computer.act(
-      { botId, surfaceId: deletedBot.surfaceId },
-      undefined,
-      { name: "screenshot", args: {} },
-    );
+    const computerTurn = await sendToBot(h, botId, "computer:screenshot");
+    await waitThreadIdle(h, computerTurn.threadId);
     const computerArtifact = h.svc.db
       .query(`SELECT id, path FROM artifacts WHERE surface_id = ?`)
       .get(deletedBot.surfaceId) as { id: string; path: string };
     const draftToken = crypto.randomUUID();
     const managed = await stageAttachment(h, botId, "managed bytes", "managed.txt", draftToken);
     const staged = await stageAttachment(h, botId, "staged bytes", "staged.txt", draftToken);
-    const sent = await api<{ threadId: string; messageId: string; turnId: string }>(h, "POST", `/api/bots/${botId}/messages`, {
+    const sent = await api<{ threadId: string; messageId: string; turnId: string }>(h, "POST", `/api/threads/${computerTurn.threadId}/messages`, {
       text: "attachment-echo",
       attachmentIds: [managed.id],
       attachmentDraftToken: draftToken,
@@ -88,8 +85,8 @@ describe("permanent archived Bot deletion", () => {
     expect(result.status).toBe("deleted");
     expect(result.removed).toEqual({
       threads: 1,
-      messages: 2,
-      turns: 1,
+      messages: 5,
+      turns: 2,
       attachments: 2,
       avatar: true,
       computerArtifacts: 1,

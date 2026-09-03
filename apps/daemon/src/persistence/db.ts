@@ -97,16 +97,6 @@ CREATE TABLE permissions (
   created_at TEXT NOT NULL,
   decided_at TEXT
 );
-CREATE TABLE computer_leases (
-  id INTEGER PRIMARY KEY CHECK (id = 1),
-  holder_is_human INTEGER NOT NULL DEFAULT 0,
-  holder_bot_id TEXT,
-  holder_role_id TEXT,
-  run_id TEXT,
-  token TEXT NOT NULL,
-  acquired_at TEXT NOT NULL,
-  expires_at TEXT NOT NULL
-);
 CREATE TABLE events (
   cursor INTEGER PRIMARY KEY AUTOINCREMENT,
   event_id TEXT NOT NULL UNIQUE,
@@ -354,26 +344,13 @@ DROP TABLE messages;
 ALTER TABLE messages_new RENAME TO messages;
 CREATE INDEX idx_messages_thread ON messages(thread_id, seq);
 
-CREATE TABLE computer_leases_new (
-  id INTEGER PRIMARY KEY CHECK (id = 1),
-  holder_is_human INTEGER NOT NULL DEFAULT 0,
-  holder_bot_id TEXT,
-  turn_id TEXT,
-  token TEXT NOT NULL,
-  acquired_at TEXT NOT NULL,
-  expires_at TEXT NOT NULL
-);
-INSERT INTO computer_leases_new (id, holder_is_human, holder_bot_id, turn_id, token, acquired_at, expires_at)
-SELECT id, holder_is_human, holder_bot_id, run_id, token, acquired_at, expires_at
-FROM computer_leases;
-DROP TABLE computer_leases;
-ALTER TABLE computer_leases_new RENAME TO computer_leases;
+DROP TABLE IF EXISTS computer_leases;
 
 DROP TABLE IF EXISTS approvals;
 DROP TABLE IF EXISTS settings;
 
--- Replay begins at the contracted public model; no old aggregate identities,
--- approval payloads, or lease diagnostics can cross the WebSocket boundary.
+-- Replay begins at the contracted public model; no old aggregate identities
+-- or approval payloads can cross the WebSocket boundary.
 DELETE FROM events;
 `,
   },
@@ -513,27 +490,10 @@ INSERT INTO bot_surfaces (surface_id, bot_id, transitioned_at)
 SELECT 'surf_' || lower(hex(randomblob(16))), id, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
 FROM bots;
 
-CREATE TABLE computer_leases_by_surface (
-  surface_id TEXT PRIMARY KEY REFERENCES bot_surfaces(surface_id) ON DELETE CASCADE,
-  holder_is_human INTEGER NOT NULL DEFAULT 0,
-  holder_bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
-  turn_id TEXT,
-  token TEXT NOT NULL,
-  acquired_at TEXT NOT NULL,
-  expires_at TEXT NOT NULL
-);
-INSERT INTO computer_leases_by_surface
-  (surface_id, holder_is_human, holder_bot_id, turn_id, token, acquired_at, expires_at)
-SELECT bot_surfaces.surface_id, computer_leases.holder_is_human, computer_leases.holder_bot_id,
-       computer_leases.turn_id, computer_leases.token, computer_leases.acquired_at, computer_leases.expires_at
-FROM computer_leases
-JOIN bot_surfaces ON bot_surfaces.bot_id = computer_leases.holder_bot_id;
-DROP TABLE computer_leases;
-ALTER TABLE computer_leases_by_surface RENAME TO computer_leases;
+DROP TABLE IF EXISTS computer_leases;
 
--- Existing artifact rows predate ownership metadata and cannot be attributed
--- safely. Retain them losslessly outside the active, fail-closed Surface store.
-ALTER TABLE artifacts RENAME TO legacy_unscoped_artifacts;
+-- Unscoped artifacts cannot be attributed safely to a Bot Screen.
+DROP TABLE artifacts;
 CREATE TABLE artifacts (
   id TEXT PRIMARY KEY,
   kind TEXT NOT NULL,
@@ -564,8 +524,19 @@ CREATE INDEX idx_input_diagnostics_expiry ON input_diagnostics(occurred_at);
 CREATE INDEX idx_input_diagnostics_surface ON input_diagnostics(surface_id, occurred_at);
 `,
   },
+  {
+    name: "0012-bot-screen-contract",
+    sql: `
+UPDATE turns
+SET status = 'failed',
+    finished_at = COALESCE(finished_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    outcome_reason = 'obsolete Computer control state removed'
+WHERE status IN ('waiting_for_input', 'waiting_for_computer');
+DROP TABLE IF EXISTS computer_leases;
+DROP TABLE IF EXISTS legacy_unscoped_artifacts;
+`,
+  },
 ];
-
 export function openDb(cfg: Config): Database {
   const db = new Database(cfg.dbPath, { create: true });
   db.exec("PRAGMA journal_mode = WAL");
@@ -596,10 +567,8 @@ export function openDb(cfg: Config): Database {
   }
   return db;
 }
-
-/** In-memory authority never survives a daemon restart; supervised Screen state is reconciled by BotScreenManager. */
+/** Active turns cannot survive a daemon restart; supervised Bot Screens are reconciled separately. */
 export function recoverOnStartup(db: Database): void {
-  db.exec("DELETE FROM computer_leases");
   const now = new Date().toISOString();
   db.query(`UPDATE turns SET status='failed', finished_at=?, outcome_reason='daemon restart' WHERE status NOT IN ('completed','cancelled','failed')`).run(now);
   db.query(`UPDATE bot_deletions SET state='failed', failure_json=?, updated_at=? WHERE state='cleaning'`)

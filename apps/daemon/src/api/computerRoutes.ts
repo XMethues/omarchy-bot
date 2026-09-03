@@ -8,7 +8,7 @@ function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), { status, headers: JSON_HEADERS });
 }
 
-/** Maps lifecycle first, then one owning Bot's arbitration state. */
+/** Maps one Bot Screen lifecycle and control state to public vocabulary. */
 export function computerView(state: ComputerBrokerState, lifecycle: BotScreenLifecycle): ComputerViewDto {
   const identity = { botId: state.botId, surfaceId: state.surfaceId, takeover: state.takeover };
   const preview = state.lastImageAt === undefined ? {} : { previewAt: state.lastImageAt };
@@ -18,17 +18,11 @@ export function computerView(state: ComputerBrokerState, lifecycle: BotScreenLif
   if (lifecycle.state === "failed") {
     return { ...identity, state: "unavailable", activity: "Screen unavailable.", ...preview };
   }
-  if (state.emergencyStopped) {
-    return { ...identity, state: "emergency-stopped", activity: "Computer control is stopped.", ...preview };
+  if (state.screenUse === "human") {
+    return { ...identity, state: "user-control", activity: "You have control.", ...preview };
   }
-  if (state.lease?.holder === "human") {
-    return { ...identity, state: "user-control", activity: "You are using the computer.", ...preview };
-  }
-  if (state.lease !== null) {
-    return { ...identity, state: "bot-using", activity: "This bot is using the computer.", ...preview };
-  }
-  if (state.queuedTurnIds.length > 0) {
-    return { ...identity, state: "waiting", activity: "Waiting for computer.", ...preview };
+  if (state.screenUse === "bot") {
+    return { ...identity, state: "bot-using", activity: "Bot using screen.", ...preview };
   }
   return { ...identity, state: "ready", activity: "Screen ready.", ...preview };
 }
@@ -44,8 +38,6 @@ export async function handleComputerRequest(
     "/api/computer/state",
     "/api/computer/take-control",
     "/api/computer/return-to-bot",
-    "/api/computer/emergency-stop",
-    "/api/computer/resume",
     "/api/computer/snapshot",
   ].includes(url.pathname);
   if (!knownPath) return undefined;
@@ -73,26 +65,12 @@ export async function handleComputerRequest(
       if (error instanceof Error && error.message === "Takeover is not active") {
         return json({ error: "Takeover is not active." }, 409);
       }
-      return json({ error: "The computer could not be observed. You still have control." }, 502);
-    }
-  }
-  if (url.pathname === "/api/computer/emergency-stop" && req.method === "POST") {
-    if (!await screens.ensureReady(owner)) return json(currentView(), 503);
-    computer.emergencyStop(owner);
-    return json(currentView());
-  }
-  if (url.pathname === "/api/computer/resume" && req.method === "POST") {
-    if (!await screens.ensureReady(owner)) return json(currentView(), 503);
-    try {
-      await computer.resumeAfterEmergencyStop(owner);
-      return json(currentView());
-    } catch {
-      return json({ error: "The computer could not be observed. Computer control remains stopped." }, 502);
+      return json({ error: "The Bot Screen could not be observed. You still have control." }, 502);
     }
   }
   if (url.pathname === "/api/computer/snapshot" && req.method === "GET") {
     const snapshot = await computer.snapshot(owner);
-    if (snapshot === undefined) return json({ error: "Computer preview is unavailable." }, 503);
+    if (snapshot === undefined) return json({ error: "Computer Preview is unavailable." }, 503);
     return new Response(snapshot.bytes as unknown as BodyInit, {
       headers: { "content-type": snapshot.mediaType, "cache-control": "no-store" },
     });

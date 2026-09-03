@@ -22,7 +22,6 @@ import { HistoryDialog } from "../components/HistoryDialog.tsx";
 import { ProfileSheet } from "../components/ProfileSheet.tsx";
 import { SettingsDialog } from "../components/SettingsDialog.tsx";
 import { ComputerSheet } from "../components/ComputerSheet.tsx";
-import { EmergencyComputerControl } from "../components/EmergencyComputerControl.tsx";
 import { useVoiceAutoSendSetting } from "../components/VoiceSettingsControl.tsx";
 import { TranscriptAttention } from "../components/TranscriptAttention.tsx";
 
@@ -140,19 +139,16 @@ function HomeScreen(): JSX.Element {
   });
 
   const computerAction = useMutation({
-    mutationFn: (action: "take" | "return" | "stop" | "resume") => {
+    mutationFn: (action: "take" | "return") => {
       if (bot === undefined) throw new Error("No Bot is selected");
       const owner = { botId: bot.id, surfaceId: bot.surfaceId };
-      if (action === "take") return api.takeControl(owner);
-      if (action === "return") return api.returnToBot(owner);
-      if (action === "stop") return api.emergencyStop(owner);
-      return api.resumeComputer(owner);
+      return action === "take" ? api.takeControl(owner) : api.returnToBot(owner);
     },
     onSuccess: () => {
       setComputerError(undefined);
       invalidate("computer");
     },
-    onError: (error) => setComputerError(apiErrorMessage(error, "Computer control could not be updated.")),
+    onError: (error) => setComputerError(apiErrorMessage(error, "Bot Screen control could not be updated.")),
   });
 
   const threads = useQuery({
@@ -406,18 +402,6 @@ function HomeScreen(): JSX.Element {
         setNotificationPermission(typeof Notification === "undefined" ? "unsupported" : Notification.permission);
         setSettingsOpen(true);
       }}
-      {...(bot !== undefined
-        ? {
-            safetyControl: (
-              <EmergencyComputerControl
-                view={computer.data ?? { botId: bot.id, surfaceId: bot.surfaceId, state: "unavailable", takeover: "unavailable" }}
-                busy={computerAction.isPending}
-                onEmergencyStop={() => computerAction.mutate("stop")}
-                onResume={() => computerAction.mutate("resume")}
-              />
-            ),
-          }
-        : {})}
     />
   );
 
@@ -470,8 +454,8 @@ function HomeScreen(): JSX.Element {
                     takeover: "unavailable",
                     activity:
                       computer.error !== null
-                        ? apiErrorMessage(computer.error, "Computer status could not be loaded.")
-                        : "Computer state is loading.",
+                        ? apiErrorMessage(computer.error, "Bot Screen status could not be loaded.")
+                        : "Bot Screen state is loading.",
                   }
               }
               projectionUrl={api.computerProjectionUrl({ botId: bot.id, surfaceId: bot.surfaceId })}

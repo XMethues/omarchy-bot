@@ -582,27 +582,5 @@ export class TurnService {
     this.#setTurnStatus(turnId, "cancelled", reason);
     this.#emitSystemNote(t.thread_id, `turn cancelled (${reason})`);
   }
-
-  /** Lease contention: the turn parks in waiting_for_computer until granted. */
-  parkForComputer(turnId: string): void {
-    this.#setTurnStatus(turnId, "waiting_for_computer");
-  }
-  resumeAfterComputer(turnId: string | undefined): void {
-    if (turnId === undefined) return;
-    const turn = this.threads.turnRow(turnId);
-    if (turn?.status === "waiting_for_computer") this.#setTurnStatus(turnId, "working");
-  }
-
-
-  /** Legacy Emergency Control status handoff; Takeover stays inside its pending tool RPC. */
-  parkForHuman(turnId: string | undefined): void {
-    if (turnId !== undefined) this.#setTurnStatus(turnId, "waiting_for_input");
-  }
-
-  resumeAfterHuman(turnId: string | undefined): void {
-    if (turnId === undefined) return;
-    const t = this.threads.turnRow(turnId);
-    if (t && t.status === "waiting_for_input") this.#setTurnStatus(turnId, "working");
-  }
 }
 

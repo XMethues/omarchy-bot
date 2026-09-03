@@ -219,8 +219,6 @@ export class BotDeletionService {
         this.db.query(`DELETE FROM turns WHERE bot_id = ?`).run(botId);
         this.db.query(`DELETE FROM artifacts WHERE surface_id = ?`).run(bot.surface_id);
         this.db.query(`DELETE FROM input_diagnostics WHERE surface_id = ?`).run(bot.surface_id);
-        this.db.query(`DELETE FROM computer_leases WHERE surface_id = ?`).run(bot.surface_id);
-        this.db.query(`DELETE FROM computer_leases WHERE holder_bot_id = ?`).run(botId);
         this.db.query(`DELETE FROM threads WHERE bot_id = ?`).run(botId);
         this.db.query(`DELETE FROM bot_state WHERE bot_id = ?`).run(botId);
         this.db.query(`DELETE FROM bot_native_session_deletions WHERE bot_id = ?`).run(botId);

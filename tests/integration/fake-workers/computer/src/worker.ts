@@ -1,7 +1,6 @@
 /**
- * Fake computer worker: records every act and echoes the lease it was given.
- * Refuses input actions when the daemon did not attach a lease token
- * (defense in depth — the broker already gates this).
+ * Fake Bot Screen worker: records every scoped action and refuses input
+ * without authoritative Bot/Surface context.
  */
 import { readJsonl } from "../../../../../packages/agent-contract/src/framing.ts";
 import { isInputAction, isSurfaceId } from "../../../../../packages/domain/src/index.ts";
@@ -17,7 +16,7 @@ const expectedRuntimeGeneration = Number(process.env.OMARCHY_BOT_RUNTIME_GENERAT
 const heartbeat = setInterval(() => write({ type: "heartbeat" }), 10_000);
 heartbeat.unref?.();
 
-const log: { action: string; hadLease: boolean }[] = [];
+const log: { action: string; hadAuthority: boolean }[] = [];
 const ONE_PIXEL_PNG =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 
@@ -29,12 +28,8 @@ readJsonl(Bun.stdin.stream(), (raw) => {
     surfaceId?: string;
     runtimeGeneration?: number;
     action?: { name: string; args?: Record<string, unknown> };
-    lease?: { surfaceId?: string; token: string };
+    inputAuthority?: { surfaceId?: string; botId?: string; turnId?: string };
   };
-  if (msg.type === "probe") {
-    write({ requestId: msg.requestId!, ok: true, payload: { ok: true, backend: "fake" } });
-    return;
-  }
   if (msg.type === "act") {
     if (!isSurfaceId(msg.surfaceId ?? "")) {
       write({ requestId: msg.requestId!, ok: false, error: "fake worker requires a valid surfaceId" });
@@ -48,19 +43,19 @@ readJsonl(Bun.stdin.stream(), (raw) => {
       write({ requestId: msg.requestId!, ok: false, error: "fake worker rejects stale runtime generation" });
       return;
     }
-    if (msg.lease !== undefined && msg.lease.surfaceId !== msg.surfaceId) {
-      write({ requestId: msg.requestId!, ok: false, error: "fake worker rejects mismatched lease Surface" });
+    if (msg.inputAuthority !== undefined && msg.inputAuthority.surfaceId !== msg.surfaceId) {
+      write({ requestId: msg.requestId!, ok: false, error: "fake worker rejects mismatched input authority Surface" });
       return;
     }
     const action = msg.action!;
     if (action.args?.crash === true) process.exit(17);
-    const hadLease = msg.lease !== undefined;
+    const hadAuthority = msg.inputAuthority !== undefined;
     const actionName = action.name as ComputerActionName;
-    if (isInputAction(actionName) && !hadLease) {
-      write({ requestId: msg.requestId!, ok: false, error: "fake worker refuses input without lease token" });
+    if (isInputAction(actionName) && !hadAuthority) {
+      write({ requestId: msg.requestId!, ok: false, error: "fake worker refuses input without Bot Screen authority" });
       return;
     }
-    log.push({ action: actionName, hadLease });
+    log.push({ action: actionName, hadAuthority });
     write({
       requestId: msg.requestId!,
       ok: true,

@@ -184,7 +184,7 @@ describe("Bot-bound Pi computer tool", () => {
     expect(adapter.actions.filter((record) => record.surfaceId === firstSurface)).toHaveLength(2);
   });
 
-  test("cancelling a queued tool call prevents its input from dispatching", async () => {
+  test("cancelling a pending serialized tool call prevents its input from dispatching", async () => {
     const adapter = new AgentToolRuntimeAdapter();
     h = await startDaemon(undefined, { botScreenAdapter: adapter });
     const bot = await makeBot(h, "Cancelled tool Bot");
@@ -195,7 +195,7 @@ describe("Bot-bound Pi computer tool", () => {
       const first = await sendToBot(h, bot, "computer:click:first");
       await adapter.waitForActions(1);
       const cancelled = await sendToBot(h, bot, "computer:click:cancelled");
-      await h.svc.turns.abortTurn(cancelled.turnId, "cancel queued computer tool");
+      await h.svc.turns.abortTurn(cancelled.turnId, "cancel pending computer tool");
       adapter.releaseActions();
       await Promise.all([
         waitThreadIdle(h, first.threadId),

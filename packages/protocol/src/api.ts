@@ -81,7 +81,7 @@ export const BotDto = z.object({
 });
 export type BotDto = z.infer<typeof BotDto>;
 
-export const BotActivityStatusSchema = z.enum(["idle", "working", "waiting", "needs_you", "error", "unavailable"]);
+export const BotActivityStatusSchema = z.enum(["idle", "working", "needs_you", "error", "unavailable"]);
 export type BotActivityStatusDto = z.infer<typeof BotActivityStatusSchema>;
 
 /** Sidebar-facing Bot projection: identity + live activity + preview/unread. */
@@ -99,8 +99,6 @@ export type BotViewDto = z.infer<typeof BotViewDto>;
 
 export const TurnStatusSchema = z.enum([
   "working",
-  "waiting_for_input",
-  "waiting_for_computer",
   "completed",
   "cancelled",
   "failed",
@@ -186,7 +184,7 @@ export type DictationResultDto = z.infer<typeof DictationResultDto>;
 export const ComputerViewDto = z.object({
   surfaceId: SurfaceIdDto,
   botId: z.string(),
-  state: z.enum(["starting", "ready", "bot-using", "waiting", "needs-you", "user-control", "emergency-stopped", "unavailable"]),
+  state: z.enum(["starting", "ready", "bot-using", "needs-you", "user-control", "unavailable"]),
   takeover: z.enum(["unavailable", "available", "active"]),
   activity: z.string().optional(),
   previewAt: z.string().optional(),

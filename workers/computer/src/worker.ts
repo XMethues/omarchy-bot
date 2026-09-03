@@ -1,10 +1,9 @@
 #!/usr/bin/env bun
 /**
  * Computer worker (ADR-0001): MCP client over @agent-sh/computer-use-linux
- * plus native extras (open_app/open_url/notify). Speaks the omarchy-bot
- * computer protocol (LF-JSONL over stdio, hello first). The daemon is the
- * lease authority; this worker refuses input actions with no lease token
- * purely as defense in depth.
+ * plus native extras (open_app/open_url/notify). Speaks the Bot Screen worker
+ * protocol (LF-JSONL over stdio, hello first) and rejects input without
+ * authoritative Bot/Surface context.
  */
 import { existsSync } from "node:fs";
 import {
@@ -15,7 +14,6 @@ import {
   writeJsonl,
   type ComputerActPayload,
   type ComputerCommand,
-  type ComputerProbePayload,
   type ComputerResult,
 } from "@omarchy-bot/agent-contract";
 import { isInputAction, isSurfaceId } from "@omarchy-bot/domain";
@@ -92,7 +90,7 @@ async function runNative(command: string[]): Promise<string> {
   return out.trim();
 }
 
-async function performAction(action: { name: string; args: Record<string, unknown> }, leaseToken?: string): Promise<ComputerActPayload> {
+async function performAction(action: { name: string; args: Record<string, unknown> }): Promise<ComputerActPayload> {
   const { name, args } = action;
 
   // Native extras handled without MCP (ADR-0001).
@@ -119,9 +117,6 @@ async function performAction(action: { name: string; args: Record<string, unknow
     return { done: true, text: `notified: ${title}` };
   }
 
-  if (isInputAction(name as never) && !leaseToken) {
-    throw new Error("input action refused: no lease token provided");
-  }
 
   const mcp = await getClient();
   let result: McpCallResult;
@@ -172,37 +167,6 @@ async function performAction(action: { name: string; args: Record<string, unknow
 
 async function handle(cmd: ComputerCommand): Promise<ComputerResult> {
   switch (cmd.type) {
-    case "probe": {
-      const bin = resolveBinary();
-      if (!bin) {
-        return {
-          requestId: cmd.requestId,
-          ok: true,
-          payload: {
-            agentId: AGENT_ID,
-            installed: false,
-            agentVersion: "unknown",
-            sdkOk: false,
-            reason: "computer-use-linux binary not found",
-          } satisfies ComputerProbePayload,
-        };
-      }
-      const probeClient = new McpClient([bin, "mcp"]);
-      try {
-        await probeClient.initialize();
-        await probeClient.listTools();
-        const payload: ComputerProbePayload = { agentId: AGENT_ID, installed: true, agentVersion: "0.5.0", sdkOk: true };
-        return { requestId: cmd.requestId, ok: true, payload };
-      } catch (err) {
-        return {
-          requestId: cmd.requestId,
-          ok: true,
-          payload: { agentId: AGENT_ID, installed: true, agentVersion: "unknown", sdkOk: false, reason: String(err).slice(0, 200) },
-        };
-      } finally {
-        await probeClient.close();
-      }
-    }
     case "act": {
       if (!isSurfaceId(cmd.surfaceId)) {
         return { requestId: cmd.requestId, ok: false, error: "valid surfaceId is required" };
@@ -213,11 +177,21 @@ async function handle(cmd: ComputerCommand): Promise<ComputerResult> {
       if (!Number.isInteger(cmd.runtimeGeneration) || cmd.runtimeGeneration !== EXPECTED_RUNTIME_GENERATION) {
         return { requestId: cmd.requestId, ok: false, error: "runtime generation does not match worker context" };
       }
-      if (cmd.lease !== undefined && cmd.lease.surfaceId !== cmd.surfaceId) {
-        return { requestId: cmd.requestId, ok: false, error: "lease Surface does not match command Surface" };
+      if (cmd.inputAuthority !== undefined && cmd.inputAuthority.surfaceId !== cmd.surfaceId) {
+        return { requestId: cmd.requestId, ok: false, error: "input authority Surface does not match command Surface" };
+      }
+      if (
+        isInputAction(cmd.action.name)
+        && (
+          cmd.inputAuthority === undefined
+          || cmd.inputAuthority.botId.length === 0
+          || cmd.inputAuthority.turnId.length === 0
+        )
+      ) {
+        return { requestId: cmd.requestId, ok: false, error: "input action requires explicit Bot Screen authority" };
       }
       try {
-        const payload = await performAction(cmd.action, cmd.lease?.token);
+        const payload = await performAction(cmd.action);
         return { requestId: cmd.requestId, ok: true, payload };
       } catch (err) {
         return { requestId: cmd.requestId, ok: false, error: String(err).slice(0, 500) };
