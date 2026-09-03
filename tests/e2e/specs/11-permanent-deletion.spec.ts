@@ -163,7 +163,15 @@ test.describe("direct local Bot deletion", () => {
           status: "failed",
           botId,
           botName,
-          removed: { threads: 0, messages: 0, turns: 0, attachments: 0, avatar: false },
+          removed: {
+            threads: 0,
+            messages: 0,
+            turns: 0,
+            attachments: 0,
+            avatar: false,
+            computerArtifacts: 0,
+            surface: false,
+          },
           failures: [{ stage: "database", resource: botId, message: "simulated local cleanup failure" }],
         }),
       });

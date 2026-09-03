@@ -63,6 +63,24 @@ describe("integration: agents API", () => {
     expect(unavailable.length).toBeGreaterThan(0);
     for (const a of unavailable) expect(typeof a.guidance).toBe("string");
   });
+
+  test("keeps its worker environment when process configuration changes", async () => {
+    const foreignHome = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-foreign-home-"));
+    const priorHome = process.env.OMARCHY_BOT_HOME;
+    let imageCapability: boolean | undefined;
+    try {
+      process.env.OMARCHY_BOT_HOME = foreignHome;
+      await h.svc.supervisor.stopAgentWorker("pi");
+      imageCapability = (await h.svc.agents.recheck("pi")).capabilities?.attachments.image;
+    } finally {
+      if (priorHome === undefined) delete process.env.OMARCHY_BOT_HOME;
+      else process.env.OMARCHY_BOT_HOME = priorHome;
+      await h.svc.supervisor.stopAgentWorker("pi");
+      await h.svc.agents.recheck("pi");
+      rmSync(foreignHome, { recursive: true, force: true });
+    }
+    expect(imageCapability).toBeTrue();
+  }, 15_000);
 });
 
 describe("integration: bots API", () => {
@@ -253,7 +271,7 @@ describe("integration: legacy migration", () => {
     db.exec("PRAGMA journal_mode = WAL");
     db.exec(`CREATE TABLE IF NOT EXISTS schema_migrations (name TEXT PRIMARY KEY, applied_at TEXT NOT NULL)`);
     const initialMigration = MIGRATIONS.find((migration) => migration.name === "0001-initial");
-    if (initialMigration === undefined) throw new Error("0001 migration provenance is unavailable");
+    if (initialMigration?.sql === undefined) throw new Error("0001 migration provenance is unavailable");
     db.exec(initialMigration.sql);
     const now = "2026-09-01T00:00:00.000Z";
     // Legacy agent-shaped bots (id === agent id).
@@ -324,15 +342,13 @@ describe("integration: legacy migration", () => {
       const inspected = new Database(path.join(legacyHome, "db.sqlite"));
       const tables = (inspected.query(`SELECT name FROM sqlite_master WHERE type = 'table'`).all() as { name: string }[])
         .map((row) => row.name);
-      for (const retired of ["roles", "tasks", "runs", "role_sessions", "permissions", "approvals", "settings"]) {
+      for (const retired of ["roles", "tasks", "runs", "role_sessions", "permissions", "approvals", "settings", "computer_leases", "legacy_unscoped_artifacts"]) {
         expect(tables).not.toContain(retired);
       }
       const messageColumns = (inspected.query(`PRAGMA table_info(messages)`).all() as { name: string }[]).map((row) => row.name);
-      const leaseColumns = (inspected.query(`PRAGMA table_info(computer_leases)`).all() as { name: string }[]).map((row) => row.name);
       const botColumns = (inspected.query(`PRAGMA table_info(bots)`).all() as { name: string }[]).map((row) => row.name);
       const threadColumns = (inspected.query(`PRAGMA table_info(threads)`).all() as { name: string }[]).map((row) => row.name);
       expect(messageColumns).toEqual(["id", "thread_id", "seq", "author_kind", "kind", "text", "payload", "created_at"]);
-      expect(leaseColumns).toEqual(["id", "holder_is_human", "holder_bot_id", "turn_id", "token", "acquired_at", "expires_at"]);
       expect(botColumns).not.toContain("permission_policy");
       expect(threadColumns).not.toContain("role_id");
       expect(threadColumns).not.toContain("kind");
@@ -369,7 +385,9 @@ describe("integration: legacy migration", () => {
     db.exec(`CREATE TABLE schema_migrations (name TEXT PRIMARY KEY, applied_at TEXT NOT NULL)`);
     const initialMigration = MIGRATIONS.find((migration) => migration.name === "0001-initial");
     const expandedMigration = MIGRATIONS.find((migration) => migration.name === "0002-user-created-bots");
-    if (initialMigration === undefined || expandedMigration === undefined) throw new Error("legacy migration provenance is unavailable");
+    if (initialMigration?.sql === undefined || expandedMigration?.sql === undefined) {
+      throw new Error("legacy migration provenance is unavailable");
+    }
     db.exec(initialMigration.sql);
     db.query(`INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?)`).run(initialMigration.name, "2026-09-01T00:00:00.000Z");
     db.exec(expandedMigration.sql);
@@ -405,10 +423,6 @@ describe("integration: legacy migration", () => {
     ).run(now);
     db.query(`INSERT INTO settings (key, value) VALUES ('themeMode', 'dark')`).run();
     db.query(
-      `INSERT INTO computer_leases (id, holder_is_human, holder_bot_id, holder_role_id, run_id, token, acquired_at, expires_at)
-       VALUES (1, 0, 'bot_11111111111111111111111111111111', 'default', 'turn_waiting', 'legacy-token', ?, ?)`,
-    ).run(now, "2026-09-01T01:02:00.000Z");
-    db.query(
       `INSERT INTO events (event_id, schema_version, occurred_at, aggregate_type, aggregate_id, type, payload)
        VALUES ('expanded-legacy-event', 1, ?, 'approval', 'approval_existing', 'approval.requested', '{}')`,
     ).run(now);
@@ -441,49 +455,4 @@ describe("integration: legacy migration", () => {
       rmSync(legacyHome, { recursive: true, force: true });
     }
   }, 60_000);
-});
-
-describe("integration: computer surface", () => {
-  test("computer state reports idle with plain language", async () => {
-    const state = await api<{ state: string; activity?: string }>(h, "GET", "/api/computer/state");
-    expect(["idle", "bot-using", "waiting", "needs-you", "user-control", "emergency-stopped", "unavailable"]).toContain(state.state);
-  });
-
-  test("take-control then return-to-bot round-trips through the human lease", async () => {
-    const taken = await api<{ state: string }>(h, "POST", "/api/computer/take-control");
-    expect(taken.state).toBe("user-control");
-    const returned = await api<{ state: string }>(h, "POST", "/api/computer/return-to-bot");
-    expect(returned.state).toBe("idle");
-  });
-
-  test("emergency stop blocks until resumed", async () => {
-    await api(h, "POST", "/api/computer/emergency-stop");
-    const stopped = await api<{ state: string }>(h, "GET", "/api/computer/state");
-    expect(stopped.state).toBe("emergency-stopped");
-    await api(h, "POST", "/api/computer/resume");
-    const resumed = await api<{ state: string }>(h, "GET", "/api/computer/state");
-    expect(resumed.state).not.toBe("emergency-stopped");
-  });
-});
-
-describe("integration: daemon restart", () => {
-  test("a fresh daemon over the same data dir fails open turns and drops leases", async () => {
-    const { openDb } = await import("../../apps/daemon/src/persistence/db.ts");
-    const db = openDb({ dbPath: `${h.home}/db.sqlite` } as never);
-    const now = Date.now();
-    db.query(
-      `INSERT OR REPLACE INTO computer_leases (id, holder_is_human, holder_bot_id, turn_id, token, acquired_at, expires_at)
-       VALUES (1, 0, 'bot_restart', NULL, 'tok', ?, ?)`,
-    ).run(new Date(now).toISOString(), new Date(now + 60_000).toISOString());
-    db.close();
-
-    await h.stop();
-    const second = await startDaemon(h.home);
-    try {
-      const state = await api<{ state: string }>(second, "GET", "/api/computer/state");
-      expect(state.state).toBe("idle");
-    } finally {
-      await second.stop();
-    }
-  }, 30_000);
 });

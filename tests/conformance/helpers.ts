@@ -5,11 +5,13 @@
 import { mkdirSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { sanitizedEnv } from "../../apps/daemon/src/supervision/workerClient.ts";
 
 export interface ConformanceDaemon {
   baseUrl: string;
   port: number;
   home: string;
+  agentEnv: Record<string, string>;
   svc: import("../../apps/daemon/src/api/http.ts").DaemonServices;
   stop: () => Promise<void>;
 }
@@ -25,11 +27,12 @@ export async function startConformanceDaemon(): Promise<ConformanceDaemon> {
   process.env.OMARCHY_BOT_STATE = state;
   process.env.OMARCHY_BOT_PORT = "0";
   delete process.env.OMARCHY_BOT_WORKERS_DIR; // real workers
+  const agentEnv = sanitizedEnv();
 
   // Dynamic import: the harness mutates process.env above; importing main.ts fresh keeps that contract explicit.
   const { main } = await import("../../apps/daemon/src/bootstrap/main.ts");
   const { stop, port, svc } = await main();
-  return { baseUrl: `http://127.0.0.1:${port}`, port, home, svc, stop };
+  return { baseUrl: `http://127.0.0.1:${port}`, port, home, agentEnv, svc, stop };
 }
 
 /** 1×1 red PNG. */

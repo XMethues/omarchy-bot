@@ -6,8 +6,6 @@ import type { BotId, TurnId } from "./ids.ts";
  */
 export type TurnStatus =
   | "working"
-  | "waiting_for_input"
-  | "waiting_for_computer"
   | "completed"
   | "cancelled"
   | "failed";
@@ -18,9 +16,7 @@ export function isTerminalTurn(s: TurnStatus): boolean {
 }
 
 const TRANSITIONS: Record<TurnStatus, readonly TurnStatus[]> = {
-  working: ["waiting_for_input", "waiting_for_computer", "completed", "cancelled", "failed"],
-  waiting_for_input: ["working", "cancelled", "failed"],
-  waiting_for_computer: ["working", "cancelled", "failed"],
+  working: ["completed", "cancelled", "failed"],
   completed: [],
   cancelled: [],
   failed: [],

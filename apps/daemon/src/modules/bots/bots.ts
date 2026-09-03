@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { Database } from "bun:sqlite";
-import type { AgentId } from "@omarchy-bot/domain";
+import type { AgentId, SurfaceId } from "@omarchy-bot/domain";
 import {
   AVATAR_RENDERER_ID,
   AVATAR_STYLE_IDS,
@@ -16,6 +16,7 @@ import type { AgentsRegistry } from "../agents/registry.ts";
 import type { ThreadsService } from "../threads/threads.ts";
 
 interface BotRow {
+  surface_id: string;
   id: string; name: string; instructions: string; agent_id: string;
   avatar_kind: string; avatar_recipe: string; avatar_file: string | null;
   pinned: number;
@@ -69,7 +70,9 @@ export class BotsService {
   }
 
   #row(id: string): BotRow | undefined {
-    return this.db.query(`SELECT * FROM bots WHERE id = ?`).get(id) as BotRow | undefined;
+    return this.db
+      .query(`SELECT bots.*, bot_surfaces.surface_id FROM bots JOIN bot_surfaces ON bot_surfaces.bot_id = bots.id WHERE bots.id = ?`)
+      .get(id) as BotRow | undefined;
   }
 
   #stateRow(botId: string): BotStateRow | undefined {
@@ -87,12 +90,14 @@ export class BotsService {
       );
     }
     const id = `bot_${randomUUID().replace(/-/g, "")}`;
+    const surfaceId = `surf_${randomUUID().replace(/-/g, "")}` as SurfaceId;
     const now = new Date().toISOString();
     const tx = this.db.transaction(() => {
       this.db
         .query(`INSERT INTO bots (id, name, instructions, agent_id, avatar_kind, avatar_recipe, created_at, updated_at) VALUES (?, ?, ?, ?, 'generated', ?, ?, ?)`)
         .run(id, input.name, input.instructions ?? "", input.agentId, defaultAvatarRecipe(id), now, now);
       this.db.query(`INSERT INTO bot_state (bot_id) VALUES (?)`).run(id);
+      this.db.query(`INSERT INTO bot_surfaces (surface_id, bot_id, transitioned_at) VALUES (?, ?, ?)`).run(surfaceId, id, now);
     });
     tx();
     this.events.append("bot", id, "bot.created", this.getDto(id));
@@ -111,14 +116,16 @@ export class BotsService {
         ? { kind: "upload", url: `/api/bots/${r.id}/avatar` }
         : { kind: r.avatar_kind === "recipe" ? "recipe" : "generated", recipe: JSON.parse(r.avatar_recipe || defaultAvatarRecipe(r.id)) };
     return {
-      id: r.id, name: r.name, instructions: r.instructions, agentId: r.agent_id as AgentId,
+      id: r.id, surfaceId: r.surface_id as SurfaceId, name: r.name, instructions: r.instructions, agentId: r.agent_id as AgentId,
       avatar, pinned: Boolean(r.pinned),
       createdAt: r.created_at, updatedAt: r.updated_at,
     };
   }
 
   list(): BotViewDto[] {
-    const rows = this.db.query(`SELECT * FROM bots`).all() as BotRow[];
+    const rows = this.db
+      .query(`SELECT bots.*, bot_surfaces.surface_id FROM bots JOIN bot_surfaces ON bot_surfaces.bot_id = bots.id`)
+      .all() as BotRow[];
     const views = rows.map((r) => this.#toView(r));
     views.sort(
       (a, b) =>
@@ -180,6 +187,7 @@ export class BotsService {
     this.events.append("bot", id, "bot.pinned", { pinned });
     return bot;
   }
+
 
   agentId(id: string): AgentId {
     const r = this.#row(id);

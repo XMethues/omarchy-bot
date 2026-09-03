@@ -8,6 +8,7 @@
         "@axe-core/playwright": "^4.13.0",
         "@playwright/test": "1.62.1",
         "@types/bun": "latest",
+        "node-datachannel": "0.33.2",
         "typescript": "^5.7.0",
       },
     },
@@ -21,6 +22,7 @@
         "@omarchy-bot/agent-contract": "workspace:*",
         "@omarchy-bot/domain": "workspace:*",
         "@omarchy-bot/protocol": "workspace:*",
+        "node-datachannel": "0.33.2",
         "sharp": "0.35.4",
         "zod": "^3.24.0",
       },
@@ -112,6 +114,7 @@
         "@earendil-works/pi-coding-agent": "0.84.4",
         "@omarchy-bot/agent-contract": "workspace:*",
         "@omarchy-bot/domain": "workspace:*",
+        "typebox": "1.3.7",
       },
     },
   },
@@ -387,6 +390,24 @@
     "@mariozechner/clipboard-win32-x64-msvc": ["@mariozechner/clipboard-win32-x64-msvc@0.3.9", "", { "os": "win32", "cpu": "x64" }, "sha512-ihQC3EufqEY81vhXBgVBtK4prL+wc62zJsSvxrgz7K1hsdt6OObz6v9p3Rn1OG3GJksTTKMJF0u/guMISHPhSA=="],
 
     "@napi-rs/lzma-linux-x64-gnu": ["@napi-rs/lzma-linux-x64-gnu@1.5.1", "", { "os": "linux", "cpu": "x64" }, "sha512-oTXEIha4SsuXdTA4Iyskj0kpdx2yVXdhd75c2v3xGrHFfVMsbhTPZU/nMPL4sWKo4pBHm3aucLaqGlF696dTyQ=="],
+
+    "@node-datachannel/android-arm64": ["@node-datachannel/android-arm64@0.33.2", "", { "os": "android", "cpu": "arm64" }, "sha512-I71a0jICUNYgh4ZI5AcINEMuRtQSVyrpp4FV3kJZMcx31xS0vKKtf06tpsUAtW5uS+uRXbZR+vlMEqS1h710wQ=="],
+
+    "@node-datachannel/darwin-arm64": ["@node-datachannel/darwin-arm64@0.33.2", "", { "os": "darwin", "cpu": "arm64" }, "sha512-EwBGiaMh3MX6zjYoZHuK02Q6hmQQIvR39335Kb/ZnP3fXZU0/VWx6ksHLM6K0XFFYRfP+yJeVgU79g++xoeQpw=="],
+
+    "@node-datachannel/darwin-x64": ["@node-datachannel/darwin-x64@0.33.2", "", { "os": "darwin", "cpu": "x64" }, "sha512-a1nvL6MiskSjV3TWTNXdVpI/2kHNIOP2AbuBZjR5eC7VSrH/6hCFfHIBW4SFKXGFm8LOGliY9Df10UnJUutjwA=="],
+
+    "@node-datachannel/linux-arm64-gnu": ["@node-datachannel/linux-arm64-gnu@0.33.2", "", { "os": "linux", "cpu": "arm64" }, "sha512-YWAu3EiMl2HRi/fwWlfFTW30wFTkRVYJWRHQcI1uDSeZYG/tfyBqBy6CRy9Sgrb0xjOYZ6XhLDj8cdX0foPlpg=="],
+
+    "@node-datachannel/linux-arm64-musl": ["@node-datachannel/linux-arm64-musl@0.33.2", "", { "os": "linux", "cpu": "arm64" }, "sha512-16o3Ny5hbxTTjDmhsZog/t7p2tRP6s/Oa/V9kKzZfiGlCqvxxCE4ACOWw/MWHOhN0xI9/63IIRfrrnQnPxjK8g=="],
+
+    "@node-datachannel/linux-x64-gnu": ["@node-datachannel/linux-x64-gnu@0.33.2", "", { "os": "linux", "cpu": "x64" }, "sha512-grLRAbZgSIX8nmObciblyCmnevDCst0snhV+z1fvDmUlzXIVXeDmv6lEzAaWs3KRleagqwSsFg5d1td1bwMT9w=="],
+
+    "@node-datachannel/linux-x64-musl": ["@node-datachannel/linux-x64-musl@0.33.2", "", { "os": "linux", "cpu": "x64" }, "sha512-PlpgvYjo+gmBhIkRFaZWIhCF335FMTJmCpl+FVa4XliEgyOqD+cvjQPWcbnlrA2Jd+QnLiZt+NxT7nv4QXpoiQ=="],
+
+    "@node-datachannel/win32-arm64-msvc": ["@node-datachannel/win32-arm64-msvc@0.33.2", "", { "os": "win32", "cpu": "arm64" }, "sha512-8NpHkm7R8EY0jHGHOXdK7K0wjWY34PJ+PJY++2VDHTAtXGazNm28zcnVE/4IU0N26YGdCDSSWat3OO3W6nwoRw=="],
+
+    "@node-datachannel/win32-x64-msvc": ["@node-datachannel/win32-x64-msvc@0.33.2", "", { "os": "win32", "cpu": "x64" }, "sha512-aLk0O/M1JNVpzxx4RVBXMJTMlpswE04Cz5baayKwuEN+qk9hO6DSJgYMR6Wq9a5zGYAmvLFlOg+LsePyXkWliA=="],
 
     "@omarchy-bot/agent-contract": ["@omarchy-bot/agent-contract@workspace:packages/agent-contract"],
 
@@ -711,6 +732,8 @@
     "ms": ["ms@2.1.3", "", {}, "sha512-6FlzubTLZG3J2a/NVCAleEhjzq5oxgHyaCU9yYXvcLsvoVaHJq/s5xXI6/XXP6tz7R9xAOtHnSO/tXtF3WRTlA=="],
 
     "nanoid": ["nanoid@3.3.18", "", { "bin": { "nanoid": "bin/nanoid.cjs" } }, "sha512-DTg4MJbGMWkfi6VZFdNt2/caMbQy4Ou+Op/hJQvGEWcnVfoA1QA+xzRKAzw9jD6+GVOOeYr/mIcuDSdug6F6+w=="],
+
+    "node-datachannel": ["node-datachannel@0.33.2", "", { "dependencies": { "detect-libc": "^2.0.4" }, "optionalDependencies": { "@node-datachannel/android-arm64": "0.33.2", "@node-datachannel/darwin-arm64": "0.33.2", "@node-datachannel/darwin-x64": "0.33.2", "@node-datachannel/linux-arm64-gnu": "0.33.2", "@node-datachannel/linux-arm64-musl": "0.33.2", "@node-datachannel/linux-x64-gnu": "0.33.2", "@node-datachannel/linux-x64-musl": "0.33.2", "@node-datachannel/win32-arm64-msvc": "0.33.2", "@node-datachannel/win32-x64-msvc": "0.33.2" } }, "sha512-WRL+uqYG2eSvpnKuCOKueaMiyKlDjkJFd6pFH/f2SbD/EiXLMXwmYNU5z+TDQPrAv+BMgkuC40UESeRRL+4zBw=="],
 
     "node-domexception": ["node-domexception@1.0.0", "", {}, "sha512-/jKZoMpw0F8GRwl4/eLROPA3cfcXtLApP0QzLmUT/HuPCZWyB7IY9ZrMeKw2O/nFIqPQB3PVM9aYm0F312AXDQ=="],
 

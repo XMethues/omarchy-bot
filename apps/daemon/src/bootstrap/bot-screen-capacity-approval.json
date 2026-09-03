@@ -1,0 +1,64 @@
+{
+  "schemaVersion": 2,
+  "measuredAt": "2026-09-03T23:51:08.577Z",
+  "machine": {
+    "hostname": "omarchy",
+    "platform": "linux 7.1.9-arch1-2 x64",
+    "cpu": "AMD Ryzen 9 7900X 12-Core Processor",
+    "gpu": "NVIDIA GeForce RTX 2080 Ti",
+    "hyprland": "0.56.2",
+    "aquamarine": "0.14.0"
+  },
+  "profile": "1080p",
+  "resolution": {
+    "width": 1920,
+    "height": 1080
+  },
+  "defaultCapacity": 4,
+  "captureFrameRate": 16,
+  "targetFps": 15,
+  "durationMs": 15000,
+  "lifecycleProof": {
+    "strategy": "permanent-delete-and-fresh-provision",
+    "cyclesPerRow": 2
+  },
+  "finalClient": {
+    "built": true,
+    "browser": "Brave Browser 152.1.94.119",
+    "mode": "headless",
+    "transport": "WebRTC data channels",
+    "lanInterface": "eno1",
+    "lanEndpoint": "https://192.168.10.25:43245",
+    "measurement": "daemon encoded/sent counters correlated by frame sequence with final-client receive, decode, rendering opportunity, and paint"
+  },
+  "observedSourceFps": {
+    "minimum": 15.69,
+    "maximum": 15.76
+  },
+  "observedEncodedFps": {
+    "minimum": 15.69,
+    "maximum": 15.76
+  },
+  "observedDisplayedFps": {
+    "minimum": 15.69,
+    "maximum": 15.76
+  },
+  "observedDrops": {
+    "transportSequenceGaps": 0,
+    "decodeDrops": 0,
+    "paintDrops": 0,
+    "preCaptureBackpressureSkips": 0,
+    "encodedBackpressureDrops": 0,
+    "unexplainedDrops": 0
+  },
+  "observedInputToVisibleP50Ms": 155,
+  "observedInputToVisibleP95Ms": 480.4,
+  "observedCaptureToBrowserP50Ms": 34,
+  "observedCaptureToBrowserP95Ms": 43,
+  "staticPreviewDisplayedFps": {
+    "minimum": 0.98,
+    "maximum": 0.98
+  },
+  "inputToVisibleP50LimitMs": 200,
+  "reproducibleCommand": "OMARCHY_BOT_REAL_SCREEN_LOAD=1 OMARCHY_BOT_LOAD_MATRIX=4 OMARCHY_BOT_LOAD_FALLBACK=0 OMARCHY_BOT_LOAD_LAN_INTERFACE=eno1 bun test tests/integration/bot-screen-capacity.load.test.ts"
+}

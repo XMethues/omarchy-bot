@@ -1,4 +1,4 @@
-import type { JSX, ReactNode } from "react";
+import type { JSX } from "react";
 import { useEffect, useRef } from "react";
 import { useAppShellMobile } from "@astryxdesign/core/AppShell";
 import {
@@ -27,7 +27,6 @@ export interface SidebarProps {
   onDeleteBot: (bot: BotViewDto) => void;
   onCreateBot: () => void;
   onOpenSettings: () => void;
-  safetyControl?: ReactNode;
 }
 
 const activityTime = (bot: BotViewDto): string => bot.lastActivityAt ?? bot.createdAt;
@@ -58,7 +57,6 @@ export function Sidebar({
   onDeleteBot,
   onCreateBot,
   onOpenSettings,
-  safetyControl,
 }: SidebarProps): JSX.Element {
   const { closeMobileNav, isMobile } = useAppShellMobile();
   const sidebarRef = useRef<HTMLDivElement>(null);
@@ -141,19 +139,16 @@ export function Sidebar({
         aria-label="Bot navigation"
         {...(isMobile ? { "data-testid": "mobile-sidebar" } : {})}
         footer={
-          <VStack gap={1}>
-            {safetyControl}
-            <SideNavItem
-              label="Settings"
-              aria-label="Settings"
-              icon={<Icon icon="wrench" size="sm" />}
-              onClick={() => {
-                if (isMobile) closeMobileNav();
-                onOpenSettings();
-              }}
-              data-testid="sidebar-settings"
-            />
-          </VStack>
+          <SideNavItem
+            label="Settings"
+            aria-label="Settings"
+            icon={<Icon icon="wrench" size="sm" />}
+            onClick={() => {
+              if (isMobile) closeMobileNav();
+              onOpenSettings();
+            }}
+            data-testid="settings-trigger"
+          />
         }
         topContent={
           <HStack justify="end">

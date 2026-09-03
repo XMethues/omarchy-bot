@@ -124,13 +124,6 @@ describe("binary Bot Activity", () => {
     const cancelled = await sendToBot(h, botId, "hang");
     expect((await api<BotViewDto>(h, "GET", `/api/bots/${botId}`)).status).toBe("active");
 
-    h.svc.turns.parkForHuman(cancelled.turnId);
-    expect((await api<BotViewDto>(h, "GET", `/api/bots/${botId}`)).status).toBe("active");
-    h.svc.turns.resumeAfterHuman(cancelled.turnId);
-    h.svc.turns.parkForComputer(cancelled.turnId);
-    expect((await api<BotViewDto>(h, "GET", `/api/bots/${botId}`)).status).toBe("active");
-    h.svc.turns.resumeAfterComputer(cancelled.turnId);
-
     await h.svc.turns.abortTurn(cancelled.turnId, "integration cancellation");
     await h.svc.turns.waitForTerminal(cancelled.turnId);
     expect((await api<BotViewDto>(h, "GET", `/api/bots/${botId}`)).status).toBe("inactive");

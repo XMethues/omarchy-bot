@@ -1,15 +1,26 @@
 import { randomUUID } from "node:crypto";
-import { HEARTBEAT_MS, readJsonl } from "@omarchy-bot/agent-contract";
+import {
+  HEARTBEAT_MS,
+  readJsonl,
+  type AgentComputerToolOutput,
+  type AgentComputerToolRequest,
+} from "@omarchy-bot/agent-contract";
 import { stderr } from "@omarchy-bot/agent-contract";
 
 export interface WorkerClientOptions {
   name: string;
   script: string;
   args?: string[];
+  /** Optional production application-unit wrapper (for example systemd-run --scope). */
+  commandPrefix?: string[];
   /** Real desktop env (computer worker) or sanitized env (agent workers). */
   env?: Record<string, string>;
   onEvent: (event: any) => void;
   onExit?: (code: number | null) => void;
+  onRequest?: (
+    request: AgentComputerToolRequest,
+    signal: AbortSignal,
+  ) => Promise<AgentComputerToolOutput>;
 }
 
 interface Pending {
@@ -25,6 +36,7 @@ interface Pending {
 export class WorkerClient {
   #proc: Bun.Subprocess<"pipe", "pipe", "pipe"> | undefined = undefined;
   #pending = new Map<string, Pending>();
+  #incoming = new Map<string, AbortController>();
   #hello: { v: number; worker: string; pid: number } | undefined;
   #lastMessageAt = 0;
   #stopping = false;
@@ -42,7 +54,7 @@ export class WorkerClient {
   async start(timeoutMs = 15_000): Promise<void> {
     this.#stopping = false;
     const proc = Bun.spawn({
-      cmd: [process.execPath, this.opts.script, ...(this.opts.args ?? [])],
+      cmd: [...(this.opts.commandPrefix ?? []), process.execPath, this.opts.script, ...(this.opts.args ?? [])],
       stdin: "pipe",
       stdout: "pipe",
       stderr: "pipe",
@@ -54,6 +66,8 @@ export class WorkerClient {
           p.reject(new Error(`${this.opts.name} worker exited (${exitCode})`));
         }
         this.#pending.clear();
+        for (const controller of this.#incoming.values()) controller.abort("worker exited");
+        this.#incoming.clear();
         this.#proc = undefined;
         this.#hello = undefined;
         if (!this.#stopping) this.opts.onExit?.(exitCode);
@@ -115,6 +129,14 @@ export class WorkerClient {
       return;
     }
     if (msg?.type === "heartbeat") return;
+    if (msg?.type === "computer.request") {
+      void this.#handleComputerRequest(msg as AgentComputerToolRequest);
+      return;
+    }
+    if (msg?.type === "computer.cancel" && typeof msg.requestId === "string") {
+      this.#incoming.get(msg.requestId)?.abort("tool call cancelled");
+      return;
+    }
     if (msg?.type === "event") {
       this.opts.onEvent(msg.event);
       return;
@@ -125,6 +147,30 @@ export class WorkerClient {
       clearTimeout(p.timer);
       if (msg.ok) p.resolve(msg.payload);
       else p.reject(new Error(String(msg.error)));
+    }
+  }
+
+  async #handleComputerRequest(request: AgentComputerToolRequest): Promise<void> {
+    const controller = new AbortController();
+    this.#incoming.set(request.requestId, controller);
+    try {
+      if (this.opts.onRequest === undefined) {
+        throw new Error(`${this.opts.name} cannot route computer tools`);
+      }
+      const payload = await this.opts.onRequest(request, controller.signal);
+      if (controller.signal.aborted) throw new Error("computer tool call cancelled");
+      if (this.alive) {
+        this.write({ type: "computer.result", requestId: request.requestId, ok: true, payload });
+      }
+    } catch (error) {
+      if (this.alive) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.write({ type: "computer.result", requestId: request.requestId, ok: false, error: message });
+      }
+    } finally {
+      if (this.#incoming.get(request.requestId) === controller) {
+        this.#incoming.delete(request.requestId);
+      }
     }
   }
 

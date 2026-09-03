@@ -8,19 +8,21 @@
  *   2. streamed fixed text           7. close → resume → history
  *   3. read-only tool lifecycle      8. worker exit leaves no orphans
  *   4. native write tool lifecycle    9. capability inventory / event mapping
- *   5. mid-turn cancel + steer      10. Computer fixture via the real broker
+ *   5. mid-turn cancel + steer      10. Real Pi computer tool via owning Broker
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, writeFileSync, existsSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { WorkerClient, sanitizedEnv } from "../../apps/daemon/src/supervision/workerClient.ts";
+import { WorkerClient } from "../../apps/daemon/src/supervision/workerClient.ts";
 import { isAgentCapabilityInventory } from "../../packages/agent-contract/src/agent-protocol.ts";
 import { RED_PIXEL_PNG, startConformanceDaemon, type ConformanceDaemon } from "./helpers.ts";
 import { normalizeSessionEvent } from "../../workers/pi/src/normalize.ts";
+import type { SurfaceId } from "../../packages/domain/src/index.ts";
 
 let daemon: ConformanceDaemon;
 let pi: WorkerClient;
+let conformanceBot!: { id: string; surfaceId: SurfaceId };
 const events: { type: string; event: Record<string, unknown> }[] = [];
 const seenEventTypes = new Set<string>();
 const tempDirs: string[] = [];
@@ -30,7 +32,7 @@ beforeAll(async () => {
   pi = new WorkerClient({
     name: "agent:pi",
     script: path.resolve(import.meta.dir, "../../workers/pi/src/worker.ts"),
-    env: sanitizedEnv(),
+    env: daemon.agentEnv,
     onEvent: (event: { type: string }) => {
       events.push({ type: event.type, event: event as unknown as Record<string, unknown> });
       seenEventTypes.add(event.type);
@@ -54,7 +56,20 @@ afterAll(async () => {
 /** Drive one turn and collect streamed output. */
 async function send(sessionId: string, text: string, attachments?: { id: string; name: string; path: string; mediaType: string }[]): Promise<number> {
   const before = events.length;
-  await pi.request({ type: "message.send", requestId: crypto.randomUUID(), sessionId, turnId: crypto.randomUUID(), message: { text, ...(attachments ? { attachments } : {}) } }, 15_000);
+  const turnId = crypto.randomUUID();
+  await pi.request({
+    type: "message.send",
+    requestId: crypto.randomUUID(),
+    sessionId,
+    turnId,
+    message: { text, ...(attachments ? { attachments } : {}) },
+    computer: {
+      botId: conformanceBot.id,
+      turnId,
+      workerSessionId: sessionId,
+      surfaceId: conformanceBot.surfaceId,
+    },
+  }, 15_000);
   return before;
 }
 
@@ -98,9 +113,27 @@ describe("pi conformance (10 steps, real model)", () => {
     "all ten steps pass",
     async () => {
       // ---- Step 1: temp cwd + session ----
+      const version = await pi.request({ type: "probe", requestId: crypto.randomUUID() }, 30_000);
+      const agentVersion = version?.agentVersion;
+      if (typeof agentVersion !== "string" || agentVersion.length === 0) {
+        throw new Error("Pi probe returned no agent version");
+      }
+      const testConfDir = path.join(daemon.home, "conformance");
+      mkdirSync(testConfDir, { recursive: true });
+      writeFileSync(
+        path.join(testConfDir, `pi-${agentVersion}.json`),
+        JSON.stringify({ ok: true, image: "provider-unsupported" }),
+      );
+      expect((await daemon.svc.agents.recheck("pi")).status).toBe("ready");
+      conformanceBot = daemon.svc.bots.create({
+        name: "Pi Conformance",
+        agentId: "pi",
+        instructions: "When explicitly asked for computer conformance, follow the requested computer tool calls exactly.",
+      });
+
       const cwd = mkdtempSync(path.join(os.tmpdir(), "pi-conform-"));
       tempDirs.push(cwd);
-      const opened = (await pi.request({ type: "session.open", requestId: crypto.randomUUID(), botId: "bot_conformance", threadId: "thread_conformance", options: { cwd, instructions: "" } }, 30_000)) as {
+      const opened = (await pi.request({ type: "session.open", requestId: crypto.randomUUID(), botId: conformanceBot.id, threadId: "thread_conformance", options: { cwd, instructions: "" } }, 30_000)) as {
         sessionId: string;
         nativeSessionId: string;
       };
@@ -144,9 +177,8 @@ describe("pi conformance (10 steps, real model)", () => {
 
       // ---- Step 5: cancel mid-turn; no late writes after cancel ----
       // Dedicated session: an aborted run must never pollute later turns.
-      const countSession = (await pi.request({ type: "session.open", requestId: crypto.randomUUID(), botId: "bot_conformance", threadId: "thread_conformance_count", options: { cwd, instructions: "" } }, 30_000)) as { sessionId: string };
-      const before = events.length;
-      await pi.request({ type: "message.send", requestId: crypto.randomUUID(), sessionId: countSession.sessionId, turnId: crypto.randomUUID(), message: { text: "Count from 1 to 400, one number per line, no commentary." } }, 15_000);
+      const countSession = (await pi.request({ type: "session.open", requestId: crypto.randomUUID(), botId: conformanceBot.id, threadId: "thread_conformance_count", options: { cwd, instructions: "" } }, 30_000)) as { sessionId: string };
+      const before = await send(countSession.sessionId, "Count from 1 to 400, one number per line, no commentary.");
       const deadline5 = Date.now() + 60_000;
       let sawDeltas = 0;
       while (Date.now() < deadline5) {
@@ -170,18 +202,14 @@ describe("pi conformance (10 steps, real model)", () => {
       const steerSession = (await pi.request({
         type: "session.open",
         requestId: crypto.randomUUID(),
-        botId: "bot_conformance",
+        botId: conformanceBot.id,
         threadId: "thread_conformance_steer",
         options: { cwd, instructions: "" },
       }, 30_000)) as { sessionId: string; nativeSessionId: string };
-      const steerBefore = events.length;
-      await pi.request({
-        type: "message.send",
-        requestId: crypto.randomUUID(),
-        sessionId: steerSession.sessionId,
-        turnId: crypto.randomUUID(),
-        message: { text: "Count from 1 to 1000, one number per line, no commentary." },
-      }, 15_000);
+      const steerBefore = await send(
+        steerSession.sessionId,
+        "Count from 1 to 1000, one number per line, no commentary.",
+      );
       await waitForEvent(
         steerBefore,
         (event) => event.type === "message.delta" && event.event.sessionId === steerSession.sessionId,
@@ -216,7 +244,7 @@ describe("pi conformance (10 steps, real model)", () => {
         const imageSession = (await pi.request({
           type: "session.open",
           requestId: crypto.randomUUID(),
-          botId: "bot_conformance",
+          botId: conformanceBot.id,
           threadId: "thread_conformance_vision",
           options: { cwd, instructions: "" },
         }, 30_000)) as { sessionId: string };
@@ -241,7 +269,7 @@ describe("pi conformance (10 steps, real model)", () => {
       const textAttachRecent = attachReply.includes("CONFORM-TEXT-42")
         ? null
         : await (async () => {
-            const ts = (await pi.request({ type: "session.open", requestId: crypto.randomUUID(), botId: "bot_conformance", threadId: "thread_conformance_text", options: { cwd, instructions: "" } }, 30_000)) as { sessionId: string };
+            const ts = (await pi.request({ type: "session.open", requestId: crypto.randomUUID(), botId: conformanceBot.id, threadId: "thread_conformance_text", options: { cwd, instructions: "" } }, 30_000)) as { sessionId: string };
             return turn(ts.sessionId, "The attachment names a secret phrase. Reply with just the secret phrase.", { attachments: [{ id: "a1", name: "secret.txt", path: textPath, mediaType: "text/plain" }] });
           })();
       if (textAttachRecent) attachReply = assistantText(textAttachRecent);
@@ -251,7 +279,7 @@ describe("pi conformance (10 steps, real model)", () => {
       // ---- Step 7: close → resume → history ----
       await pi.request({ type: "session.close", requestId: crypto.randomUUID(), sessionId: opened.sessionId }, 15_000);
       const resumed = (await pi.request(
-        { type: "session.resume", requestId: crypto.randomUUID(), botId: "bot_conformance", threadId: "thread_conformance", nativeSessionId: opened.nativeSessionId, options: { cwd, instructions: "" } },
+        { type: "session.resume", requestId: crypto.randomUUID(), botId: conformanceBot.id, threadId: "thread_conformance", nativeSessionId: opened.nativeSessionId, options: { cwd, instructions: "" } },
         30_000,
       )) as { sessionId: string };
       const history = (await pi.request({ type: "session.history", requestId: crypto.randomUUID(), sessionId: resumed.sessionId }, 30_000)) as {
@@ -271,7 +299,7 @@ describe("pi conformance (10 steps, real model)", () => {
       pi = new WorkerClient({
         name: "agent:pi",
         script: path.resolve(import.meta.dir, "../../workers/pi/src/worker.ts"),
-        env: sanitizedEnv(),
+        env: daemon.agentEnv,
         onEvent: (event: { type: string }) => {
           events.push({ type: event.type, event: event as unknown as Record<string, unknown> });
           seenEventTypes.add(event.type);
@@ -329,46 +357,59 @@ describe("pi conformance (10 steps, real model)", () => {
       }]);
       console.log(`conformance: step 9 ok — normalized event inventory mapped: ${[...seenEventTypes].sort().join(", ")}`);
 
-      // ---- Step 10: Computer fixture via the REAL broker + REAL computer worker ----
-      const broker = daemon.svc.computer;
-      const botActor = { botId: "bot_conformance" };
-      // observe without lease
-      const obs = await broker.act(botActor, undefined, { name: "observe", args: {} });
-      expect((obs.text ?? "").length).toBeGreaterThan(0);
-      // screenshot lands an artifact
-      await broker.act(botActor, undefined, { name: "screenshot", args: {} });
-      expect(daemon.svc.computer.state().lastImageAt).toBeDefined();
-      // Gate 1: bot input without lease is rejected
-      await expect(broker.act(botActor, undefined, { name: "click", args: {} })).rejects.toThrow(/no active input lease/);
-      // acquire lease as bot, harmless test input (lone shift press is a no-op)
-      const lease = await broker.acquire(botActor, undefined);
-      expect(lease.granted).toBeTrue();
-      await broker.act(botActor, undefined, { name: "key", args: { key: "shift" } });
-      // Take over: human steals the lease; bot input must now fail
-      broker.takeOver();
-      await expect(broker.act(botActor, undefined, { name: "type", args: { text: "x" } })).rejects.toThrow();
-      // I'm done: re-observe, release, bot can resume
-      await broker.imDone();
-      const reAcquire = await broker.acquire(botActor, undefined);
-      expect(reAcquire.granted).toBeTrue();
-      const obs2 = await broker.act(botActor, undefined, { name: "observe", args: {} });
-      expect((obs2.text ?? "").length).toBeGreaterThan(0);
-      broker.release(botActor, reAcquire.token!);
-      console.log("conformance: step 10 ok — observe/screenshot/lease/input/take-over/im-done/resume");
+      // ---- Step 10: REAL Pi SDK custom tool -> daemon -> owning Broker/worker ----
+      // Seed only the isolated daemon's gate so its supervised Pi worker can run
+      // this final live conformance turn. The durable user record is written only
+      // after the turn succeeds below.
+      const image = imageResult === "ok" ? "verified" : "provider-unsupported";
+      const record = JSON.stringify({ ok: true, at: new Date().toISOString(), steps: 10, image });
+      writeFileSync(path.join(testConfDir, `pi-${agentVersion}.json`), record);
+      expect((await daemon.svc.agents.recheck("pi")).status).toBe("ready");
+      const sent = await daemon.svc.turns.send(
+        conformanceBot.id,
+        null,
+        [
+          "This is a computer conformance check.",
+          "Use only the computer tool and invoke it exactly twice.",
+          "First call action \"type\" with args {\"text\":\"PI-BOT-SCREEN-VISIBLE\"}.",
+          "Then call action \"screenshot\" with empty args.",
+          "After both calls succeed, reply PI-COMPUTER-TOOL-OK.",
+        ].join(" "),
+      );
+      const terminal = await daemon.svc.turns.waitForTerminal(sent.turnId, 180_000);
+      expect(terminal.status).toBe("completed");
+      const transcript = await fetch(
+        `${daemon.baseUrl}/api/threads/${sent.threadId}/messages`,
+      ).then((response) => response.json()) as Array<{
+        kind: string;
+        text?: string;
+        payload?: {
+          name?: string;
+          state?: string;
+          input?: { action?: string };
+        };
+      }>;
+      const computerCalls = transcript.filter((message) =>
+        message.kind === "tool"
+        && message.payload?.name === "computer"
+        && message.payload.state === "complete"
+      );
+      expect(computerCalls.some((message) => message.payload?.input?.action === "type")).toBeTrue();
+      expect(computerCalls.some((message) => message.payload?.input?.action === "screenshot")).toBeTrue();
+      expect(
+        transcript.some((message) => message.text?.includes("PI-COMPUTER-TOOL-OK")),
+      ).toBeTrue();
+      expect(daemon.svc.computer.state({
+        botId: conformanceBot.id,
+        surfaceId: conformanceBot.surfaceId,
+      }).lastImageAt).toBeDefined();
+      console.log("conformance: step 10 ok — real Pi custom tool typed and observed its owning Bot Screen");
 
       // ---- Record: write the versioned conformance record and verify the gate ----
-      const version = await pi.request({ type: "probe", requestId: crypto.randomUUID() }, 30_000);
-      const agentVersion = (version as { agentVersion?: string }).agentVersion!;
-      const image = imageResult === "ok" ? "verified" : "provider-unsupported";
       const realConfDir = path.join(os.homedir(), ".local/share/omarchy-bot/conformance");
       mkdirSync(realConfDir, { recursive: true });
-      const record = JSON.stringify({ ok: true, at: new Date().toISOString(), steps: 10, image });
       const recordPath = path.join(realConfDir, `pi-${agentVersion}.json`);
       writeFileSync(recordPath, record);
-      // The daemon under test resolves conformanceDir from its own (temp) home.
-      const testConfDir = path.join(daemon.home, "conformance");
-      mkdirSync(testConfDir, { recursive: true });
-      writeFileSync(path.join(testConfDir, `pi-${agentVersion}.json`), record);
       console.log(`conformance: record written ${recordPath}`);
       const agent = await daemon.svc.agents.recheck("pi");
       expect(agent.status).toBe("ready");

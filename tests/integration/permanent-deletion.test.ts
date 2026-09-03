@@ -78,29 +78,11 @@ describe("local Bot deletion", () => {
 
   test("cancels waiting Turns across concurrent Threads and waits for every terminal state before cleanup", async () => {
     const botId = await makeBot(h, "Concurrent active delete");
-    const siblingBotId = await makeBot(h, "Unrelated computer history");
+    const siblingBotId = await makeBot(h, "Unrelated sibling");
     const waitingForInput = await sendToBot(h, botId, "hang");
     const waitingForComputer = await sendToBot(h, botId, "hang");
     await waitForTurnStatus(h, waitingForInput.turnId, "working");
     await waitForTurnStatus(h, waitingForComputer.turnId, "working");
-    expect(await h.svc.computer.acquire({ botId }, waitingForInput.turnId)).toMatchObject({ granted: true });
-    h.svc.computer.takeOver();
-    expect(await h.svc.computer.acquire({ botId }, waitingForComputer.turnId)).toMatchObject({ queued: true });
-    expect(h.svc.threads.turnRow(waitingForInput.turnId)?.status).toBe("waiting_for_input");
-    expect(h.svc.threads.turnRow(waitingForComputer.turnId)?.status).toBe("waiting_for_computer");
-    expect(await h.svc.computer.acquire({ botId: siblingBotId }, undefined)).toMatchObject({ queued: true });
-    const ownedComputerEventsBefore = h.svc.db.query(
-      `SELECT COUNT(*) AS count FROM events
-       WHERE aggregate_type='computer'
-         AND json_extract(payload, '$.botId') = ?`,
-    ).get(botId) as { count: number };
-    const siblingComputerEventsBefore = h.svc.db.query(
-      `SELECT COUNT(*) AS count FROM events
-       WHERE aggregate_type='computer'
-         AND json_extract(payload, '$.botId') = ?`,
-    ).get(siblingBotId) as { count: number };
-    expect(ownedComputerEventsBefore.count).toBeGreaterThanOrEqual(3);
-    expect(siblingComputerEventsBefore.count).toBeGreaterThanOrEqual(1);
     writeFileSync(
       path.join(h.home, "conformance", "pi-fake-pi-1.json"),
       JSON.stringify({ ok: true, image: "verified", fakeAbortReleaseFile: "release-delete-aborts" }),
@@ -129,23 +111,6 @@ describe("local Bot deletion", () => {
     expect(deleted.removed).not.toHaveProperty("nativeSessions");
     expect(deleted).not.toHaveProperty("nativeSessionCleanup");
     expect((await apiStatus(h, "GET", `/api/bots/${botId}`)).status).toBe(404);
-    const computerState = h.svc.computer.state();
-    expect(computerState.queuedBotIds).not.toContain(botId);
-    expect(computerState.needsHumanBotIds).not.toContain(botId);
-    expect(
-      h.svc.db.query(
-        `SELECT COUNT(*) AS count FROM events
-         WHERE aggregate_type='computer'
-           AND json_extract(payload, '$.botId') = ?`,
-      ).get(botId),
-    ).toEqual({ count: 0 });
-    expect(
-      h.svc.db.query(
-        `SELECT COUNT(*) AS count FROM events
-         WHERE aggregate_type='computer'
-           AND json_extract(payload, '$.botId') = ?`,
-      ).get(siblingBotId),
-    ).toEqual(siblingComputerEventsBefore);
     expect((await api<BotViewDto>(h, "GET", `/api/bots/${siblingBotId}`)).id).toBe(siblingBotId);
     const commands = readFileSync(path.join(h.home, "fake-worker-commands.log"), "utf8")
       .trim()
@@ -169,7 +134,15 @@ describe("local Bot deletion", () => {
     expect(failed.body).toMatchObject({
       status: "failed",
       botId,
-      removed: { threads: 0, messages: 0, turns: 0, attachments: 0, avatar: false },
+      removed: {
+        threads: 0,
+        messages: 0,
+        turns: 0,
+        attachments: 0,
+        avatar: false,
+        computerArtifacts: 0,
+        surface: false,
+      },
       failures: [
         { stage: "turn_cancellation", resource: turn.turnId, message: "turn abort failed: simulated turn abort failure" },
       ],
@@ -202,7 +175,15 @@ describe("local Bot deletion", () => {
     expect(failed.body).toMatchObject({
       status: "failed",
       botId,
-      removed: { threads: 0, messages: 0, turns: 0, attachments: 0, avatar: false },
+      removed: {
+        threads: 0,
+        messages: 0,
+        turns: 0,
+        attachments: 0,
+        avatar: false,
+        computerArtifacts: 0,
+        surface: false,
+      },
       failures: [{ stage: "terminal_wait", resource: turn.turnId }],
     });
     expect((await api<BotViewDto>(h, "GET", `/api/bots/${botId}`)).status).toBe("active");
@@ -216,10 +197,16 @@ describe("local Bot deletion", () => {
   test("removes only Bot-owned database rows and files while preserving the shared Agent and sibling Bot", async () => {
     const botId = await makeBot(h, "Delete all owned data");
     const siblingId = await makeBot(h, "Shared Agent sibling survives");
+    const deletedBot = await api<BotViewDto>(h, "GET", `/api/bots/${botId}`);
+    const computerTurn = await sendToBot(h, botId, "computer:screenshot");
+    await waitThreadIdle(h, computerTurn.threadId);
+    const computerArtifact = h.svc.db
+      .query(`SELECT id, path FROM artifacts WHERE surface_id = ?`)
+      .get(deletedBot.surfaceId) as { id: string; path: string };
     const draftToken = crypto.randomUUID();
     const managed = await stageAttachment(h, botId, "managed bytes", "managed.txt", draftToken);
     const staged = await stageAttachment(h, botId, "staged bytes", "staged.txt", draftToken);
-    const sent = await api<{ threadId: string; messageId: string; turnId: string }>(h, "POST", `/api/bots/${botId}/messages`, {
+    const sent = await api<{ threadId: string; messageId: string; turnId: string }>(h, "POST", `/api/threads/${computerTurn.threadId}/messages`, {
       text: "attachment-echo",
       attachmentIds: [managed.id],
       attachmentDraftToken: draftToken,
@@ -235,29 +222,27 @@ describe("local Bot deletion", () => {
     expect(existsSync(managedPath)).toBeTrue();
     expect(existsSync(stagedPath)).toBeTrue();
     expect(existsSync(avatarPath)).toBeTrue();
+    expect(existsSync(computerArtifact.path)).toBeTrue();
 
     h.svc.db.query(`UPDATE thread_sessions SET native_session_id='fake://fail-delete' WHERE thread_id=?`).run(sent.threadId);
     h.svc.db.query(`UPDATE turns SET native_session_id='fake://fail-delete' WHERE bot_id=?`).run(botId);
-    const now = new Date().toISOString();
-    h.svc.db.query(
-      `INSERT OR REPLACE INTO computer_leases
-       (id, holder_is_human, holder_bot_id, turn_id, token, acquired_at, expires_at)
-       VALUES (1, 0, ?, NULL, 'delete-test-lease', ?, ?)`,
-    ).run(botId, now, new Date(Date.now() + 60_000).toISOString());
     const result = await api<DeleteBotResultDto>(h, "DELETE", `/api/bots/${botId}`, {});
 
     expect(result.status).toBe("deleted");
     expect(result.removed).toEqual({
       threads: 1,
-      messages: 2,
-      turns: 1,
+      messages: 5,
+      turns: 2,
       attachments: 2,
       avatar: true,
+      computerArtifacts: 1,
+      surface: true,
     });
     expect(result).not.toHaveProperty("nativeSessionCleanup");
     expect(existsSync(managedPath)).toBeFalse();
     expect(existsSync(stagedPath)).toBeFalse();
     expect(existsSync(avatarPath)).toBeFalse();
+    expect(existsSync(computerArtifact.path)).toBeFalse();
     expect((await apiStatus(h, "GET", `/api/bots/${botId}`)).status).toBe(404);
     expect((await apiStatus(h, "GET", `/api/threads/${sent.threadId}`)).status).toBe(404);
     expect(h.svc.db.query(`SELECT COUNT(*) AS count FROM messages WHERE thread_id=?`).get(sent.threadId)).toEqual({ count: 0 });
@@ -265,11 +250,12 @@ describe("local Bot deletion", () => {
     expect(h.svc.db.query(`SELECT COUNT(*) AS count FROM thread_sessions WHERE thread_id=?`).get(sent.threadId)).toEqual({ count: 0 });
     expect(h.svc.db.query(`SELECT COUNT(*) AS count FROM attachments WHERE bot_id=?`).get(botId)).toEqual({ count: 0 });
     expect(h.svc.db.query(`SELECT COUNT(*) AS count FROM bot_state WHERE bot_id=?`).get(botId)).toEqual({ count: 0 });
-    expect(h.svc.db.query(`SELECT COUNT(*) AS count FROM computer_leases WHERE holder_bot_id=?`).get(botId)).toEqual({ count: 0 });
     expect(
       h.svc.db.query(`SELECT COUNT(*) AS count FROM events WHERE aggregate_type IN ('thread','turn') AND aggregate_id IN (?, ?)`)
         .get(sent.threadId, sent.turnId),
     ).toEqual({ count: 0 });
+    expect(h.svc.db.query(`SELECT COUNT(*) AS count FROM artifacts WHERE surface_id=?`).get(deletedBot.surfaceId)).toEqual({ count: 0 });
+    expect(h.svc.db.query(`SELECT COUNT(*) AS count FROM bot_surfaces WHERE surface_id=?`).get(deletedBot.surfaceId)).toEqual({ count: 0 });
     expect(
       h.svc.db.query(`SELECT type FROM events WHERE aggregate_type='bot' AND aggregate_id=? ORDER BY cursor`).all(botId),
     ).toEqual([{ type: "bot.deleted" }]);
@@ -297,7 +283,15 @@ describe("local Bot deletion", () => {
       status: "deleted",
       botId,
       botName: "Delete while Agent unavailable",
-      removed: { threads: 1, messages: 2, turns: 1, attachments: 0, avatar: false },
+      removed: {
+        threads: 1,
+        messages: 2,
+        turns: 1,
+        attachments: 0,
+        avatar: false,
+        computerArtifacts: 0,
+        surface: true,
+      },
       failures: [],
     });
     expect(workerStartCount(h)).toBe(startsBeforeDeletion);
@@ -343,7 +337,11 @@ describe("local Bot deletion", () => {
 
   test("reports database cleanup failure without false success and succeeds on retry", async () => {
     const botId = await makeBot(h, "Retry database cleanup");
-    expect(await h.svc.computer.acquire({ botId }, undefined)).toMatchObject({ granted: true });
+    const bot = await api<BotViewDto>(h, "GET", `/api/bots/${botId}`);
+    h.svc.events.append("computer", bot.surfaceId, "computer.state.changed", {
+      botId,
+      surfaceId: bot.surfaceId,
+    });
     const ownedComputerEvents = h.svc.db.query(
       `SELECT COUNT(*) AS count FROM events
        WHERE aggregate_type='computer'
@@ -368,16 +366,12 @@ describe("local Bot deletion", () => {
     ]);
     expect((await api<BotViewDto>(h, "GET", `/api/bots/${botId}`)).id).toBe(botId);
     expect(h.svc.db.query(`SELECT state FROM bot_deletions WHERE bot_id=?`).get(botId)).toEqual({ state: "failed" });
-    expect(
-      h.svc.db.query(
-        `SELECT COUNT(*) AS count FROM events
-         WHERE aggregate_type='computer'
-           AND json_extract(payload, '$.botId') = ?`,
-      ).get(botId),
-    ).toEqual(ownedComputerEvents);
-    expect(
-      h.svc.db.query(`SELECT holder_bot_id FROM computer_leases WHERE holder_bot_id = ?`).get(botId),
-    ).toEqual({ holder_bot_id: botId });
+    const retainedComputerEvents = h.svc.db.query(
+      `SELECT COUNT(*) AS count FROM events
+       WHERE aggregate_type='computer'
+         AND json_extract(payload, '$.botId') = ?`,
+    ).get(botId) as { count: number };
+    expect(retainedComputerEvents.count).toBeGreaterThanOrEqual(ownedComputerEvents.count);
 
     h.svc.db.exec("DROP TRIGGER fail_bot_delete");
     const retried = await api<DeleteBotResultDto>(h, "DELETE", `/api/bots/${botId}`, {});

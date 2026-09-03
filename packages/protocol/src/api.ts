@@ -3,7 +3,7 @@ import {
   isAgentCapabilityInventory,
   type AgentCapabilityInventory,
 } from "@omarchy-bot/agent-contract";
-import { AGENT_IDS } from "@omarchy-bot/domain";
+import { AGENT_IDS, isSurfaceId, type SurfaceId } from "@omarchy-bot/domain";
 
 // ----- Agents -----
 
@@ -73,10 +73,16 @@ export const AvatarDto = z.discriminatedUnion("kind", [
 ]);
 export type AvatarDto = z.infer<typeof AvatarDto>;
 
+
+export const SurfaceIdDto = z.custom<SurfaceId>(
+  (value) => typeof value === "string" && isSurfaceId(value),
+  "invalid Computer Surface id",
+);
 // ----- Bots -----
 
 export const BotDto = z.object({
   id: z.string(),
+  surfaceId: SurfaceIdDto,
   name: z.string(),
   instructions: z.string(),
   agentId: z.enum(AGENT_IDS),
@@ -105,8 +111,6 @@ export type BotViewDto = z.infer<typeof BotViewDto>;
 
 export const TurnStatusSchema = z.enum([
   "working",
-  "waiting_for_input",
-  "waiting_for_computer",
   "completed",
   "cancelled",
   "failed",
@@ -199,12 +203,177 @@ export type DictationResultDto = z.infer<typeof DictationResultDto>;
 // ----- Computer -----
 
 export const ComputerViewDto = z.object({
-  state: z.enum(["idle", "bot-using", "waiting", "needs-you", "user-control", "emergency-stopped", "unavailable"]),
-  botId: z.string().optional(),
+  surfaceId: SurfaceIdDto,
+  botId: z.string(),
+  state: z.enum(["starting", "ready", "bot-using", "needs-you", "user-control", "unavailable"]),
+  takeover: z.enum(["unavailable", "available", "active"]),
   activity: z.string().optional(),
+  unavailableReason: z.literal("capacity").optional(),
+  capacity: z.object({
+    active: z.number().int().nonnegative(),
+    limit: z.number().int().positive(),
+  }).optional(),
   previewAt: z.string().optional(),
 });
 export type ComputerViewDto = z.infer<typeof ComputerViewDto>;
+
+export const SCREEN_PROJECTION_PROTOCOL_VERSION = 1 as const;
+export const SCREEN_FRAME_CHANNEL = "screen.frames.v1" as const;
+export const SCREEN_CONTROL_CHANNEL = "screen.control.v1" as const;
+export const SCREEN_INPUT_CHANNEL = "screen.input.v1" as const;
+
+export const ScreenProjectionModeDto = z.enum(["idle", "preview", "expanded"]);
+export type ScreenProjectionModeDto = z.infer<typeof ScreenProjectionModeDto>;
+
+export const ScreenProjectionOfferDto = z.object({
+  type: z.literal("offer"),
+  sdp: z.string().min(1),
+});
+export type ScreenProjectionOfferDto = z.infer<typeof ScreenProjectionOfferDto>;
+
+export const ScreenProjectionAnswerDto = z.object({
+  type: z.literal("answer"),
+  sdp: z.string().min(1),
+  sessionId: z.string().min(1),
+  surfaceId: SurfaceIdDto,
+  runtimeGeneration: z.number().int().positive(),
+  geometryGeneration: z.number().int().positive(),
+  logicalWidth: z.number().int().positive(),
+  logicalHeight: z.number().int().positive(),
+  videoWidth: z.number().int().positive(),
+  videoHeight: z.number().int().positive(),
+  scale: z.number().positive(),
+  state: z.literal("connecting"),
+  transport: z.literal("webrtc-data-channel-frames-v1"),
+  channels: z.object({
+    frames: z.literal(SCREEN_FRAME_CHANNEL),
+    control: z.literal(SCREEN_CONTROL_CHANNEL),
+    input: z.literal(SCREEN_INPUT_CHANNEL),
+  }),
+  security: z.object({
+    authentication: z.literal("none"),
+    httpsRequired: z.literal(false),
+  }),
+  candidates: z.array(z.object({ candidate: z.string(), sdpMid: z.string() })),
+});
+export type ScreenProjectionAnswerDto = z.infer<typeof ScreenProjectionAnswerDto>;
+
+export const ScreenProjectionControlMessageDto = z.object({
+  version: z.literal(SCREEN_PROJECTION_PROTOCOL_VERSION),
+  type: z.literal("view"),
+  surfaceId: SurfaceIdDto,
+  runtimeGeneration: z.number().int().positive(),
+  mode: ScreenProjectionModeDto,
+});
+export type ScreenProjectionControlMessageDto = z.infer<typeof ScreenProjectionControlMessageDto>;
+
+const ScreenInputEnvelopeDto = z.object({
+  version: z.literal(SCREEN_PROJECTION_PROTOCOL_VERSION),
+  surfaceId: SurfaceIdDto,
+  runtimeGeneration: z.number().int().positive(),
+  geometryGeneration: z.number().int().positive(),
+  controllerEpoch: z.number().int().positive(),
+  sequence: z.number().int().positive(),
+});
+
+const ScreenPointerPositionDto = {
+  x: z.number().finite().nonnegative(),
+  y: z.number().finite().nonnegative(),
+};
+
+export const SCREEN_KEY_CODES = [
+  "Escape", "Digit1", "Digit2", "Digit3", "Digit4", "Digit5", "Digit6", "Digit7", "Digit8", "Digit9", "Digit0",
+  "Minus", "Equal", "Backspace", "Tab",
+  "KeyQ", "KeyW", "KeyE", "KeyR", "KeyT", "KeyY", "KeyU", "KeyI", "KeyO", "KeyP", "BracketLeft", "BracketRight",
+  "Enter", "ControlLeft",
+  "KeyA", "KeyS", "KeyD", "KeyF", "KeyG", "KeyH", "KeyJ", "KeyK", "KeyL", "Semicolon", "Quote", "Backquote",
+  "ShiftLeft", "Backslash",
+  "KeyZ", "KeyX", "KeyC", "KeyV", "KeyB", "KeyN", "KeyM", "Comma", "Period", "Slash", "ShiftRight",
+  "AltLeft", "Space", "CapsLock",
+  "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12",
+  "NumLock", "ScrollLock",
+  "Numpad7", "Numpad8", "Numpad9", "NumpadSubtract", "Numpad4", "Numpad5", "Numpad6", "NumpadAdd",
+  "Numpad1", "Numpad2", "Numpad3", "Numpad0", "NumpadDecimal", "NumpadEnter", "NumpadDivide", "NumpadMultiply",
+  "ControlRight", "AltRight", "Home", "ArrowUp", "PageUp", "ArrowLeft", "ArrowRight", "End", "ArrowDown", "PageDown",
+  "Insert", "Delete", "MetaLeft", "MetaRight", "ContextMenu", "PrintScreen", "Pause",
+] as const;
+export const ScreenKeyCodeDto = z.enum(SCREEN_KEY_CODES);
+export type ScreenKeyCodeDto = z.infer<typeof ScreenKeyCodeDto>;
+
+export const ScreenInputMessageDto = z.discriminatedUnion("type", [
+  ScreenInputEnvelopeDto.extend({
+    type: z.literal("pointer-motion"),
+    ...ScreenPointerPositionDto,
+  }),
+  ScreenInputEnvelopeDto.extend({
+    type: z.literal("pointer-button"),
+    ...ScreenPointerPositionDto,
+    button: z.enum(["left", "middle", "right"]),
+    state: z.enum(["pressed", "released"]),
+  }),
+  ScreenInputEnvelopeDto.extend({
+    type: z.literal("pointer-scroll"),
+    ...ScreenPointerPositionDto,
+    deltaX: z.number().finite(),
+    deltaY: z.number().finite(),
+  }),
+  ScreenInputEnvelopeDto.extend({
+    type: z.literal("key"),
+    code: ScreenKeyCodeDto,
+    state: z.enum(["pressed", "released"]),
+    modifiers: z.object({
+      control: z.boolean(),
+      alt: z.boolean(),
+      shift: z.boolean(),
+      meta: z.boolean(),
+    }),
+  }),
+  ScreenInputEnvelopeDto.extend({
+    type: z.literal("paste"),
+    text: z.string().min(1).max(65_536),
+  }),
+  ScreenInputEnvelopeDto.extend({
+    type: z.literal("release-control"),
+    reason: z.enum(["blur", "visibility-loss", "navigation", "teardown"]),
+  }),
+]);
+export type ScreenInputMessageDto = z.infer<typeof ScreenInputMessageDto>;
+
+export const ScreenInputAuthorityMessageDto = z.object({
+  version: z.literal(SCREEN_PROJECTION_PROTOCOL_VERSION),
+  type: z.literal("input-authority"),
+  active: z.boolean(),
+  surfaceId: SurfaceIdDto,
+  runtimeGeneration: z.number().int().positive(),
+  geometryGeneration: z.number().int().positive(),
+  controllerEpoch: z.number().int().positive(),
+  logicalWidth: z.number().int().positive(),
+  logicalHeight: z.number().int().positive(),
+  videoWidth: z.number().int().positive(),
+  videoHeight: z.number().int().positive(),
+  scale: z.number().positive(),
+});
+export type ScreenInputAuthorityMessageDto = z.infer<typeof ScreenInputAuthorityMessageDto>;
+
+export const ScreenProjectionFrameHeaderDto = z.object({
+  version: z.literal(SCREEN_PROJECTION_PROTOCOL_VERSION),
+  type: z.literal("frame"),
+  surfaceId: SurfaceIdDto,
+  runtimeGeneration: z.number().int().positive(),
+  geometryGeneration: z.number().int().positive(),
+  logicalWidth: z.number().int().positive(),
+  logicalHeight: z.number().int().positive(),
+  videoWidth: z.number().int().positive(),
+  videoHeight: z.number().int().positive(),
+  scale: z.number().positive(),
+  sequence: z.number().int().positive(),
+  mediaType: z.enum(["image/png", "image/jpeg"]),
+  capturedAt: z.string().optional(),
+  mode: z.enum(["preview", "expanded"]),
+  byteLength: z.number().int().positive(),
+  chunkCount: z.number().int().positive(),
+});
+export type ScreenProjectionFrameHeaderDto = z.infer<typeof ScreenProjectionFrameHeaderDto>;
 
 // ----- command bodies -----
 
@@ -228,7 +397,7 @@ export const DeleteBotBody = z.object({}).strict();
 export type DeleteBotBodyDto = z.infer<typeof DeleteBotBody>;
 
 export const DeleteBotFailureDto = z.object({
-  stage: z.enum(["turn_cancellation", "terminal_wait", "attachment", "avatar", "database"]),
+  stage: z.enum(["turn_cancellation", "terminal_wait", "attachment", "avatar", "surface", "database"]),
   resource: z.string(),
   message: z.string(),
 }).strict();
@@ -244,6 +413,8 @@ export const DeleteBotResultDto = z.object({
     turns: z.number().int().nonnegative(),
     attachments: z.number().int().nonnegative(),
     avatar: z.boolean(),
+    computerArtifacts: z.number().int().nonnegative(),
+    surface: z.boolean(),
   }).strict(),
   failures: z.array(DeleteBotFailureDto),
 }).strict();

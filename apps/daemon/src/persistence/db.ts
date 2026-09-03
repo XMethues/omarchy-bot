@@ -1,8 +1,193 @@
+import { lstatSync, readdirSync, unlinkSync, type Dirent } from "node:fs";
+import path from "node:path";
 import { Database } from "bun:sqlite";
 import { AVATAR_RENDERER_ID, DEFAULT_AVATAR_STYLE_ID } from "@omarchy-bot/protocol";
 import type { Config } from "../bootstrap/config.ts";
 
-export const MIGRATIONS: { name: string; sql: string }[] = [
+type MigrationConfig = Pick<Config, "artifactsDir">;
+
+export type Migration = { name: string } & (
+  | { sql: string; migrate?: never }
+  | { sql?: never; migrate: (db: Database, cfg?: MigrationConfig) => void }
+);
+
+export function applyMigration(db: Database, migration: Migration, cfg?: MigrationConfig): void {
+  if (migration.migrate !== undefined) {
+    migration.migrate(db, cfg);
+    return;
+  }
+  db.exec(migration.sql);
+}
+
+function isMissingFile(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
+}
+
+function ownedArtifactPath(artifactsDir: string, storedPath: string): string | null {
+  const root = path.resolve(artifactsDir);
+  const candidate = path.resolve(path.isAbsolute(storedPath) ? storedPath : path.join(root, storedPath));
+  return path.dirname(candidate) === root ? candidate : null;
+}
+
+function removeOwnedArtifactPaths(cfg: MigrationConfig | undefined, storedPaths: readonly string[]): void {
+  if (cfg === undefined) return;
+  for (const storedPath of storedPaths) {
+    const candidate = ownedArtifactPath(cfg.artifactsDir, storedPath);
+    if (candidate === null) continue;
+    try {
+      const entry = lstatSync(candidate);
+      if (entry.isFile() || entry.isSymbolicLink()) unlinkSync(candidate);
+    } catch (error) {
+      if (!isMissingFile(error)) throw error;
+    }
+  }
+}
+
+function removeUnreferencedSnapshotFiles(db: Database, cfg: MigrationConfig | undefined): void {
+  if (cfg === undefined) return;
+  const referenced = new Set(
+    (db.query(`SELECT path FROM artifacts`).all() as Array<{ path: string }>)
+      .map((row) => ownedArtifactPath(cfg.artifactsDir, row.path))
+      .filter((candidate): candidate is string => candidate !== null),
+  );
+  let entries: Dirent[];
+  try {
+    entries = readdirSync(cfg.artifactsDir, { withFileTypes: true });
+  } catch (error) {
+    if (isMissingFile(error)) return;
+    throw error;
+  }
+  for (const entry of entries) {
+    if (!/^snapshot-[A-Za-z0-9_-]+\.(?:png|jpe?g)$/.test(entry.name)) continue;
+    if (!entry.isFile() && !entry.isSymbolicLink()) continue;
+    const candidate = path.resolve(cfg.artifactsDir, entry.name);
+    if (!referenced.has(candidate)) unlinkSync(candidate);
+  }
+}
+
+const CURRENT_AVATAR_REPAIR_SQL = `
+UPDATE bots
+SET avatar_kind = 'generated',
+    avatar_recipe = json_object(
+      'rendererVersion', '${AVATAR_RENDERER_ID}',
+      'style', '${DEFAULT_AVATAR_STYLE_ID}',
+      'seed', id,
+      'options', json('{}')
+    )
+WHERE avatar_kind IN ('generated', 'recipe')
+  AND CASE
+    WHEN json_valid(avatar_recipe) = 1 THEN
+      CASE
+        WHEN json_type(avatar_recipe, '$') = 'object' THEN NOT COALESCE(
+          json_extract(avatar_recipe, '$.rendererVersion') = '${AVATAR_RENDERER_ID}'
+          AND json_extract(avatar_recipe, '$.style') IN (
+            'clay', 'critters', 'gaze', 'initial-face', 'moods', 'pixelbot',
+            'shapes', 'sprouts', 'thumbs', 'voxel-art', 'voxel-bot'
+          )
+          AND json_type(avatar_recipe, '$.seed') = 'text'
+          AND json_type(avatar_recipe, '$.options') = 'object',
+          0
+        )
+        ELSE 1
+      END
+    ELSE 1
+  END;
+`;
+
+const PROFILE_AVATAR_REPAIR_WITH_ARCHIVE_SQL = `
+UPDATE bots
+SET avatar_kind = 'generated',
+    avatar_recipe = json_object(
+      'rendererVersion', '${AVATAR_RENDERER_ID}',
+      'style', '${DEFAULT_AVATAR_STYLE_ID}',
+      'seed', id,
+      'options', json('{}')
+    )
+WHERE avatar_kind IN ('generated', 'recipe')
+  AND CASE
+    WHEN json_valid(avatar_recipe) = 1 THEN
+      CASE
+        WHEN json_type(avatar_recipe, '$') = 'object' THEN NOT COALESCE(
+          json_extract(avatar_recipe, '$.rendererVersion') = '${AVATAR_RENDERER_ID}'
+          AND (
+            json_extract(avatar_recipe, '$.style') IN (
+              'clay', 'critters', 'gaze', 'initial-face', 'moods',
+              'pixelbot', 'sprouts', 'thumbs', 'voxel-art', 'voxel-bot'
+            )
+            OR (archived = 1 AND json_extract(avatar_recipe, '$.style') = 'shapes')
+          )
+          AND json_type(avatar_recipe, '$.seed') = 'text'
+          AND json_type(avatar_recipe, '$.options') = 'object',
+          0
+        )
+        ELSE 1
+      END
+    ELSE 1
+  END;
+`;
+
+function columnNames(db: Database, table: string): Set<string> {
+  return new Set(
+    (db.query(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((column) => column.name),
+  );
+}
+
+function repairProfileAvatars(db: Database): void {
+  db.exec(columnNames(db, "bots").has("archived") ? PROFILE_AVATAR_REPAIR_WITH_ARCHIVE_SQL : CURRENT_AVATAR_REPAIR_SQL);
+}
+
+function removeBotArchiveLifecycle(db: Database): void {
+  const columns = columnNames(db, "bots");
+  db.exec(`DELETE FROM events WHERE type IN ('bot.archived', 'bot.restored')`);
+  if (!columns.has("archived") && !columns.has("archived_at")) return;
+
+  db.exec(`
+CREATE TABLE bots_archiveless (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  instructions TEXT NOT NULL DEFAULT '',
+  agent_id TEXT NOT NULL REFERENCES agents(id),
+  avatar_kind TEXT NOT NULL DEFAULT 'generated',
+  avatar_recipe TEXT NOT NULL DEFAULT '',
+  avatar_file TEXT,
+  pinned INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  provenance TEXT NOT NULL DEFAULT 'user_created'
+    CHECK (provenance IN ('user_created', 'legacy_conversation', 'legacy_inventory'))
+);
+INSERT INTO bots_archiveless (
+  id, name, instructions, agent_id, avatar_kind, avatar_recipe, avatar_file,
+  pinned, created_at, updated_at, provenance
+)
+SELECT
+  id, name, instructions, agent_id, avatar_kind, avatar_recipe, avatar_file,
+  pinned, created_at, updated_at, provenance
+FROM bots;
+DROP TABLE bots;
+ALTER TABLE bots_archiveless RENAME TO bots;
+`);
+}
+
+function removeNativeDeletionCheckpoints(db: Database): void {
+  db.exec(`
+UPDATE bot_deletions
+SET failure_json = (
+  SELECT CASE
+    WHEN COUNT(*) = 0 THEN NULL
+    ELSE json_group_array(json(value))
+  END
+  FROM json_each(
+    CASE WHEN json_valid(bot_deletions.failure_json) THEN bot_deletions.failure_json ELSE '[]' END
+  )
+  WHERE COALESCE(json_extract(value, '$.stage'), '') <> 'native_session'
+)
+WHERE failure_json IS NOT NULL;
+DROP TABLE IF EXISTS bot_native_session_deletions;
+`);
+}
+
+export const MIGRATIONS: Migration[] = [
   {
     name: "0001-initial",
     sql: `
@@ -96,16 +281,6 @@ CREATE TABLE permissions (
   status TEXT NOT NULL DEFAULT 'pending',
   created_at TEXT NOT NULL,
   decided_at TEXT
-);
-CREATE TABLE computer_leases (
-  id INTEGER PRIMARY KEY CHECK (id = 1),
-  holder_is_human INTEGER NOT NULL DEFAULT 0,
-  holder_bot_id TEXT,
-  holder_role_id TEXT,
-  run_id TEXT,
-  token TEXT NOT NULL,
-  acquired_at TEXT NOT NULL,
-  expires_at TEXT NOT NULL
 );
 CREATE TABLE events (
   cursor INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -354,26 +529,13 @@ DROP TABLE messages;
 ALTER TABLE messages_new RENAME TO messages;
 CREATE INDEX idx_messages_thread ON messages(thread_id, seq);
 
-CREATE TABLE computer_leases_new (
-  id INTEGER PRIMARY KEY CHECK (id = 1),
-  holder_is_human INTEGER NOT NULL DEFAULT 0,
-  holder_bot_id TEXT,
-  turn_id TEXT,
-  token TEXT NOT NULL,
-  acquired_at TEXT NOT NULL,
-  expires_at TEXT NOT NULL
-);
-INSERT INTO computer_leases_new (id, holder_is_human, holder_bot_id, turn_id, token, acquired_at, expires_at)
-SELECT id, holder_is_human, holder_bot_id, run_id, token, acquired_at, expires_at
-FROM computer_leases;
-DROP TABLE computer_leases;
-ALTER TABLE computer_leases_new RENAME TO computer_leases;
+DROP TABLE IF EXISTS computer_leases;
 
 DROP TABLE IF EXISTS approvals;
 DROP TABLE IF EXISTS settings;
 
--- Replay begins at the contracted public model; no old aggregate identities,
--- approval payloads, or lease diagnostics can cross the WebSocket boundary.
+-- Replay begins at the contracted public model; no old aggregate identities
+-- or approval payloads can cross the WebSocket boundary.
 DELETE FROM events;
 `,
   },
@@ -468,126 +630,142 @@ ALTER TABLE attachments ADD COLUMN draft_token TEXT;
     // generated recipes become deterministic current defaults; no legacy
     // renderer remains in the browser bundle.
     name: "0009-current-avatar-renderer-only",
+    sql: CURRENT_AVATAR_REPAIR_SQL,
+  },
+  {
+    name: "0010-bot-computer-surfaces",
+    migrate: (db, cfg) => {
+      db.exec(`
+CREATE TABLE IF NOT EXISTS bot_surfaces (
+  surface_id TEXT PRIMARY KEY CHECK (surface_id GLOB 'surf_[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]'),
+  bot_id TEXT NOT NULL UNIQUE REFERENCES bots(id) ON DELETE CASCADE,
+  lifecycle_state TEXT NOT NULL DEFAULT 'stopped' CHECK (lifecycle_state IN ('stopped', 'starting', 'ready', 'failed')),
+  runtime_generation INTEGER NOT NULL DEFAULT 0,
+  logical_width INTEGER NOT NULL DEFAULT 1920,
+  logical_height INTEGER NOT NULL DEFAULT 1080,
+  scale REAL NOT NULL DEFAULT 1,
+  refresh_rate INTEGER NOT NULL DEFAULT 60,
+  last_failure TEXT,
+  last_image_at TEXT,
+  transitioned_at TEXT NOT NULL
+);
+INSERT INTO bot_surfaces (surface_id, bot_id, transitioned_at)
+SELECT 'surf_' || lower(hex(randomblob(16))), bots.id, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+FROM bots
+WHERE NOT EXISTS (SELECT 1 FROM bot_surfaces WHERE bot_surfaces.bot_id = bots.id);
+DROP TABLE IF EXISTS computer_leases;
+`);
+      const artifactColumns = new Set(
+        (db.query(`PRAGMA table_info(artifacts)`).all() as Array<{ name: string }>).map((column) => column.name),
+      );
+      const legacyPaths = artifactColumns.size > 0 && !artifactColumns.has("surface_id")
+        ? (db.query(`SELECT path FROM artifacts`).all() as Array<{ path: string }>).map((row) => row.path)
+        : [];
+      if (legacyPaths.length > 0 || (artifactColumns.size > 0 && !artifactColumns.has("surface_id"))) {
+        db.exec(`DROP TABLE artifacts`);
+      }
+      db.exec(`
+CREATE TABLE IF NOT EXISTS artifacts (
+  id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL,
+  media_type TEXT NOT NULL,
+  path TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  surface_id TEXT NOT NULL REFERENCES bot_surfaces(surface_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_artifacts_surface ON artifacts(surface_id);
+`);
+      removeOwnedArtifactPaths(cfg, legacyPaths);
+    },
+  },
+  {
+    name: "0011-redacted-input-diagnostics",
     sql: `
-UPDATE bots
-SET avatar_kind = 'generated',
-    avatar_recipe = json_object(
-      'rendererVersion', '${AVATAR_RENDERER_ID}',
-      'style', 'shapes',
-      'seed', id,
-      'options', json('{}')
-    )
-WHERE avatar_kind IN ('generated', 'recipe')
-  AND CASE
-    WHEN json_valid(avatar_recipe) = 1 THEN
-      CASE
-        WHEN json_type(avatar_recipe, '$') = 'object' THEN NOT (
-          json_extract(avatar_recipe, '$.rendererVersion') = '${AVATAR_RENDERER_ID}'
-          AND json_extract(avatar_recipe, '$.style') IN ('shapes', 'pixelbot', 'thumbs')
-          AND json_type(avatar_recipe, '$.seed') = 'text'
-          AND json_type(avatar_recipe, '$.options') = 'object'
-        )
-        ELSE 1
-      END
-    ELSE 1
-  END;
+CREATE TABLE input_diagnostics (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  surface_id TEXT NOT NULL REFERENCES bot_surfaces(surface_id) ON DELETE CASCADE,
+  occurred_at TEXT NOT NULL,
+  actor_kind TEXT NOT NULL CHECK (actor_kind IN ('browser')),
+  action_category TEXT NOT NULL CHECK (
+    action_category IN ('controller', 'pointer-button', 'pointer-scroll', 'key', 'shortcut', 'paste', 'release', 'invalid')
+  ),
+  outcome TEXT NOT NULL CHECK (outcome IN ('accepted', 'rejected', 'failed', 'released')),
+  redacted_length INTEGER CHECK (redacted_length IS NULL OR redacted_length >= 0),
+  latency_ms INTEGER NOT NULL CHECK (latency_ms >= 0)
+);
+CREATE INDEX idx_input_diagnostics_expiry ON input_diagnostics(occurred_at);
+CREATE INDEX idx_input_diagnostics_surface ON input_diagnostics(surface_id, occurred_at);
+`,
+  },
+  {
+    name: "0012-bot-screen-contract",
+    sql: `
+UPDATE turns
+SET status = 'failed',
+    finished_at = COALESCE(finished_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    outcome_reason = 'obsolete Computer control state removed'
+WHERE status IN ('waiting_for_input', 'waiting_for_computer');
+DROP TABLE IF EXISTS computer_leases;
+DROP TABLE IF EXISTS legacy_unscoped_artifacts;
 `,
   },
   {
     // Preserve pre-cutover archived Shapes identities alongside valid current
     // recipes; normalize ordinary and unsupported generated recipes to Pixelbot.
     name: "0010-profile-avatar-styles",
-    sql: `
-UPDATE bots
-SET avatar_kind = 'generated',
-    avatar_recipe = json_object(
-      'rendererVersion', '${AVATAR_RENDERER_ID}',
-      'style', '${DEFAULT_AVATAR_STYLE_ID}',
-      'seed', id,
-      'options', json('{}')
-    )
-WHERE avatar_kind IN ('generated', 'recipe')
-  AND CASE
-    WHEN json_valid(avatar_recipe) = 1 THEN
-      CASE
-        WHEN json_type(avatar_recipe, '$') = 'object' THEN NOT (
-          json_extract(avatar_recipe, '$.rendererVersion') = '${AVATAR_RENDERER_ID}'
-          AND (
-            json_extract(avatar_recipe, '$.style') IN (
-              'clay', 'critters', 'gaze', 'initial-face', 'moods',
-              'pixelbot', 'sprouts', 'thumbs', 'voxel-art', 'voxel-bot'
-            )
-            OR (
-              archived = 1
-              AND json_extract(avatar_recipe, '$.style') = 'shapes'
-            )
-          )
-          AND json_type(avatar_recipe, '$.seed') = 'text'
-          AND json_type(avatar_recipe, '$.options') = 'object'
-        )
-        ELSE 1
-      END
-    ELSE 1
-  END;
-`,
+    migrate: repairProfileAvatars,
   },
   {
     // Recover every archived Bot into the ordinary population before dropping
     // the lifecycle columns. Child rows keep the same Bot IDs throughout.
     name: "0011-remove-bot-archive-lifecycle",
-    sql: `
-CREATE TABLE bots_visible (
-  id TEXT PRIMARY KEY,
-  name TEXT NOT NULL,
-  instructions TEXT NOT NULL DEFAULT '',
-  agent_id TEXT NOT NULL REFERENCES agents(id),
-  avatar_kind TEXT NOT NULL DEFAULT 'generated',
-  avatar_recipe TEXT NOT NULL DEFAULT '',
-  avatar_file TEXT,
-  pinned INTEGER NOT NULL DEFAULT 0,
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL,
-  provenance TEXT NOT NULL DEFAULT 'user_created'
-    CHECK (provenance IN ('user_created', 'legacy_conversation', 'legacy_inventory'))
-);
-INSERT INTO bots_visible (
-  id, name, instructions, agent_id, avatar_kind, avatar_recipe, avatar_file,
-  pinned, created_at, updated_at, provenance
-)
-SELECT
-  id, name, instructions, agent_id, avatar_kind, avatar_recipe, avatar_file,
-  pinned, created_at, updated_at, provenance
-FROM bots;
-
-DELETE FROM events WHERE type IN ('bot.archived', 'bot.restored');
-
-DROP TABLE bots;
-ALTER TABLE bots_visible RENAME TO bots;
-`,
+    migrate: removeBotArchiveLifecycle,
   },
   {
     // Native Session lifecycle is Agent-owned. Retain local Thread mappings,
     // but discard obsolete Bot-deletion checkpoints that claimed native cleanup.
     name: "0012-remove-native-session-deletion-checkpoints",
-    sql: `
-UPDATE bot_deletions
-SET failure_json = (
-  SELECT CASE
-    WHEN COUNT(*) = 0 THEN NULL
-    ELSE json_group_array(json(value))
-  END
-  FROM json_each(
-    CASE WHEN json_valid(bot_deletions.failure_json) THEN bot_deletions.failure_json ELSE '[]' END
-  )
-  WHERE COALESCE(json_extract(value, '$.stage'), '') <> 'native_session'
-)
-WHERE failure_json IS NOT NULL;
-
-DROP TABLE IF EXISTS bot_native_session_deletions;
-`,
+    migrate: removeNativeDeletionCheckpoints,
+  },
+  {
+    // Keep the feature-ledger name while converging to the newer archiveless
+    // Bot contract. Databases that already removed the columns are unchanged.
+    name: "0013-restore-bot-archive-lifecycle",
+    migrate: removeBotArchiveLifecycle,
+  },
+  {
+    // Reassert the checked-in renderer contract after every historical path.
+    name: "0014-enforce-current-avatar-recipes",
+    sql: CURRENT_AVATAR_REPAIR_SQL,
+  },
+  {
+    // Every divergent ledger converges on Surface-scoped authority while the
+    // newer local-deletion and archiveless contracts remain authoritative.
+    name: "0015-converge-bot-screen-persistence",
+    migrate: (db, cfg) => {
+      removeBotArchiveLifecycle(db);
+      removeNativeDeletionCheckpoints(db);
+      db.exec(`
+CREATE TABLE IF NOT EXISTS computer_surface_coordination (
+  surface_id TEXT PRIMARY KEY REFERENCES bot_surfaces(surface_id) ON DELETE CASCADE,
+  authority_kind TEXT NOT NULL CHECK (authority_kind IN ('idle', 'agent', 'web', 'takeover')),
+  controller_epoch INTEGER NOT NULL,
+  updated_at TEXT NOT NULL
+);
+INSERT INTO computer_surface_coordination (surface_id, authority_kind, controller_epoch, updated_at)
+SELECT bot_surfaces.surface_id, 'idle', 0, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+FROM bot_surfaces
+WHERE NOT EXISTS (
+  SELECT 1
+  FROM computer_surface_coordination
+  WHERE computer_surface_coordination.surface_id = bot_surfaces.surface_id
+);
+${CURRENT_AVATAR_REPAIR_SQL}
+`);
+      removeUnreferencedSnapshotFiles(db, cfg);
+    },
   },
 ];
-
 export function openDb(cfg: Config): Database {
   const db = new Database(cfg.dbPath, { create: true });
   db.exec("PRAGMA journal_mode = WAL");
@@ -603,7 +781,7 @@ export function openDb(cfg: Config): Database {
     try {
       for (const m of pending) {
         const tx = db.transaction(() => {
-          db.exec(m.sql);
+          applyMigration(db, m, cfg);
           db.query("INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?)").run(m.name, new Date().toISOString());
         });
         tx();
@@ -618,10 +796,8 @@ export function openDb(cfg: Config): Database {
   }
   return db;
 }
-
-/** In-flight ownership and cleanup attempts never survive a daemon restart. */
+/** Active turns cannot survive a daemon restart; supervised Bot Screens are reconciled separately. */
 export function recoverOnStartup(db: Database): void {
-  db.exec("DELETE FROM computer_leases");
   const now = new Date().toISOString();
   db.query(`UPDATE turns SET status='failed', finished_at=?, outcome_reason='daemon restart' WHERE status NOT IN ('completed','cancelled','failed')`).run(now);
   db.query(`UPDATE bot_deletions SET state='failed', failure_json=?, updated_at=? WHERE state='cleaning'`)

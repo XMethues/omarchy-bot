@@ -24,7 +24,6 @@ import { HistoryDialog } from "../components/HistoryDialog.tsx";
 import { ProfilePanel } from "../components/ProfilePanel.tsx";
 import { SettingsDialog } from "../components/SettingsDialog.tsx";
 import { ComputerPanel } from "../components/ComputerPanel.tsx";
-import { EmergencyComputerControl } from "../components/EmergencyComputerControl.tsx";
 import { useVoiceAutoSendSetting } from "../components/VoiceSettingsControl.tsx";
 import { TranscriptAttention } from "../components/TranscriptAttention.tsx";
 
@@ -148,28 +147,23 @@ function HomeScreen(): JSX.Element {
 
   const bot = useMemo(() => bots.data?.find((b) => b.id === selectedBotId), [bots.data, selectedBotId]);
   const computer = useQuery({
-    queryKey: ["computer", bot?.id],
-    queryFn: () => api.computerState(bot?.id),
-    refetchInterval: 15_000,
-  });
-  const computerSafety = useQuery({
-    queryKey: ["computer", { scope: "global" }],
-    queryFn: () => api.computerState(),
+    queryKey: ["computer", bot?.id, bot?.surfaceId],
+    queryFn: () => api.computerState({ botId: bot!.id, surfaceId: bot!.surfaceId }),
+    enabled: bot !== undefined,
     refetchInterval: 15_000,
   });
 
   const computerAction = useMutation({
-    mutationFn: (action: "take" | "return" | "stop" | "resume") => {
-      if (action === "take") return api.takeControl();
-      if (action === "return") return api.returnToBot();
-      if (action === "stop") return api.emergencyStop();
-      return api.resumeComputer();
+    mutationFn: (action: "take" | "return") => {
+      if (bot === undefined) throw new Error("No Bot is selected");
+      const owner = { botId: bot.id, surfaceId: bot.surfaceId };
+      return action === "take" ? api.takeControl(owner) : api.returnToBot(owner);
     },
     onSuccess: () => {
       setComputerError(undefined);
       invalidate("computer");
     },
-    onError: (error) => setComputerError(apiErrorMessage(error, "Computer control could not be updated.")),
+    onError: (error) => setComputerError(apiErrorMessage(error, "Bot Screen control could not be updated.")),
   });
 
   const threads = useQuery({
@@ -503,14 +497,6 @@ function HomeScreen(): JSX.Element {
         setNotificationPermission(typeof Notification === "undefined" ? "unsupported" : Notification.permission);
         setSettingsOpen(true);
       }}
-      safetyControl={
-        <EmergencyComputerControl
-          view={computerSafety.data ?? { state: "unavailable" }}
-          busy={computerAction.isPending}
-          onEmergencyStop={() => computerAction.mutate("stop")}
-          onResume={() => computerAction.mutate("resume")}
-        />
-      }
     />
   );
 
@@ -570,18 +556,22 @@ function HomeScreen(): JSX.Element {
               />
             ) : (
               <ComputerPanel
+                key={bot.surfaceId}
                 bot={bot}
                 view={
                   computer.data
                     ?? {
+                      botId: bot.id,
+                      surfaceId: bot.surfaceId,
                       state: "unavailable",
+                      takeover: "unavailable",
                       activity:
                         computer.error !== null
-                          ? apiErrorMessage(computer.error, "Computer status could not be loaded.")
-                          : "Computer state is loading.",
+                          ? apiErrorMessage(computer.error, "Bot Screen status could not be loaded.")
+                          : "Bot Screen state is loading.",
                     }
                 }
-                snapshotUrl={api.computerImageUrl()}
+                projectionUrl={api.computerProjectionUrl({ botId: bot.id, surfaceId: bot.surfaceId })}
                 open={computerOpen}
                 returnFocusRef={computerTriggerRef}
                 busy={computerAction.isPending}
@@ -589,8 +579,8 @@ function HomeScreen(): JSX.Element {
                 {...(computer.error !== null ? { onRetry: () => void computer.refetch() } : {})}
                 {...(computerError !== undefined ? { error: computerError } : {})}
                 onClose={() => setComputerOpen(false)}
-                onTakeControl={() => computerAction.mutate("take")}
-                onReturnToBot={() => computerAction.mutate("return")}
+                onTakeControl={() => computerAction.mutateAsync("take").then(() => true, () => false)}
+                onReturnToBot={() => computerAction.mutateAsync("return").then(() => true, () => false)}
               />
             )
           ) : undefined

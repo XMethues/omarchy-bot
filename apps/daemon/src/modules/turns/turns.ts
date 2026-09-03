@@ -1,8 +1,14 @@
 import { randomUUID } from "node:crypto";
 import type { Database } from "bun:sqlite";
-import type { AgentEvent, WorkerUserMessage } from "@omarchy-bot/agent-contract";
+import type {
+  AgentComputerToolOutput,
+  AgentComputerToolRequest,
+  AgentEvent,
+  WorkerUserMessage,
+} from "@omarchy-bot/agent-contract";
 import type { MessageDto, SendResultDto, TurnDto } from "@omarchy-bot/protocol";
-import { canTransitionTurn, isTerminalTurn, type AgentId, type TurnStatus } from "@omarchy-bot/domain";
+import type { AgentId, SurfaceId, TurnStatus } from "@omarchy-bot/domain";
+import { canTransitionTurn, isTerminalTurn } from "@omarchy-bot/domain";
 import type { ThreadsService } from "../threads/threads.ts";
 import type { AgentsRegistry } from "../agents/registry.ts";
 import type { BotsService } from "../bots/bots.ts";
@@ -10,6 +16,7 @@ import type { EventLog } from "../events/eventLog.ts";
 import type { AttachmentsService } from "../attachments/attachments.ts";
 import type { Supervisor } from "../../supervision/supervisor.ts";
 import { HttpError } from "../bots/bots.ts";
+import type { ComputerBroker } from "../computer/broker.ts";
 
 interface TurnContext {
   turnId: string;
@@ -18,6 +25,8 @@ interface TurnContext {
   agentId: AgentId;
   workerSessionId: string;
   assistantBuf: string;
+  computerToolSurfaces: Map<string, SurfaceId>;
+  startedComputerToolCalls: Set<string>;
   turnTimeout: ReturnType<typeof setTimeout>;
   /** Present only when cancellation came from the explicit abort path. */
   abortReason?: string;
@@ -226,6 +235,10 @@ export class TurnService {
       : await worker.request({ type: "session.open", botId, threadId, options }, 30_000);
 
     this.threads.setNativeSession(threadId, opened.nativeSessionId);
+    const surface = this.db
+      .query(`SELECT surface_id FROM bot_surfaces WHERE bot_id = ?`)
+      .get(botId) as { surface_id: SurfaceId } | null;
+    if (surface === null) throw new Error(`Bot ${botId} has no Computer Surface`);
     this.db.query(`UPDATE turns SET worker_session_id = ?, native_session_id = ? WHERE id = ?`).run(opened.sessionId, opened.nativeSessionId, turnId);
 
     const turnTimeout = setTimeout(() => {
@@ -235,8 +248,15 @@ export class TurnService {
     turnTimeout.unref?.();
 
     const ctx: TurnContext = {
-      turnId, threadId, botId, agentId, workerSessionId: opened.sessionId,
-      assistantBuf: "", turnTimeout,
+      turnId,
+      threadId,
+      botId,
+      agentId,
+      workerSessionId: opened.sessionId,
+      computerToolSurfaces: new Map(),
+      startedComputerToolCalls: new Set(),
+      assistantBuf: "",
+      turnTimeout,
     };
     this.#turns.set(opened.sessionId, ctx);
     this.#setTurnStatus(turnId, "working");
@@ -248,7 +268,18 @@ export class TurnService {
       text,
       ...(attachments.length > 0 ? { attachments } : {}),
     };
-    void worker.request({ type: "message.send", sessionId: opened.sessionId, turnId, message }, 60_000).catch((err: unknown) => {
+    void worker.request({
+      type: "message.send",
+      sessionId: opened.sessionId,
+      turnId,
+      message,
+      computer: {
+        botId,
+        turnId,
+        workerSessionId: opened.sessionId,
+        surfaceId: surface.surface_id,
+      },
+    }, 60_000).catch((err: unknown) => {
       if (this.#turns.get(opened.sessionId) !== ctx) return;
       this.#routeTurnEvent(ctx, {
         type: "error",
@@ -302,6 +333,53 @@ export class TurnService {
     return { threadId: turn.threadId, messageId: userMsg.id, turnId: turn.id, action: "steered" };
   }
 
+  onAgentWorkerCrash(agentId: AgentId, error: Error): void {
+    for (const context of [...this.#turns.values()]) {
+      if (context.agentId !== agentId) continue;
+      this.#routeTurnEvent(context, {
+        type: "error",
+        sessionId: context.workerSessionId,
+        message: error.message,
+        retryable: false,
+      });
+    }
+  }
+
+  /** Routes a reverse worker RPC only after matching every authoritative turn identity. */
+  async onAgentComputerRequest(
+    agentId: AgentId,
+    request: AgentComputerToolRequest,
+    computer: ComputerBroker,
+    signal: AbortSignal,
+  ): Promise<AgentComputerToolOutput> {
+    const context = request.context;
+    const active = this.#turns.get(context.workerSessionId);
+    if (
+      active === undefined
+      || active.agentId !== agentId
+      || active.botId !== context.botId
+      || active.turnId !== context.turnId
+      || active.workerSessionId !== context.workerSessionId
+    ) {
+      throw new Error("computer tool context is stale or mismatched");
+    }
+    if (context.toolCallId.length === 0) {
+      throw new Error("computer tool context has no tool-call identity");
+    }
+    if (!active.startedComputerToolCalls.has(context.toolCallId)) {
+      throw new Error("computer tool context has no active native tool call");
+    }
+    const owner = computer.resolveOwner(context.botId, context.surfaceId);
+    if (owner === undefined) {
+      throw new Error("computer tool context has a mismatched Computer Surface");
+    }
+    if (active.computerToolSurfaces.has(context.toolCallId)) {
+      throw new Error("computer tool call was already dispatched");
+    }
+    active.computerToolSurfaces.set(context.toolCallId, owner.surfaceId);
+    return computer.agentToolAct(owner, context.turnId, context.toolCallId, request.action, signal);
+  }
+
   /** Central agent-event router: worker events become transcript activity and turn transitions. */
   onAgentEvent(agentId: AgentId, event: AgentEvent): void {
     const family = agentEventFamily(event);
@@ -338,6 +416,9 @@ export class TurnService {
           kind: "tool",
           payload: { toolId: event.id, name: event.name, input: event.input, state: "running" },
         });
+        if (event.name === "computer") {
+          ctx.startedComputerToolCalls.add(event.id);
+        }
         this.events.append("thread", ctx.threadId, "message.delta", { threadId: ctx.threadId, messageId: m.id });
         break;
       }
@@ -357,6 +438,7 @@ export class TurnService {
           isError,
           final: isComplete,
         });
+        if (isComplete) ctx.startedComputerToolCalls.delete(event.id);
         break;
       }
       case "turn.completed": {
@@ -517,28 +599,6 @@ export class TurnService {
     }
     this.#setTurnStatus(turnId, "cancelled", reason);
     this.#emitSystemNote(t.thread_id, `turn cancelled: ${reason}`);
-  }
-
-  /** Lease contention: the turn parks in waiting_for_computer until granted. */
-  parkForComputer(turnId: string): void {
-    this.#setTurnStatus(turnId, "waiting_for_computer");
-  }
-  resumeAfterComputer(turnId: string | undefined): void {
-    if (turnId === undefined) return;
-    const turn = this.threads.turnRow(turnId);
-    if (turn?.status === "waiting_for_computer") this.#setTurnStatus(turnId, "working");
-  }
-
-
-  /** Computer lease handover: Take over parks the driving turn in waiting_for_input. */
-  parkForHuman(turnId: string | undefined): void {
-    if (turnId !== undefined) this.#setTurnStatus(turnId, "waiting_for_input");
-  }
-
-  resumeAfterHuman(turnId: string | undefined): void {
-    if (turnId === undefined) return;
-    const t = this.threads.turnRow(turnId);
-    if (t && t.status === "waiting_for_input") this.#setTurnStatus(turnId, "working");
   }
 }
 

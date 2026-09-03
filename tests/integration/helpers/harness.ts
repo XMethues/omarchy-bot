@@ -6,6 +6,8 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { DaemonServices } from "../../../apps/daemon/src/api/http.ts";
+import { FakeBotScreenRuntimeAdapter } from "../../../apps/daemon/src/modules/computer/fakeBotScreenRuntime.ts";
+import type { BotScreenRuntimeAdapter } from "../../../apps/daemon/src/modules/computer/botScreenManager.ts";
 
 export interface Harness {
   baseUrl: string;
@@ -13,12 +15,18 @@ export interface Harness {
   home: string;
   svc: DaemonServices;
   stop: () => Promise<void>;
+  disconnectForRestart: () => Promise<void>;
 }
 
-export async function startDaemon(
-  existingHome?: string,
-  options: { botDeletionTerminalTimeoutMs?: number } = {},
-): Promise<Harness> {
+export interface HarnessOptions {
+  botDeletionTerminalTimeoutMs?: number;
+  botScreenFailure?: string;
+  useProductionBotScreen?: boolean;
+  botScreenAdapter?: BotScreenRuntimeAdapter;
+  botScreenCapacity?: number;
+}
+
+export async function startDaemon(existingHome?: string, options: HarnessOptions = {}): Promise<Harness> {
   const home = existingHome ?? path.join(os.tmpdir(), `omarchy-bot-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   const state = path.join(os.tmpdir(), `omarchy-bot-test-state-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   mkdirSync(home, { recursive: true });
@@ -38,11 +46,29 @@ export async function startDaemon(
   process.env.OMARCHY_BOT_DELETION_TERMINAL_TIMEOUT_MS = String(
     options.botDeletionTerminalTimeoutMs ?? 30_000,
   );
+  process.env.OMARCHY_BOT_COMPUTER_WORKER_DIR = options.useProductionBotScreen
+    ? path.resolve(import.meta.dir, "../../../workers/computer")
+    : path.resolve(import.meta.dir, "../fake-workers/computer");
 
   // Dynamic import keeps the harness the single boot seam for fresh and legacy homes.
   const { main } = await import("../../../apps/daemon/src/bootstrap/main.ts");
-  const { stop, port, svc } = await main();
-  const base: Harness = { baseUrl: `http://127.0.0.1:${port}`, port, home, svc, stop };
+  const daemon = options.useProductionBotScreen
+    ? await main({
+        ...(options.botScreenCapacity === undefined ? {} : { botScreenCapacity: options.botScreenCapacity }),
+      })
+    : await main({
+        botScreenAdapter: options.botScreenAdapter ?? new FakeBotScreenRuntimeAdapter(options.botScreenFailure),
+        botScreenCapacity: options.botScreenCapacity ?? 8,
+      });
+  const { stop, disconnectForRestart, port, svc } = daemon;
+  const base: Harness = {
+    baseUrl: `http://127.0.0.1:${port}`,
+    port,
+    home,
+    svc,
+    stop,
+    disconnectForRestart,
+  };
   // Wait until the fake pi agent finishes its probe and reports ready.
   const deadline = Date.now() + 20_000;
   for (;;) {

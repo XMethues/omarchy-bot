@@ -8,6 +8,8 @@ import type { BotDeletionService } from "../modules/bots/botDeletion.ts";
 import type { ThreadsService } from "../modules/threads/threads.ts";
 import type { TurnService } from "../modules/turns/turns.ts";
 import type { ComputerBroker } from "../modules/computer/broker.ts";
+import type { BotScreenManager } from "../modules/computer/botScreenManager.ts";
+import type { ScreenProjectionService } from "../modules/computer/screenProjection.ts";
 import type { AvatarService } from "../modules/avatars/avatarService.ts";
 import type { DictationService } from "../modules/dictation/dictationService.ts";
 import type { AttachmentsService } from "../modules/attachments/attachments.ts";
@@ -16,6 +18,7 @@ import { handleThreadFeatureRequest } from "./threadRoutes.ts";
 import { handleBotAttentionRequest } from "./botAttentionRoutes.ts";
 import { handleBotDeletionRequest } from "./botDeletionRoutes.ts";
 import { handleComputerRequest } from "./computerRoutes.ts";
+import { handleProjectionRequest } from "./projectionRoutes.ts";
 import { handleDictationRequest } from "./dictationRoutes.ts";
 import { handleAttachmentRequest } from "./attachmentRoutes.ts";
 import type { Supervisor } from "../supervision/supervisor.ts";
@@ -38,6 +41,8 @@ export interface DaemonServices {
   attachments: AttachmentsService;
   dictation: DictationService;
   computer: ComputerBroker;
+  screens: BotScreenManager;
+  projections: ScreenProjectionService;
   /** Exposed for the conformance suite and advanced embedders; not used by HTTP handlers. */
   supervisor: Supervisor;
 }
@@ -168,7 +173,10 @@ export function startHttp(svc: DaemonServices): { stop: () => Promise<void>; por
     const dictationResponse = await handleDictationRequest(req, svc.dictation, pathname);
     if (dictationResponse) return dictationResponse;
 
-    const computerResponse = await handleComputerRequest(req, svc.computer);
+    const projectionResponse = await handleProjectionRequest(req, svc.computer, svc.projections);
+    if (projectionResponse) return projectionResponse;
+
+    const computerResponse = await handleComputerRequest(req, svc.computer, svc.screens);
     if (computerResponse) return computerResponse;
 
     // Release: serve the built web UI if present.

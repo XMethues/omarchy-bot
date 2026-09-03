@@ -21,11 +21,19 @@ import type {
   ServerToClient,
   ThreadDto,
 } from "@omarchy-bot/protocol";
-import { DeleteBotResultDto as DeleteBotResultSchema } from "@omarchy-bot/protocol";
+import {
+  ComputerViewDto as ComputerViewSchema,
+  DeleteBotResultDto as DeleteBotResultSchema,
+} from "@omarchy-bot/protocol";
 
 export interface ApiClientOptions {
   baseUrl?: string;
   fetch?: typeof fetch;
+}
+
+export interface ComputerSurfaceOwner {
+  botId: string;
+  surfaceId: ComputerViewDto["surfaceId"];
 }
 
 export interface ApiError extends Error {
@@ -212,23 +220,31 @@ export class ApiClient {
 
 
   // ----- computer -----
-  computerState(botId?: string): Promise<ComputerViewDto> {
-    return this.req(`/api/computer/state${botId === undefined ? "" : `?botId=${encodeURIComponent(botId)}`}`);
+  async computerState(owner: ComputerSurfaceOwner): Promise<ComputerViewDto> {
+    try {
+      return ComputerViewSchema.parse(
+        await this.req<unknown>(this.computerPath("/api/computer/state", owner)),
+      );
+    } catch (error) {
+      if (error !== null && typeof error === "object" && "body" in error) {
+        const result = ComputerViewSchema.safeParse(error.body);
+        if (result.success && result.data.unavailableReason === "capacity") return result.data;
+      }
+      throw error;
+    }
   }
-  takeControl(): Promise<ComputerViewDto> {
-    return this.req("/api/computer/take-control", { method: "POST" });
+  takeControl(owner: ComputerSurfaceOwner): Promise<ComputerViewDto> {
+    return this.req(this.computerPath("/api/computer/take-control", owner), { method: "POST" });
   }
-  returnToBot(): Promise<ComputerViewDto> {
-    return this.req("/api/computer/return-to-bot", { method: "POST" });
+  returnToBot(owner: ComputerSurfaceOwner): Promise<ComputerViewDto> {
+    return this.req(this.computerPath("/api/computer/return-to-bot", owner), { method: "POST" });
   }
-  emergencyStop(): Promise<ComputerViewDto> {
-    return this.req("/api/computer/emergency-stop", { method: "POST" });
+  computerProjectionUrl(owner: ComputerSurfaceOwner): string {
+    return `${this.base}${this.computerPath("/api/computer/projection", owner)}`;
   }
-  resumeComputer(): Promise<ComputerViewDto> {
-    return this.req("/api/computer/resume", { method: "POST" });
-  }
-  computerImageUrl(): string {
-    return `${this.base}/api/computer/snapshot?t=${Date.now()}`;
+
+  private computerPath(path: string, owner: ComputerSurfaceOwner): string {
+    return `${path}?botId=${encodeURIComponent(owner.botId)}&surfaceId=${encodeURIComponent(owner.surfaceId)}`;
   }
 
   // ----- events -----

@@ -12,13 +12,12 @@ import type { BotViewDto, ComputerViewDto, ThreadDto } from "@omarchy-bot/protoc
 import { AvatarView } from "./AvatarView.tsx";
 
 const COMPUTER_TOOLTIPS: Record<ComputerViewDto["state"], string> = {
-  idle: "Open computer",
-  "bot-using": "Open computer, this bot is using it",
-  waiting: "Open computer, this bot is waiting",
-  "needs-you": "Open computer, this bot needs you",
-  "user-control": "Open computer, you have control",
-  "emergency-stopped": "Open computer, control is stopped",
-  unavailable: "Open computer, unavailable",
+  starting: "Open Computer Surface, Screen is starting",
+  ready: "Open Computer Surface",
+  "bot-using": "Open Computer Surface, Bot using screen",
+  "needs-you": "Open Computer Surface, Bot Screen needs you",
+  "user-control": "Open Computer Surface, you have control",
+  unavailable: "Open Computer Surface, Screen unavailable",
 };
 
 export interface ConversationHeaderProps {
@@ -143,12 +142,12 @@ export function ConversationHeader({
         </StackItem>
         <IconButton
           ref={computerTriggerRef}
-          label={computerOpen ? "Close computer" : "Open computer"}
-          tooltip={computerOpen ? "Close computer" : COMPUTER_TOOLTIPS[computerState]}
+          label={computerOpen ? "Close Computer Surface" : "Open Computer Surface"}
+          tooltip={computerOpen ? "Close Computer Surface" : COMPUTER_TOOLTIPS[computerState]}
           isDisabled={bot === undefined}
           icon={<Icon icon={Monitor} size="md" />}
           variant={
-            computerOpen || (computerState !== "idle" && computerState !== "unavailable") ? "secondary" : "ghost"
+            computerOpen || (computerState !== "ready" && computerState !== "unavailable") ? "secondary" : "ghost"
           }
           onClick={onToggleComputer}
           aria-expanded={computerOpen}

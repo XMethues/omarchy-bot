@@ -3,6 +3,8 @@ import { expect, test, type Locator, type Page, type Route } from "@playwright/t
 
 const PRIMARY_BOT_ID = "bot_ticket13_primary";
 const SECONDARY_BOT_ID = "bot_ticket13_unavailable";
+const PRIMARY_SURFACE_ID = "surf_11111111111111111111111111111111";
+const SECONDARY_SURFACE_ID = "surf_22222222222222222222222222222222";
 const THREAD_ID = "thread_ticket13_release_review";
 const FIXED_EARLY = "2026-01-15T09:00:00.000Z";
 const FIXED_LATE = "2026-01-15T10:00:00.000Z";
@@ -16,7 +18,7 @@ const reducedMotionViewport = { width: 1024, height: 768 };
 const narrowViewport = { width: 390, height: 780 };
 
 type BotStatus = "inactive" | "active";
-type ComputerState = "idle" | "bot-using" | "unavailable";
+type ComputerState = "ready" | "bot-using" | "unavailable";
 
 interface SeedOptions {
   empty?: boolean;
@@ -39,6 +41,7 @@ function botFixtures(primaryStatus: BotStatus) {
   return [
     {
       id: PRIMARY_BOT_ID,
+      surfaceId: PRIMARY_SURFACE_ID,
       name: "Release Partner",
       instructions: "Keep the release review concise and actionable.",
       agentId: "pi",
@@ -54,6 +57,7 @@ function botFixtures(primaryStatus: BotStatus) {
     },
     {
       id: SECONDARY_BOT_ID,
+      surfaceId: SECONDARY_SURFACE_ID,
       name: "Offline Researcher",
       instructions: "Collect primary-source research.",
       agentId: "claude",
@@ -168,16 +172,19 @@ async function seedWorkspaceApi(page: Page, options: SeedOptions = {}): Promise<
   });
   await page.route("**/api/dictation", (route) => fulfillJson(route, { state: "idle" }));
   await page.route("**/api/computer/state**", (route) => {
-    const state = options.computerState ?? "idle";
+    const state = options.computerState ?? "ready";
+    const url = new URL(route.request().url());
     return fulfillJson(route, {
       state,
-      ...(state === "bot-using" ? { botId: PRIMARY_BOT_ID } : {}),
+      botId: url.searchParams.get("botId"),
+      surfaceId: url.searchParams.get("surfaceId"),
+      takeover: "unavailable",
       activity:
         state === "unavailable"
-          ? "The computer is not connected for this bot."
+          ? "Screen unavailable."
           : state === "bot-using"
-            ? "This bot is using the computer."
-            : "The computer is ready.",
+            ? "Bot using screen."
+            : "Screen ready.",
     });
   });
   await page.route("**/api/computer/snapshot**", (route) =>
@@ -387,8 +394,8 @@ test.describe("ticket 13 responsive, accessible, and visual QA", () => {
     await page.keyboard.press("Escape");
     await expect(profile).toBeHidden();
 
-    await page.getByRole("button", { name: "Open computer", exact: true }).click();
-    const computer = page.getByRole("complementary", { name: "Computer" });
+    await page.getByRole("button", { name: "Open Computer Surface", exact: true }).click();
+    const computer = page.getByRole("complementary", { name: "Computer Surface", exact: true });
     await expectInsideViewport(page, computer);
     await page.keyboard.press("Escape");
     await expect(computer).toBeHidden();
@@ -435,10 +442,10 @@ test.describe("ticket 13 responsive, accessible, and visual QA", () => {
     await expect(conversationWorkspace.getByRole("alert")).toHaveCount(1);
     await expect(page.getByRole("textbox", { name: "Message input" })).toHaveAttribute("contenteditable", "false");
 
-    await page.getByRole("button", { name: "Open computer", exact: true }).click();
-    const computer = page.getByRole("complementary", { name: "Computer", exact: true });
-    await expect(computer.getByRole("heading", { name: "Computer unavailable", exact: true })).toBeVisible();
-    await expect(computer.getByAltText("Latest computer preview for Offline Researcher")).toHaveCount(0);
+    await page.getByRole("button", { name: "Open Computer Surface", exact: true }).click();
+    const computer = page.getByRole("complementary", { name: "Computer Surface", exact: true });
+    await expect(computer.getByRole("heading", { name: "Screen unavailable", exact: true })).toBeVisible();
+    await expect(computer.getByAltText("Computer Preview for Offline Researcher")).toHaveCount(0);
   });
 
   test("opens and closes narrow bot navigation by keyboard and closes it after bot selection", async ({ page }) => {
@@ -531,12 +538,12 @@ test.describe("ticket 13 responsive, accessible, and visual QA", () => {
     await expect(profileTrigger).toBeFocused();
 
     await page.setViewportSize(narrowViewport);
-    const computerTrigger = page.getByRole("button", { name: "Open computer", exact: true });
+    const computerTrigger = page.getByRole("button", { name: "Open Computer Surface", exact: true });
     await computerTrigger.focus();
     await computerTrigger.press("Enter");
-    await expect(page.getByRole("complementary", { name: "Computer" })).toBeVisible();
+    await expect(page.getByRole("complementary", { name: "Computer Surface", exact: true })).toBeVisible();
     await page.keyboard.press("Escape");
-    await expect(page.getByRole("complementary", { name: "Computer" })).toBeHidden();
+    await expect(page.getByRole("complementary", { name: "Computer Surface", exact: true })).toBeHidden();
     await expect(computerTrigger).toBeFocused();
 
     const mobileNavigationTrigger = page.getByRole("button", { name: "Open bot navigation" });
@@ -588,20 +595,18 @@ test.describe("ticket 13 responsive, accessible, and visual QA", () => {
     await gotoSeededWorkspace(page);
     await captureWorkspace(page, "ticket-13-workspace-desktop-dark.png");
   });
-  test("matches the desktop computer drawer and expanded preview", async ({ page }) => {
+  test("matches the desktop Computer Surface", async ({ page }) => {
     await page.setViewportSize(desktopViewport);
     await page.emulateMedia({ colorScheme: "dark", reducedMotion: "no-preference" });
     await seedWorkspaceApi(page, { computerState: "bot-using" });
     await gotoSeededWorkspace(page);
 
-    await page.getByRole("button", { name: "Open computer", exact: true }).click();
-    await expect(page.getByRole("complementary", { name: "Computer", exact: true })).toBeVisible();
-    await expect(page.getByRole("dialog", { name: "Computer" })).toHaveCount(0);
+    await page.getByRole("button", { name: "Open Computer Surface", exact: true }).click();
+    const computer = page.getByRole("complementary", { name: "Computer Surface", exact: true });
+    await expect(computer).toBeVisible();
+    await expect(computer.getByRole("heading", { name: "Bot using screen", exact: true })).toBeVisible();
+    await expect(page.getByRole("dialog", { name: "Computer Surface" })).toHaveCount(0);
     await captureWorkspace(page, "ticket-13-computer-drawer-dark.png");
-
-    await page.getByRole("button", { name: "Expand desktop preview" }).click();
-    await expect(page.getByAltText("Expanded computer preview for Release Partner")).toBeVisible();
-    await captureWorkspace(page, "ticket-13-computer-preview-modal-dark.png");
   });
 
 

@@ -1,22 +1,27 @@
+import { rm } from "node:fs/promises";
 import type { Database } from "bun:sqlite";
+import type { SurfaceId } from "@omarchy-bot/domain";
 import type { DeleteBotFailureDto, DeleteBotResultDto, TurnDto } from "@omarchy-bot/protocol";
 import type { AttachmentsService } from "../attachments/attachments.ts";
 import type { AvatarService } from "../avatars/avatarService.ts";
+import type { BotScreenManager } from "../computer/botScreenManager.ts";
 import type { EventLog } from "../events/eventLog.ts";
 import { HttpError } from "./bots.ts";
 
 interface DeletionBotRow {
+  surface_id: string;
   name: string;
   avatar_kind: string;
   avatar_file: string | null;
 }
 
+interface ComputerArtifactRow {
+  id: string;
+  path: string;
+}
+
 interface CountRow {
   count: number;
-}
-interface BotComputerCleanup {
-  removeBot(botId: string): void;
-  resumeQueueAfterBotRemoval(): void;
 }
 interface BotTurnAborter {
   abortTurn(turnId: string, reason: string): Promise<void>;
@@ -44,12 +49,17 @@ export class BotDeletionService {
     private readonly avatars: AvatarService,
     private readonly turns: BotTurnAborter,
     private readonly threads: BotThreadTurns,
-    private readonly computer: BotComputerCleanup,
+    private readonly screens: BotScreenManager,
     private readonly terminalWaitTimeoutMs = 30_000,
   ) {}
 
   async delete(botId: string): Promise<DeleteBotResultDto> {
-    const bot = this.db.query(`SELECT name, avatar_kind, avatar_file FROM bots WHERE id = ?`)
+    const bot = this.db
+      .query(
+        `SELECT bots.name, bots.avatar_kind, bots.avatar_file, bot_surfaces.surface_id
+         FROM bots JOIN bot_surfaces ON bot_surfaces.bot_id = bots.id
+         WHERE bots.id = ?`,
+      )
       .get(botId) as DeletionBotRow | null;
     if (bot === null) throw new HttpError(404, `unknown bot ${botId}`);
 
@@ -98,15 +108,6 @@ export class BotDeletionService {
       }
     }
 
-    try {
-      this.computer.removeBot(botId);
-    } catch (error) {
-      return this.#barrierFailure(botId, bot.name, [{
-        stage: "database",
-        resource: botId,
-        message: `computer state cleanup failed: ${errorMessage(error)}`,
-      }]);
-    }
 
 
     const threadCount = this.#count(`SELECT COUNT(*) AS count FROM threads WHERE bot_id = ?`, botId);
@@ -116,21 +117,43 @@ export class BotDeletionService {
     );
     const turnCount = this.#count(`SELECT COUNT(*) AS count FROM turns WHERE bot_id = ?`, botId);
     const attachmentCount = this.#count(`SELECT COUNT(*) AS count FROM attachments WHERE bot_id = ?`, botId);
+    const computerArtifacts = this.db
+      .query(`SELECT artifacts.id, artifacts.path FROM artifacts WHERE surface_id = ?`)
+      .all(bot.surface_id) as ComputerArtifactRow[];
 
     let attachmentFilesRemoved = 0;
     let avatarRemoved = false;
+    let computerArtifactsRemoved = 0;
     const failures: DeleteBotFailureDto[] = [];
 
-    const attachmentCleanup = this.attachments.deleteOwnedFiles(botId);
-    attachmentFilesRemoved = attachmentCleanup.removed;
-    failures.push(...attachmentCleanup.failures.map((failure) => ({ stage: "attachment" as const, ...failure })));
+    try {
+      await this.screens.destroy(bot.surface_id as SurfaceId);
+    } catch (error) {
+      failures.push({ stage: "surface", resource: bot.surface_id, message: errorMessage(error) });
+    }
 
-    if (bot.avatar_kind === "upload" && bot.avatar_file !== null) {
+    if (failures.length === 0) {
+      const attachmentCleanup = this.attachments.deleteOwnedFiles(botId);
+      attachmentFilesRemoved = attachmentCleanup.removed;
+      failures.push(...attachmentCleanup.failures.map((failure) => ({ stage: "attachment" as const, ...failure })));
+    }
+
+    if (failures.length === 0 && bot.avatar_kind === "upload" && bot.avatar_file !== null) {
       try {
         await this.avatars.deleteUploadedFile(bot.avatar_file);
         avatarRemoved = true;
       } catch (error) {
         failures.push({ stage: "avatar", resource: bot.avatar_file, message: errorMessage(error) });
+      }
+    }
+    if (failures.length === 0) {
+      for (const artifact of computerArtifacts) {
+        try {
+          await rm(artifact.path, { force: true });
+          computerArtifactsRemoved += 1;
+        } catch (error) {
+          failures.push({ stage: "surface", resource: artifact.id, message: errorMessage(error) });
+        }
       }
     }
 
@@ -145,6 +168,8 @@ export class BotDeletionService {
           turns: 0,
           attachments: attachmentFilesRemoved,
           avatar: avatarRemoved,
+          computerArtifacts: computerArtifactsRemoved,
+          surface: false,
         },
         failures,
       };
@@ -162,6 +187,8 @@ export class BotDeletionService {
         turns: turnCount,
         attachments: attachmentCount,
         avatar: avatarRemoved,
+        computerArtifacts: computerArtifacts.length,
+        surface: true,
       },
       failures: [],
     };
@@ -177,20 +204,23 @@ export class BotDeletionService {
                aggregate_type = 'computer'
                AND (
                  aggregate_id = ?
+                 OR aggregate_id = ?
                  OR json_extract(CASE WHEN json_valid(payload) THEN payload ELSE '{}' END, '$.botId') = ?
                )
              )`,
-        ).run(botId, botId, botId, botId, botId);
+        ).run(botId, botId, botId, bot.surface_id, botId, botId);
         this.db.query(`DELETE FROM messages WHERE thread_id IN (SELECT id FROM threads WHERE bot_id = ?)`).run(botId);
         this.db.query(`DELETE FROM attachments WHERE bot_id = ?`).run(botId);
         this.db.query(`DELETE FROM thread_sessions WHERE thread_id IN (SELECT id FROM threads WHERE bot_id = ?)`).run(botId);
         this.db.query(`DELETE FROM turns WHERE bot_id = ?`).run(botId);
-        this.db.query(`DELETE FROM computer_leases WHERE holder_bot_id = ?`).run(botId);
+        this.db.query(`DELETE FROM artifacts WHERE surface_id = ?`).run(bot.surface_id);
+        this.db.query(`DELETE FROM input_diagnostics WHERE surface_id = ?`).run(bot.surface_id);
         this.db.query(`DELETE FROM threads WHERE bot_id = ?`).run(botId);
         this.db.query(`DELETE FROM bot_state WHERE bot_id = ?`).run(botId);
         this.db.query(`DELETE FROM bot_deletions WHERE bot_id = ?`).run(botId);
+        this.db.query(`DELETE FROM bot_surfaces WHERE surface_id = ?`).run(bot.surface_id);
         this.db.query(`DELETE FROM bots WHERE id = ?`).run(botId);
-        this.events.append("bot", botId, "bot.deleted", deleted);
+        this.events.append("bot", botId, "bot.deleted", { ...deleted, surfaceId: bot.surface_id });
       });
       commit();
     } catch (error) {
@@ -199,11 +229,10 @@ export class BotDeletionService {
       return {
         ...deleted,
         status: "failed",
-        removed: { ...deleted.removed, threads: 0, messages: 0, turns: 0 },
+        removed: { ...deleted.removed, threads: 0, messages: 0, turns: 0, surface: false },
         failures: [databaseFailure],
       };
     }
-    this.computer.resumeQueueAfterBotRemoval();
     return deleted;
   }
 
@@ -229,6 +258,8 @@ export class BotDeletionService {
         turns: 0,
         attachments: 0,
         avatar: false,
+        computerArtifacts: 0,
+        surface: false,
       },
       failures,
     };

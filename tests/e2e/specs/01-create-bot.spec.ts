@@ -22,6 +22,19 @@ async function createBot(page: Page, name: string, instructions = ""): Promise<s
 }
 
 test.describe("create bot flow", () => {
+  test("repairs incompatible current avatar recipes before the browser renders", async ({ page, request }) => {
+    await page.goto("/");
+    await expect(page.getByText("Something went wrong!")).toHaveCount(0);
+    const recoveredBot = page.getByTestId("sidebar-bot-bot_00000000000000000000000000000001");
+    await expect(recoveredBot).toBeVisible();
+    await expect(recoveredBot.getByTestId("avatar-pixelbot").locator("img")).toHaveAttribute("src", /^data:image\/svg\+xml/);
+
+    const deleted = await request.delete("/api/bots/bot_00000000000000000000000000000001", {
+      data: {},
+    });
+    expect(deleted.ok()).toBe(true);
+  });
+
   test("lists agent readiness and selects a newly created bot on a blank conversation", async ({ page }) => {
     await page.goto("/");
     await expect(botNavigation(page).getByRole("button", { name: /^Actions for / })).toHaveCount(0);

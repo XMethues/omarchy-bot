@@ -8,6 +8,13 @@ export type AgentId = (typeof AGENT_IDS)[number];
  */
 export type BotId = string;
 
+/** Opaque durable identity of the Computer Surface owned by one Bot. */
+export type SurfaceId = string & { readonly __surfaceId: unique symbol };
+
+export function isSurfaceId(id: string): id is SurfaceId {
+  return /^surf_[0-9a-f]{32}$/.test(id);
+}
+
 /** Turn id: `turn_<32hex>`. */
 export type TurnId = string;
 
