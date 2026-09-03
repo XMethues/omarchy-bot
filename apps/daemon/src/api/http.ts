@@ -130,7 +130,13 @@ export function startHttp(svc: DaemonServices): { stop: () => Promise<void>; por
     if (botMessages && req.method === "POST") {
       // Lazy threads: first send atomically creates thread+message+turn.
       const body = await parseBody(req, SendMessageBody);
-      const result = await svc.turns.send(botMessages[1]!, null, body.text.trim(), body.attachmentIds ?? []);
+      const result = await svc.turns.send(
+        botMessages[1]!,
+        null,
+        body.text.trim(),
+        body.attachmentIds ?? [],
+        body.attachmentDraftToken,
+      );
       return json(result, 202);
     }
 
@@ -146,7 +152,13 @@ export function startHttp(svc: DaemonServices): { stop: () => Promise<void>; por
       const body = await parseBody(req, SendMessageBody);
       const thread = svc.threads.getThread(threadMsgs[1]!);
       if (!thread) return notFound(`unknown thread ${threadMsgs[1]}`);
-      const result = await svc.turns.send(thread.botId, thread.id, body.text.trim(), body.attachmentIds ?? []);
+      const result = await svc.turns.send(
+        thread.botId,
+        thread.id,
+        body.text.trim(),
+        body.attachmentIds ?? [],
+        body.attachmentDraftToken,
+      );
       return json(result, 202);
     }
 

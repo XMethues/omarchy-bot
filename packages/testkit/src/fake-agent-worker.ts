@@ -1,7 +1,7 @@
 // Deterministic agent worker for orchestration tests.
 // Scenarios (argv): echo (default), crash, hang, malformed, refuse
-import { PROTOCOL_VERSION, readJsonl, writeJsonl, stderr } from "@omarchy-bot/agent-contract";
-import type { AgentCommand, WorkerOutbound } from "@omarchy-bot/agent-contract";
+import { AGENT_CAPABILITY_INVENTORY_VERSION, PROTOCOL_VERSION, readJsonl, writeJsonl, stderr } from "@omarchy-bot/agent-contract";
+import type { AgentCommand, ProbePayload, WorkerOutbound } from "@omarchy-bot/agent-contract";
 
 const scenario = (process.argv[2] ?? "echo").replace(/^--scenario=/, "");
 let sessionCounter = 0;
@@ -69,8 +69,16 @@ readJsonl(Bun.stdin.stream(), async (raw) => {
         installed: true,
         agentVersion: "fake-1.0.0",
         sdkOk: true,
-        capabilities: { sessionDeletion: true },
-      });
+        capabilities: {
+          version: AGENT_CAPABILITY_INVENTORY_VERSION,
+          steering: true,
+          abort: true,
+          sessionDeletion: true,
+          nativeThreadActions: ["resume", "history", "close"],
+          attachments: { text: false, image: false },
+          nativeEventFamilies: ["message", "tool", "turn", "error"],
+        },
+      } satisfies ProbePayload);
       break;
     case "session.open":
     case "session.resume": {

@@ -4,6 +4,7 @@ import type { DeleteBotFailureDto, DeleteBotResultDto } from "@omarchy-bot/proto
 import type { AttachmentsService } from "../attachments/attachments.ts";
 import type { AvatarService } from "../avatars/avatarService.ts";
 import type { EventLog } from "../events/eventLog.ts";
+import type { AgentsRegistry } from "../agents/registry.ts";
 import type { Supervisor } from "../../supervision/supervisor.ts";
 import { HttpError } from "./bots.ts";
 
@@ -28,19 +29,6 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function sessionDeletionCapability(probe: unknown): boolean {
-  if (probe === null || typeof probe !== "object" || !("capabilities" in probe)) {
-    throw new Error("agent probe did not report its native session deletion capability");
-  }
-  const capabilities = probe.capabilities;
-  if (capabilities === null || typeof capabilities !== "object" || !("sessionDeletion" in capabilities)) {
-    throw new Error("agent probe did not report its native session deletion capability");
-  }
-  if (typeof capabilities.sessionDeletion !== "boolean") {
-    throw new Error("agent probe returned an invalid native session deletion capability");
-  }
-  return capabilities.sessionDeletion;
-}
 
 /**
  * Coordinates irreversible Bot-owned cleanup. External/native/filesystem work
@@ -53,6 +41,7 @@ export class BotDeletionService {
     private readonly events: EventLog,
     private readonly attachments: AttachmentsService,
     private readonly avatars: AvatarService,
+    private readonly agents: AgentsRegistry,
     private readonly supervisor: Supervisor,
   ) {}
 
@@ -87,11 +76,19 @@ export class BotDeletionService {
     const failures: DeleteBotFailureDto[] = [];
 
     if (nativeSessions.length > 0) {
-      try {
-        const worker = await this.supervisor.agentWorker(bot.agent_id as AgentId);
-        const probe = await worker.request({ type: "probe" }, 30_000);
-        nativeSupported = sessionDeletionCapability(probe);
-        if (nativeSupported) {
+      const capabilities = this.agents.capabilityInventory(bot.agent_id as AgentId);
+      if (capabilities === undefined) {
+        failures.push({
+          stage: "native_session",
+          resource: bot.agent_id,
+          message: "validated agent capabilities are unavailable",
+        });
+      } else if (!capabilities.sessionDeletion) {
+        nativeSkipped = nativeSessions.length;
+      } else {
+        nativeSupported = true;
+        try {
+          const worker = await this.supervisor.agentWorker(bot.agent_id as AgentId);
           const completed = new Set(
             (this.db.query(`SELECT native_session_id FROM bot_native_session_deletions WHERE bot_id = ?`)
               .all(botId) as NativeSessionRow[]).map((row) => row.native_session_id),
@@ -111,11 +108,9 @@ export class BotDeletionService {
               failures.push({ stage: "native_session", resource: session.native_session_id, message: errorMessage(error) });
             }
           }
-        } else {
-          nativeSkipped = nativeSessions.length;
+        } catch (error) {
+          failures.push({ stage: "native_session", resource: bot.agent_id, message: errorMessage(error) });
         }
-      } catch (error) {
-        failures.push({ stage: "native_session", resource: bot.agent_id, message: errorMessage(error) });
       }
     }
 

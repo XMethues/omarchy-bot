@@ -1,6 +1,7 @@
 import type {
   AgentDto,
   AttachmentDto,
+  AttachmentDraftTokenDto,
   ArchiveBodyDto,
   AvatarRecipeBodyDto,
   BotDto,
@@ -162,12 +163,16 @@ export class ApiClient {
 
 
   // ----- attachments -----
-  async stageAttachment(botId: string, file: File): Promise<AttachmentDto> {
+  async stageAttachment(botId: string, draftToken: AttachmentDraftTokenDto, file: File): Promise<AttachmentDto> {
     const form = new FormData();
     form.append("file", file);
     const res = await this.f(`${this.base}/api/attachments/stage`, {
       method: "POST",
-      headers: { "x-bot-id": botId, "x-command-id": crypto.randomUUID() },
+      headers: {
+        "x-bot-id": botId,
+        "x-attachment-draft-token": draftToken,
+        "x-command-id": crypto.randomUUID(),
+      },
       body: form,
     });
     if (!res.ok) {
@@ -179,11 +184,16 @@ export class ApiClient {
     }
     return (await res.json()) as AttachmentDto;
   }
-  getStagedAttachment(id: string): Promise<AttachmentDto> {
-    return this.req(`/api/attachments/staged/${id}`);
+  getStagedAttachment(id: string, draftToken: AttachmentDraftTokenDto): Promise<AttachmentDto> {
+    return this.req(`/api/attachments/staged/${id}`, {
+      headers: { "x-attachment-draft-token": draftToken },
+    });
   }
-  unstageAttachment(id: string): Promise<void> {
-    return this.req(`/api/attachments/staged/${id}`, { method: "DELETE" });
+  unstageAttachment(id: string, draftToken: AttachmentDraftTokenDto): Promise<void> {
+    return this.req(`/api/attachments/staged/${id}`, {
+      method: "DELETE",
+      headers: { "x-attachment-draft-token": draftToken },
+    });
   }
   attachmentUrl(id: string): string {
     return `${this.base}/api/attachments/${id}`;

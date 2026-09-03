@@ -2,6 +2,7 @@ import type { JSX } from "react";
 import { useEffect, useState } from "react";
 import { Plus } from "lucide-react";
 import { BottomSheet } from "@astryxdesign/core/BottomSheet";
+import { useAppShellMobile } from "@astryxdesign/core/AppShell";
 import { Button } from "@astryxdesign/core/Button";
 import { Dialog, DialogHeader } from "@astryxdesign/core/Dialog";
 import { EmptyState } from "@astryxdesign/core/EmptyState";
@@ -12,7 +13,6 @@ import { Item } from "@astryxdesign/core/Item";
 import { TextInput } from "@astryxdesign/core/TextInput";
 import { Timestamp } from "@astryxdesign/core/Timestamp";
 import { VStack } from "@astryxdesign/core/VStack";
-import { useMediaQuery } from "@astryxdesign/core/hooks";
 import type { ThreadDto } from "@omarchy-bot/protocol";
 import { api, apiErrorMessage } from "../lib/api.ts";
 
@@ -115,7 +115,7 @@ export function HistoryDialog({
   onSelectThread,
   onNewConversation,
 }: HistoryDialogProps): JSX.Element {
-  const isSmallScreen = useMediaQuery("(max-width: 767px)");
+  const { isMobile: isSmallScreen } = useAppShellMobile();
   const [query, setQuery] = useState("");
   const [threads, setThreads] = useState<ThreadDto[]>([]);
   const [loading, setLoading] = useState(false);

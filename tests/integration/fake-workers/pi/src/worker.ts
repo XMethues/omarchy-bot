@@ -13,6 +13,13 @@
  *
  * Stays alive until stdin closes (daemon lifecycle contract).
  */
+import { appendFileSync, readFileSync } from "node:fs";
+import path from "node:path";
+import {
+  AGENT_CAPABILITY_INVENTORY_VERSION,
+  type AgentCapabilityInventory,
+  type ProbePayload,
+} from "../../../../../packages/agent-contract/src/agent-protocol.ts";
 import { readJsonl } from "../../../../../packages/agent-contract/src/framing.ts";
 
 const write = (msg: unknown): void => {
@@ -22,6 +29,54 @@ const write = (msg: unknown): void => {
 write({ type: "hello", v: 1, worker: "agent:pi", pid: process.pid });
 const heartbeat = setInterval(() => write({ type: "heartbeat" }), 5_000);
 heartbeat.unref?.();
+
+const AGENT_VERSION = "fake-pi-1";
+
+interface FakeProbeControl {
+  ok?: unknown;
+  image?: unknown;
+  fakeProbe?: "invalid" | "offline";
+  fakeCapabilities?: {
+    steering?: boolean;
+    abort?: boolean;
+    sessionDeletion?: boolean;
+    nativeThreadActions?: Array<"resume" | "history" | "close" | "rename" | "delete" | "fork" | "compact">;
+    nativeEventFamilies?: string[];
+  };
+}
+
+function dataDir(): string | undefined {
+  return process.env.OMARCHY_BOT_HOME;
+}
+
+function probeControl(): FakeProbeControl {
+  try {
+    const root = dataDir();
+    if (root === undefined) return {};
+    return JSON.parse(readFileSync(path.join(root, "conformance", `pi-${AGENT_VERSION}.json`), "utf8")) as FakeProbeControl;
+  } catch {
+    return {};
+  }
+}
+
+function capabilitiesFor(control: FakeProbeControl): AgentCapabilityInventory {
+  return {
+    version: AGENT_CAPABILITY_INVENTORY_VERSION,
+    steering: control.fakeCapabilities?.steering ?? true,
+    abort: control.fakeCapabilities?.abort ?? true,
+    sessionDeletion: control.fakeCapabilities?.sessionDeletion ?? true,
+    nativeThreadActions: control.fakeCapabilities?.nativeThreadActions ?? ["resume", "history", "close"],
+    attachments: { text: true, image: control.ok === true && control.image === "verified" },
+    nativeEventFamilies: control.fakeCapabilities?.nativeEventFamilies ?? ["message", "tool", "turn", "error", "native"],
+  };
+}
+
+let currentCapabilities = capabilitiesFor(probeControl());
+
+function recordCommand(command: "message.steer" | "turn.abort"): void {
+  const root = dataDir();
+  if (root !== undefined) appendFileSync(path.join(root, "fake-worker-commands.log"), `${command}\n`);
+}
 
 let sessionCounter = 0;
 interface FakeAttachment {
@@ -49,15 +104,32 @@ const respondError = (requestId: string, error: string): void => {
 readJsonl(Bun.stdin.stream(), (raw) => {
   const msg = raw as Record<string, unknown> & { type: string; requestId?: string };
   switch (msg.type) {
-    case "probe":
+    case "probe": {
+      const control = probeControl();
+      if (control.fakeProbe === "offline") {
+        respondError(msg.requestId!, "fake probe offline");
+        break;
+      }
+      if (control.fakeProbe === "invalid") {
+        respond(msg.requestId!, {
+          agentId: "pi",
+          installed: true,
+          sdkOk: true,
+          agentVersion: AGENT_VERSION,
+          capabilities: { version: 999 },
+        });
+        break;
+      }
+      currentCapabilities = capabilitiesFor(control);
       respond(msg.requestId!, {
         agentId: "pi",
         installed: true,
         sdkOk: true,
-        agentVersion: "fake-pi-1",
-        capabilities: { sessionDeletion: true },
-      });
+        agentVersion: AGENT_VERSION,
+        capabilities: currentCapabilities,
+      } satisfies ProbePayload);
       break;
+    }
     case "session.open": {
       const id = `s${++sessionCounter}`;
       sessions.set(id, { aborted: false, streaming: false });
@@ -105,6 +177,24 @@ readJsonl(Bun.stdin.stream(), (raw) => {
           write({ type: "event", event: { type: "message.delta", sessionId, text: said.slice(3) } });
           await Bun.sleep(350);
           write({ type: "event", event: { type: "turn.completed", sessionId, usage: { tokens: 1 } } });
+          respond(msg.requestId!, { accepted: true });
+          return;
+        }
+        if (text === "undeclared-events") {
+          write({ type: "event", event: { type: "tool.started", sessionId, id: "undeclared-tool", name: "secret-tool", input: { token: "must-not-leak" } } });
+          write({
+            type: "event",
+            event: {
+              type: "native",
+              sessionId,
+              agentId: "pi",
+              capability: "fake.secret-progress",
+              payload: { token: "must-not-leak" },
+              sensitivity: "secret",
+            },
+          });
+          write({ type: "event", event: { type: "message.delta", sessionId, text: "declared message" } });
+          write({ type: "event", event: { type: "turn.completed", sessionId } });
           respond(msg.requestId!, { accepted: true });
           return;
         }
@@ -186,6 +276,7 @@ readJsonl(Bun.stdin.stream(), (raw) => {
       break;
     }
     case "message.steer": {
+      recordCommand("message.steer");
       const { sessionId, text } = msg as unknown as { sessionId: string; text: string };
       const s = sessions.get(sessionId);
       if (!s || !s.streaming) {
@@ -205,6 +296,7 @@ readJsonl(Bun.stdin.stream(), (raw) => {
       break;
     }
     case "turn.abort": {
+      recordCommand("turn.abort");
       const { sessionId } = msg as unknown as { sessionId: string };
       const s = sessions.get(sessionId);
       if (s?.streaming) {

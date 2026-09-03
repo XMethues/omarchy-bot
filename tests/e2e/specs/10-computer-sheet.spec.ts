@@ -8,16 +8,16 @@ const PNG = Buffer.from(
 type ComputerState = "idle" | "bot-using" | "waiting" | "needs-you" | "user-control" | "emergency-stopped" | "unavailable";
 
 async function createBot(page: Page, name: string): Promise<string> {
-  await page.getByTestId("sidebar-create-bot").click();
-  await page.getByTestId("create-bot-name").fill(name);
-  await page.getByTestId("create-bot-instructions").fill("Computer E2E teammate");
+  await page.getByRole("navigation", { name: "Bot navigation" }).getByRole("button", { name: "New bot" }).click();
+  await page.getByRole("textbox", { name: "Name" }).fill(name);
+  await page.getByRole("textbox", { name: "Job / Instructions" }).fill("Computer E2E teammate");
   await page.getByRole("radio", { name: /^Pi/ }).check();
-  await page.getByTestId("create-bot-submit").click();
-  const row = page.locator("[data-testid^='sidebar-bot-']", { hasText: name });
+  await page.getByRole("button", { name: "Create bot" }).click();
+  const row = page.getByRole("button", { name, exact: true });
   await expect(row).toBeVisible();
-  const testId = await row.getAttribute("data-testid");
-  if (testId === null) throw new Error(`missing sidebar test id for ${name}`);
-  return testId.slice("sidebar-bot-".length);
+  const botId = new URL(page.url()).searchParams.get("bot");
+  if (botId === null) throw new Error(`missing selected bot id for ${name}`);
+  return botId;
 }
 
 async function fulfillJson(route: Route, body: unknown): Promise<void> {
@@ -39,7 +39,7 @@ test.describe("contextual computer sheet", () => {
       if (url.pathname === "/api/computer/return-to-bot") state = "idle";
       const selectedBotId = url.searchParams.get("botId") ?? undefined;
       const selectedState: ComputerState =
-        state === "bot-using" && selectedBotId !== activeBotId ? "idle" : state;
+        state === "bot-using" && selectedBotId !== undefined && selectedBotId !== activeBotId ? "idle" : state;
       await fulfillJson(route, {
         state: selectedState,
         ...(selectedState === "bot-using" && activeBotId !== undefined ? { botId: activeBotId } : {}),
@@ -58,35 +58,34 @@ test.describe("contextual computer sheet", () => {
     state = "bot-using";
     await page.reload();
 
-    const trigger = page.getByTestId("header-computer");
+    const trigger = page.getByRole("button", { name: "Open computer", exact: true });
     await expect(trigger).toHaveAttribute("data-state", "bot-using");
-    await expect(trigger).toHaveAccessibleName(/this bot is using it/i);
     await trigger.click();
     const drawer = page.getByRole("complementary", { name: "Computer", exact: true });
     await expect(drawer).toBeVisible();
     await expect(page.getByRole("dialog", { name: "Computer" })).toHaveCount(0);
 
-    const sheet = page.getByTestId("computer-sheet");
+    const sheet = drawer;
     await expect(sheet).toBeVisible();
-    await expect(sheet.getByTestId("computer-preview")).toHaveAttribute("alt", "Latest computer preview for Computer Bot");
+    await expect(sheet.getByAltText("Latest computer preview for Computer Bot")).toBeVisible();
     await expect(sheet).toContainText("This bot is using the computer.");
     await expect(sheet).not.toContainText(/lease|TTL|token|queue depth/i);
-    await sheet.getByTestId("computer-preview-expand").click();
+    await sheet.getByRole("button", { name: "Expand desktop preview" }).click();
     await expect(page.getByAltText("Expanded computer preview for Computer Bot")).toBeVisible();
     await page.keyboard.press("Escape");
     await expect(page.getByAltText("Expanded computer preview for Computer Bot")).toBeHidden();
     await expect(drawer).toBeVisible();
-    await expect(sheet.getByTestId("computer-take-control")).toBeVisible();
-    await expect(sheet.getByTestId("computer-return-to-bot")).toHaveCount(0);
+    await expect(sheet.getByRole("button", { name: "Take control" })).toBeVisible();
+    await expect(sheet.getByRole("button", { name: "Return to bot" })).toHaveCount(0);
 
-    await sheet.getByTestId("computer-take-control").click();
-    await expect(sheet.getByTestId("computer-return-to-bot")).toBeVisible();
-    await expect(sheet.getByTestId("computer-take-control")).toHaveCount(0);
+    await sheet.getByRole("button", { name: "Take control" }).click();
+    await expect(sheet.getByRole("button", { name: "Return to bot" })).toBeVisible();
+    await expect(sheet.getByRole("button", { name: "Take control" })).toHaveCount(0);
 
-    await sheet.getByTestId("computer-return-to-bot").click();
+    await sheet.getByRole("button", { name: "Return to bot" }).click();
     await expect(sheet).toContainText("Computer ready");
-    await expect(sheet.getByTestId("computer-return-to-bot")).toHaveCount(0);
-    await page.getByTestId("computer-drawer-close").click();
+    await expect(sheet.getByRole("button", { name: "Return to bot" })).toHaveCount(0);
+    await page.getByRole("button", { name: "Close computer drawer" }).click();
     await expect(drawer).toBeHidden();
     await expect(trigger).toBeFocused();
   });
@@ -103,35 +102,43 @@ test.describe("contextual computer sheet", () => {
       if (url.pathname === "/api/computer/emergency-stop") emergencyStopped = true;
       if (url.pathname === "/api/computer/resume") emergencyStopped = false;
       const selectedBotId = url.searchParams.get("botId") ?? undefined;
-      const selectedState: ComputerState = emergencyStopped ? "emergency-stopped" : selectedBotId === waitingBotId ? "waiting" : "idle";
+      const selectedState: ComputerState =
+        emergencyStopped
+          ? "emergency-stopped"
+          : selectedBotId === waitingBotId || (selectedBotId === undefined && waitingBotId !== undefined)
+            ? "waiting"
+            : "idle";
       await fulfillJson(route, {
         state: selectedState,
-        ...(selectedState === "waiting" && selectedBotId !== undefined ? { botId: selectedBotId } : {}),
+        ...(selectedState === "waiting" && waitingBotId !== undefined ? { botId: waitingBotId } : {}),
         activity: selectedState === "waiting" ? "Waiting for computer." : selectedState === "emergency-stopped" ? "Computer control is stopped." : "The computer is ready.",
       });
     });
 
     await page.goto("/");
+    await expect(page.getByRole("complementary", { name: "Global computer safety" })).toHaveCount(0);
     waitingBotId = await createBot(page, "Waiting Bot");
     const otherBotId = await createBot(page, "Other Bot");
 
-    await page.getByTestId(`sidebar-bot-${waitingBotId}`).click();
-    await expect(page.getByTestId("header-computer")).toHaveAttribute("data-state", "waiting");
-    await page.getByTestId("header-computer").click();
-    await expect(page.getByTestId("computer-sheet")).toContainText("Waiting for computer");
-    await expect(page.getByTestId("computer-take-control")).toHaveCount(0);
+    await page.getByRole("button", { name: "Waiting Bot", exact: true }).click();
+    await expect(page.getByRole("button", { name: "Open computer", exact: true })).toHaveAttribute("data-state", "waiting");
+    await page.getByRole("button", { name: "Open computer", exact: true }).click();
+    const computer = page.getByRole("complementary", { name: "Computer", exact: true });
+    await expect(computer.getByRole("heading", { name: "Waiting for computer" })).toBeVisible();
+    await expect(computer.getByRole("button", { name: "Take control" })).toHaveCount(0);
     await page.keyboard.press("Escape");
 
-    await page.getByTestId(`sidebar-bot-${otherBotId}`).click();
-    await expect(page.getByTestId("header-computer")).toHaveAttribute("data-state", "idle");
+    await page.getByRole("button", { name: "Other Bot", exact: true }).click();
+    await expect(page.getByRole("button", { name: "Open computer", exact: true })).toHaveAttribute("data-state", "idle");
 
-    const emergency = page.getByTestId("emergency-computer-control");
-    await expect(emergency).toBeVisible();
+    const emergency = page.getByRole("complementary", { name: "Global computer safety" });
     await expect(emergency.getByRole("button", { name: "Emergency stop computer" })).toBeVisible();
     await emergency.getByRole("button", { name: "Emergency stop computer" }).click();
+    await page.getByRole("button", { name: "Waiting Bot", exact: true }).click();
     await expect(emergency.getByRole("button", { name: "Resume computer control" })).toBeVisible();
     await emergency.getByRole("button", { name: "Resume computer control" }).click();
     await expect(emergency.getByRole("button", { name: "Emergency stop computer" })).toBeVisible();
+    expect(otherBotId).not.toBe(waitingBotId);
   });
 
   test("uses a bottom sheet on a narrow screen", async ({ page }) => {
@@ -140,8 +147,7 @@ test.describe("contextual computer sheet", () => {
     await page.goto("/");
     await createBot(page, "Mobile Computer Bot");
     await page.setViewportSize({ width: 390, height: 780 });
-    await page.getByTestId("header-computer").click();
+    await page.getByRole("button", { name: "Open computer", exact: true }).click();
     await expect(page.getByRole("dialog", { name: "Computer" })).toBeVisible();
-    await expect(page.getByTestId("computer-sheet")).toBeVisible();
   });
 });

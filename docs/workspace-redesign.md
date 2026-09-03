@@ -1,6 +1,6 @@
 # AI teammate workspace redesign
 
-Status: accepted on 2026-09-02
+Status: implemented; design accepted on 2026-09-02
 
 This document defines the accepted product and interaction design. Earlier architecture drafts remain research inputs only where they do not conflict with this specification.
 
@@ -16,13 +16,21 @@ This document defines the accepted product and interaction design. Earlier archi
 - A Bot's editable profile contains its name, Job/Instructions, and avatar.
 - Updating Instructions affects future turns in every Thread belonging to that Bot. Existing messages remain unchanged.
 
+### Migration boundary
+
+- Enabled Agent inventory is never a Bot and is not migrated into the Sidebar.
+- Migration creates or preserves Bots only for legacy rows with user-owned conversation, profile, or configuration data.
+- Internal Bot provenance is `user_created`, `legacy_conversation`, or `legacy_inventory`.
+- Only rows proven to be `legacy_inventory` may be deleted. Ambiguous rows are preserved.
+- Migration is lossless for retained Threads, messages, attachments, profile data, and native-session mappings, including databases where an earlier migration is already marked applied.
+
 ### Native Agent behavior
 
 - Omarchy Bot preserves each Agent's native capabilities and native approval behavior.
 - It does not add an `ask`/`trusted` policy, capability filter, permission manifest, or parallel approval gate.
-- Every adapter maintains a versioned, tested Agent Capability Inventory derived from the official interface and conformance probes.
-- Contextual native operations are shown and executed according to that inventory. Unsupported operations are not simulated.
-- Agent-specific session operations are resolved while implementing that adapter, not through speculative global product rules.
+- Every adapter owns a compact `AgentCapabilityInventory` returned by the probe protocol and derived from the official interface plus conformance probes.
+- The inventory is the sole support-policy source for steering, abort, session deletion, Thread actions, accepted attachment modalities, and native event families.
+- Contextual native operations are shown and executed according to that inventory. Unsupported operations are rejected rather than simulated; Pi image input is not claimed while its provider conformance reports images unsupported.
 
 ## 2. Information architecture
 
@@ -45,7 +53,7 @@ There is no persistent global TopNav.
 
 ## 3. Sidebar
 
-Each row represents one user-created Bot and shows:
+Each row represents one persistent Bot—user-created or conservatively preserved from legacy data—and never an enabled Agent-inventory entry. It shows:
 
 - avatar and name;
 - recent-message preview;
@@ -65,9 +73,9 @@ Behavior:
 Desktop notifications are sent when a background Bot completes work or needs user action. They are suppressed while the user is already viewing that Bot in a focused window.
 
 ## 4. Bot creation and lifecycle
-### Create Bot Sheet
+### Create Bot surfaces
 
-Use one simple Astryx Sheet.
+Use one Astryx Dialog on desktop and one Astryx BottomSheet on narrow viewports.
 
 Fields:
 
@@ -79,7 +87,7 @@ The Agent picker lists every supported Agent. An unavailable Agent remains visib
 
 ### Profile editing
 
-The user may edit the Bot's name, Instructions, and avatar. The Agent reference is fixed; changing execution backend means creating another Bot.
+The profile surface identifies the Bot's immutable Agent as read-only context. The user may edit the Bot's name, Instructions, and avatar. Changing execution backend means creating another Bot.
 
 ### Archive and delete
 
@@ -94,9 +102,11 @@ The user may edit the Bot's name, Instructions, and avatar. The Agent reference 
 A Bot can use either:
 
 - a locally uploaded image; or
-- a deterministic animated DiceBear v10 SVG avatar.
+- a deterministic animated DiceBear SVG Avatar Recipe.
 
-New Bots receive a generated avatar automatically. In profile editing, the user may upload an image, choose another generated variation, or describe an avatar in a prompt. The Bot's selected Agent converts that prompt into a constrained, versioned Avatar Recipe. Omarchy Bot validates the recipe and renders DiceBear itself; Agent-produced SVG, HTML, scripts, and remote URLs are never rendered.
+New Bots and explicitly regenerated avatars use renderer id `dicebear-core@10.7.0+styles@10.6.0` and DiceBear's native `animationVariant`. Each recipe stores its renderer id, style, seed, and validated options so rendering remains lossless. Legacy renderer id `9.4.3` remains meaningful: those recipes keep deterministic legacy rendering and are never silently rewritten. A legacy avatar upgrades only when the user explicitly requests a new variation or prompt-generated recipe.
+
+In profile editing, the user may upload an image, choose another generated variation, or describe an avatar in a prompt. The Bot's selected Agent converts that prompt into a constrained Avatar Recipe. Omarchy Bot validates the recipe and renders DiceBear itself; Agent-produced SVG, HTML, scripts, and remote URLs are never rendered.
 
 Motion is stateful and restrained:
 
@@ -110,7 +120,7 @@ Motion is stateful and restrained:
 
 - A Bot may own multiple Threads.
 - Selecting a Bot opens its most recently active Thread.
-- Clicking the conversation title opens a contextual history Sheet containing New conversation, that Bot's recent Threads, and search.
+- Clicking the conversation title opens a contextual history Dialog on desktop and BottomSheet on narrow viewports, containing New conversation, that Bot's recent Threads, and search.
 - A new Thread has no hero, greeting, example prompts, or cards. Only the Composer is visible.
 - A Thread is created lazily when its first message is sent so abandoned blank conversations do not pollute history.
 - After the first send, a concise local title is derived from the first user message without an additional Agent call. The title can be changed where the active Agent/session integration supports the corresponding operation; display metadata remains distinct from claims about native session mutation.
@@ -142,7 +152,7 @@ Enter sends; Shift+Enter inserts a newline. Sending while the Bot is working use
 - Images render inline previews; other files render compact attachment rows.
 - Permanent deletion of the owning data removes managed copies.
 - Files remain local and are not uploaded to a cloud service by Omarchy Bot.
-- Agent consumption and native attachment actions follow the adapter's capability inventory; the UI does not invent unsupported Agent behavior.
+- The attachment service accepts a send only when the selected Bot's probed `AgentCapabilityInventory` claims that attachment modality. Unsupported modalities are rejected contextually and are neither transformed nor forwarded.
 
 ## 8. Voice input
 
@@ -187,12 +197,11 @@ The current implementation has one real Omarchy screen shared by all Bots and th
 - Keep one invisible global input arbiter so clicks and typing cannot interleave.
 - Do not show lease holders, TTLs, queue depth, or engineering diagnostics in normal UI.
 - A Computer icon is always present in the Conversation Header. It is visually quiet while inactive and gains state only while the Bot is using the computer or needs human input.
-- The icon opens a docked Computer drawer on desktop and an Astryx Bottom Sheet on narrow windows, with a live preview and plain-language activity.
-- Selecting the preview’s expand icon opens the desktop image in an Astryx Lightbox modal.
+- The icon opens a docked Computer drawer on desktop and an Astryx BottomSheet on narrow viewports, with a live preview and plain-language activity.
+- Selecting the preview's expand icon opens the desktop image in an Astryx Lightbox modal.
 - Show **Take control** only when human input is relevant.
 - While the user controls the screen, show **Return to Bot**; re-observe before resuming automation.
-- A Bot waiting behind another shows **Waiting for computer** on that Bot only, without exposing queue mechanics.
-- Emergency stop remains a global fail-safe outside the normal conversation controls.
+- Emergency control is never permanent idle Sidebar chrome. It is immediately available while computer input is active and remains available in the stopped state so the user can deliberately resume.
 - The arbiter coordinates the shared input seat; it does not approve or filter Agent capabilities.
 
 Independent per-Bot screens remain the required future architecture for true parallel desktop operation. Hyprland workspaces alone are not sufficient isolation.
@@ -203,10 +212,8 @@ Settings opens from the bottom of the Sidebar and includes at least:
 
 - Voice, including Auto-send voice transcriptions;
 - Archived Bots, including restore and permanent deletion;
-- appearance behavior and system-following theme state;
+- Appearance, showing that theme follows the current Omarchy/system preference;
 - contextual setup guidance for unavailable local integrations.
-
-Bot-specific profile actions remain in the selected Bot's contextual menu rather than global Settings.
 
 ## 12. Visual system
 
@@ -219,9 +226,10 @@ Bot-specific profile actions remain in the selected Bot's contextual menu rather
 - Avoid neon, glassmorphism, purple AI gradients, excessive pills, decorative charts, and permanent ambient animation.
 - The blank Thread remains genuinely blank rather than becoming a landing-page hero.
 - Respect reduced motion, keyboard navigation, visible focus, semantic labels, and sufficient contrast.
+- Give each meaningful Bot avatar an accessible label derived from the Bot name; hide purely decorative duplicates from assistive technology.
 
-Use Astryx components discovered through its CLI, especially SideNav, Layout, ChatMessageList, ChatComposer, Sheet/Dialog, SelectableCard, and Avatar. Extend composition and tokens where needed; do not recreate existing primitives by hand.
+Use Astryx components discovered through its CLI, especially SideNav, Layout, ChatMessageList, ChatComposer, Dialog, BottomSheet, SelectableCard, and Avatar. Extend composition and tokens where needed; do not recreate existing primitives by hand.
 
 ## 13. Conformance boundary
 
-The implementation preserves one public model across domain types, persistence, daemon APIs, worker adapters, and the web workspace. Migration coverage proves that existing conversations retain their Bot, Thread, message, attachment, profile, and native-session data while retired schema and replay events are removed. API, responsive layout, accessibility, reduced-motion, dictation, attachment, steering, background-attention, deletion, and Computer takeover suites defend the accepted behavior.
+The implementation preserves one public model across domain types, persistence, daemon APIs, worker adapters, and the web workspace. Migration coverage must prove that retained user-owned conversations keep their Bot, Thread, message, attachment, profile, avatar recipe, and native-session data; inventory-only rows are removed only from proven provenance, and ambiguous rows remain. API and worker tests exercise public protocols. Browser E2E policy is role-first: interact through accessible roles and visible names, using test ids only where no semantic seam exists, and never couple assertions to CSS classes or component internals. No validation count is part of this design authority.

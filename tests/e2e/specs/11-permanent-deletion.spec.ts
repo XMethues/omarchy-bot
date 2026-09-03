@@ -1,24 +1,25 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
 async function createBot(page: Page, name: string): Promise<string> {
-  await page.getByTestId("sidebar-create-bot").click();
-  await page.getByTestId("create-bot-name").fill(name);
-  await page.getByTestId("create-bot-instructions").fill("Permanent deletion E2E bot");
+  await page.getByRole("navigation", { name: "Bot navigation" }).getByRole("button", { name: "New bot" }).click();
+  await page.getByRole("textbox", { name: "Name" }).fill(name);
+  await page.getByRole("textbox", { name: "Job / Instructions" }).fill("Permanent deletion E2E bot");
   await page.getByRole("radio", { name: /^Pi/ }).check();
-  await page.getByTestId("create-bot-submit").click();
-  const row = page.locator("[data-testid^='sidebar-bot-']", { hasText: name });
-  await expect(row).toBeVisible();
-  const testId = await row.getAttribute("data-testid");
-  if (testId === null) throw new Error(`missing sidebar test id for ${name}`);
-  return testId.slice("sidebar-bot-".length);
+  await page.getByRole("button", { name: "Create bot" }).click();
+  await expect(page.getByRole("button", { name, exact: true })).toBeVisible();
+  const botId = new URL(page.url()).searchParams.get("bot");
+  if (botId === null) throw new Error(`missing selected bot id for ${name}`);
+  return botId;
 }
 
 function composerInput(page: Page): Locator {
-  return page.getByTestId("composer").locator('[contenteditable="true"]');
+  return page.getByRole("textbox", { name: "Message input" });
 }
 
-async function archive(page: Page, botId: string): Promise<void> {
-  await page.getByTestId(`sidebar-bot-actions-${botId}`).click();
+async function archive(page: Page, botName: string): Promise<void> {
+  await page.getByRole("navigation", { name: "Bot navigation" })
+    .getByRole("button", { name: `Actions for ${botName}` })
+    .click();
   await page.getByRole("menuitem", { name: /Archive/ }).click();
 }
 
@@ -29,8 +30,8 @@ test.describe("permanent archived Bot deletion", () => {
     const botName = "Delete this archived Bot";
     const botId = await createBot(page, botName);
     await composerInput(page).fill("known draft before archive");
-    await archive(page, botId);
-    await expect(page.getByTestId(`sidebar-bot-${botId}`)).toHaveCount(0);
+    await archive(page, botName);
+    await expect(page.getByRole("button", { name: botName, exact: true })).toHaveCount(0);
     await expect.poll(() => new URL(page.url()).searchParams.get("bot")).not.toBe(botId);
 
     const staleDraftKey = `draft:v1:${botId}:blank`;
@@ -38,12 +39,13 @@ test.describe("permanent archived Bot deletion", () => {
       key: staleDraftKey,
       value: JSON.stringify({ text: "stale draft", cursor: 11, stagedIds: [] }),
     });
-    await page.getByTestId("sidebar-settings").click();
-    const archivedRow = page.getByTestId(`settings-archived-bot-${botId}`);
-    await expect(archivedRow).toBeVisible();
+    await page.getByRole("navigation", { name: "Bot navigation" }).getByRole("button", { name: "Settings", exact: true }).click();
+    const settings = page.getByRole("dialog", { name: "Settings" });
+    const deleteButton = settings.getByRole("button", { name: `Permanently delete ${botName}` });
+    await expect(deleteButton).toBeVisible();
 
-    await page.getByTestId(`settings-delete-${botId}`).click();
-    const confirmation = page.getByTestId("permanent-delete-confirmation");
+    await deleteButton.click();
+    const confirmation = page.getByRole("alertdialog", { name: `Permanently delete ${botName}?` });
     await expect(confirmation).toBeVisible();
     await expect(confirmation).toContainText(botName);
     await expect(confirmation).toContainText("Threads");
@@ -51,19 +53,19 @@ test.describe("permanent archived Bot deletion", () => {
 
     await page.getByRole("button", { name: "Keep archived Bot" }).click();
     await expect(confirmation).not.toBeVisible();
-    await expect(archivedRow).toBeVisible();
+    await expect(deleteButton).toBeVisible();
     await expect.poll(() => page.evaluate((key) => sessionStorage.getItem(key), staleDraftKey)).not.toBeNull();
 
-    await page.getByTestId(`settings-delete-${botId}`).click();
+    await deleteButton.click();
     await page.getByRole("button", { name: "Delete permanently" }).click();
     await expect(confirmation).not.toBeVisible();
-    await expect(archivedRow).toHaveCount(0);
+    await expect(deleteButton).toHaveCount(0);
     await expect.poll(() => page.evaluate((key) => sessionStorage.getItem(key), staleDraftKey)).toBeNull();
     const deleted = await page.request.get(`/api/bots/${botId}`);
     expect(deleted.status()).toBe(404);
 
     await page.reload();
-    await page.getByTestId("sidebar-settings").click();
-    await expect(page.getByTestId(`settings-archived-bot-${botId}`)).toHaveCount(0);
+    await page.getByRole("navigation", { name: "Bot navigation" }).getByRole("button", { name: "Settings", exact: true }).click();
+    await expect(page.getByRole("dialog", { name: "Settings" }).getByRole("button", { name: `Permanently delete ${botName}` })).toHaveCount(0);
   });
 });

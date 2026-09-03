@@ -1,8 +1,8 @@
-import type { JSX, ReactNode, RefObject } from "react";
+import type { JSX, RefObject } from "react";
 import { useRef, useState } from "react";
 import { AlertDialog } from "@astryxdesign/core/AlertDialog";
+import { useAppShellMobile } from "@astryxdesign/core/AppShell";
 import { Banner } from "@astryxdesign/core/Banner";
-import { BottomSheet } from "@astryxdesign/core/BottomSheet";
 import { Button } from "@astryxdesign/core/Button";
 import { Dialog, DialogHeader } from "@astryxdesign/core/Dialog";
 import { EmptyState } from "@astryxdesign/core/EmptyState";
@@ -12,13 +12,16 @@ import { Icon } from "@astryxdesign/core/Icon";
 import { Item } from "@astryxdesign/core/Item";
 import { Text } from "@astryxdesign/core/Text";
 import { VStack } from "@astryxdesign/core/VStack";
-import { useMediaQuery } from "@astryxdesign/core/hooks";
-import type { BotDto, BotViewDto, DeleteBotResultDto } from "@omarchy-bot/protocol";
+import type { AgentDto, BotDto, BotViewDto, DeleteBotResultDto, DictationDto } from "@omarchy-bot/protocol";
+import { agentAvailabilityDescription } from "../lib/agentPresentation.ts";
 import { clearDraftsByBot } from "../lib/drafts.ts";
 import { AvatarView } from "./AvatarView.tsx";
+import { VoiceSettingsControl } from "./VoiceSettingsControl.tsx";
+import { BottomSheetWithReturnFocus } from "./BottomSheetWithReturnFocus.tsx";
 
 export interface SettingsDialogProps {
   open: boolean;
+  mobileReturnFocusRef: RefObject<HTMLElement | null>;
   onClose: () => void;
   archivedBots: BotViewDto[];
   onRestoreBot: (botId: string) => Promise<BotDto>;
@@ -28,13 +31,30 @@ export interface SettingsDialogProps {
   archivedBotsLoading?: boolean;
   archivedBotsError?: string;
   onRetryArchivedBots?: () => void;
-  /** Other Settings domains, such as Voice, compose above Archived Bots. */
-  children?: ReactNode;
+  agents: AgentDto[];
+  agentsLoading?: boolean;
+  agentsError?: string;
+  dictation: DictationDto;
+  autoSendVoice: boolean;
+  onAutoSendVoiceChange: (enabled: boolean) => void;
+  notificationPermission: NotificationPermission | "unsupported";
+  onRequestNotifications: () => void;
 }
 
 interface SettingsContentProps extends Pick<
   SettingsDialogProps,
-  "archivedBots" | "archivedBotsLoading" | "archivedBotsError" | "onRetryArchivedBots" | "children"
+  | "archivedBots"
+  | "archivedBotsLoading"
+  | "archivedBotsError"
+  | "onRetryArchivedBots"
+  | "agents"
+  | "agentsLoading"
+  | "agentsError"
+  | "dictation"
+  | "autoSendVoice"
+  | "onAutoSendVoiceChange"
+  | "notificationPermission"
+  | "onRequestNotifications"
 > {
   compactHeading: boolean;
   regionRef: RefObject<HTMLDivElement | null>;
@@ -50,7 +70,14 @@ function SettingsContent({
   archivedBotsLoading = false,
   archivedBotsError,
   onRetryArchivedBots,
-  children,
+  agents,
+  agentsLoading = false,
+  agentsError,
+  dictation,
+  autoSendVoice,
+  onAutoSendVoiceChange,
+  notificationPermission,
+  onRequestNotifications,
   compactHeading,
   regionRef,
   restoringBotId,
@@ -61,10 +88,89 @@ function SettingsContent({
 }: SettingsContentProps): JSX.Element {
   const archived = archivedBots.filter((bot) => bot.archived);
   const operationPending = restoringBotId !== undefined || deletingBotId !== undefined;
+  const unavailableAgents = agents.filter((agent) => agent.status !== "ready");
+  const notificationsDescription =
+    notificationPermission === "unsupported"
+      ? "Desktop notifications are not available in this browser."
+      : notificationPermission === "denied"
+        ? "Notifications are blocked. Allow them in this site’s browser settings."
+        : notificationPermission === "granted"
+          ? "Enabled for background Bot completions and requests for your attention."
+          : "Enable alerts for background Bot completions and requests for your attention.";
   return (
-    <VStack gap={4} padding={4} aria-busy={archivedBotsLoading || operationPending || undefined} data-testid="settings-dialog">
+    <VStack
+      gap={4}
+      padding={4}
+      aria-busy={archivedBotsLoading || agentsLoading || operationPending || undefined}
+      data-testid="settings-dialog"
+    >
       {compactHeading ? <Heading level={2}>Settings</Heading> : null}
-      {children}
+      <VStack gap={2}>
+        <VStack gap={0.5}>
+          <Heading level={3}>Appearance</Heading>
+          <Text color="secondary">Theme follows Omarchy and your system preference.</Text>
+        </VStack>
+        <Item
+          label="Omarchy / system"
+          description="Follows your current Omarchy and system appearance."
+          align="start"
+        />
+      </VStack>
+
+      <VStack gap={2}>
+        <VStack gap={0.5}>
+          <Heading level={3}>Local integrations</Heading>
+          <Text color="secondary">Setup guidance appears here when a local integration cannot run.</Text>
+        </VStack>
+        {agentsLoading ? (
+          <EmptyState
+            icon={<Icon icon="clock" size="lg" />}
+            title="Checking Agent integrations"
+            description="Finding installed execution backends."
+            isCompact
+          />
+        ) : agentsError !== undefined ? (
+          <Banner status="error" title="Agent integrations couldn’t be checked" description={agentsError} />
+        ) : unavailableAgents.length === 0 && dictation.state !== "unavailable" ? (
+          <Text color="secondary">Detected Agent and voice integrations are ready.</Text>
+        ) : (
+          unavailableAgents.map((agent) => (
+            <Item
+              key={agent.id}
+              label={agent.displayName}
+              description={agent.guidance ?? agentAvailabilityDescription(agent)}
+              align="start"
+            />
+          ))
+        )}
+        {dictation.state === "unavailable" ? (
+          <Banner
+            status="warning"
+            title="Voice dictation unavailable"
+            description={
+              dictation.error
+              ?? "Voxtype is unavailable. Install or start Voxtype, then reopen Settings to check again."
+            }
+          />
+        ) : null}
+      </VStack>
+
+      <VStack gap={2}>
+        <VStack gap={0.5}>
+          <Heading level={3}>Voice and notifications</Heading>
+          <Text color="secondary">Control browser-local input and attention preferences.</Text>
+        </VStack>
+        <VoiceSettingsControl value={autoSendVoice} onChange={onAutoSendVoiceChange} />
+        <Item label="Desktop notifications" description={notificationsDescription} align="start" />
+        {notificationPermission === "default" ? (
+          <Button
+            label="Enable desktop notifications"
+            variant="secondary"
+            onClick={onRequestNotifications}
+            data-testid="enable-notifications"
+          />
+        ) : null}
+      </VStack>
       <VStack ref={regionRef} gap={2} tabIndex={-1}>
         <VStack gap={0.5}>
           <Heading level={3}>Archived bots</Heading>
@@ -138,7 +244,7 @@ function SettingsContent({
   );
 }
 
-/** Responsive, composable settings surface with archived-bot lifecycle controls. */
+/** Responsive workspace settings with local preferences, integration guidance, and Bot lifecycle controls. */
 export function SettingsDialog({
   open,
   onClose,
@@ -150,9 +256,17 @@ export function SettingsDialog({
   archivedBotsLoading = false,
   archivedBotsError,
   onRetryArchivedBots,
-  children,
+  agents,
+  agentsLoading = false,
+  agentsError,
+  dictation,
+  autoSendVoice,
+  onAutoSendVoiceChange,
+  mobileReturnFocusRef,
+  notificationPermission,
+  onRequestNotifications,
 }: SettingsDialogProps): JSX.Element {
-  const isSmallScreen = useMediaQuery("(max-width: 767px)");
+  const { isMobile } = useAppShellMobile();
   const [restoringBotId, setRestoringBotId] = useState<string | undefined>(undefined);
   const [pendingDeleteBot, setPendingDeleteBot] = useState<BotViewDto | undefined>(undefined);
   const [deleting, setDeleting] = useState(false);
@@ -210,7 +324,15 @@ export function SettingsDialog({
       archivedBotsLoading={archivedBotsLoading}
       {...(archivedBotsError !== undefined ? { archivedBotsError } : {})}
       {...(onRetryArchivedBots !== undefined ? { onRetryArchivedBots } : {})}
-      compactHeading={isSmallScreen}
+      agents={agents}
+      agentsLoading={agentsLoading}
+      {...(agentsError !== undefined ? { agentsError } : {})}
+      dictation={dictation}
+      autoSendVoice={autoSendVoice}
+      onAutoSendVoiceChange={onAutoSendVoiceChange}
+      notificationPermission={notificationPermission}
+      onRequestNotifications={onRequestNotifications}
+      compactHeading={isMobile}
       regionRef={archivedRegionRef}
       {...(restoringBotId !== undefined ? { restoringBotId } : {})}
       {...(deleting && pendingDeleteBot !== undefined ? { deletingBotId: pendingDeleteBot.id } : {})}
@@ -220,15 +342,19 @@ export function SettingsDialog({
         setPendingDeleteBot(bot);
         setDeleteError(undefined);
       }}
-    >
-      {children}
-    </SettingsContent>
+    />
   );
 
-  const settingsSurface = isSmallScreen ? (
-    <BottomSheet label="Settings" isOpen={open} onOpenChange={(nextOpen) => !nextOpen && onClose()} height="tall">
+  const settingsSurface = isMobile ? (
+    <BottomSheetWithReturnFocus
+      label="Settings"
+      returnFocusRef={mobileReturnFocusRef}
+      isOpen={open}
+      onOpenChange={(nextOpen) => !nextOpen && onClose()}
+      height="tall"
+    >
       {content}
-    </BottomSheet>
+    </BottomSheetWithReturnFocus>
   ) : (
     <Dialog isOpen={open} onOpenChange={(nextOpen) => !nextOpen && onClose()} width={600}>
       <DialogHeader title="Settings" subtitle="Manage workspace preferences and archived bots." />

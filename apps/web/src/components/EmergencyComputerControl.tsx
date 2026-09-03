@@ -28,7 +28,13 @@ export function EmergencyComputerControl({
   onResume,
 }: EmergencyComputerControlProps): JSX.Element | null {
   const stopped = view.state === "emergency-stopped";
-  if (view.state === "unavailable") return null;
+  const canControl =
+    view.state === "bot-using"
+    || view.state === "waiting"
+    || view.state === "needs-you"
+    || view.state === "user-control"
+    || stopped;
+  if (!canControl) return null;
   return (
     <VStack
       as="aside"
@@ -44,7 +50,6 @@ export function EmergencyComputerControl({
         icon={<Icon icon="stop" size="sm" />}
         variant={stopped ? "secondary" : "destructive"}
         size="sm"
-        isIconOnly
         isLoading={busy}
         onClick={stopped ? onResume : onEmergencyStop}
         data-testid={stopped ? "computer-resume" : "computer-emergency-stop"}

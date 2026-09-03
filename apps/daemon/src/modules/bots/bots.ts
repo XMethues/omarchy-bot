@@ -203,9 +203,8 @@ export class BotsService {
       throw new HttpError(409, "working", { confirmRequired: true });
     }
     if (activeTurns.length > 0) {
-      const terminalTurns = activeTurns.map((turn) => turns.waitForTerminal(turn.id));
       await Promise.all(activeTurns.map((turn) => turns.abortTurn(turn.id, "bot archived")));
-      await Promise.all(terminalTurns);
+      await Promise.all(activeTurns.map((turn) => turns.waitForTerminal(turn.id)));
     }
 
     const now = new Date().toISOString();

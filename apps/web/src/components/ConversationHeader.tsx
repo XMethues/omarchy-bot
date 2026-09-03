@@ -1,4 +1,4 @@
-import type { JSX } from "react";
+import type { JSX, RefObject } from "react";
 import { Button } from "@astryxdesign/core/Button";
 import { useAppShellMobile } from "@astryxdesign/core/AppShell";
 import { Heading } from "@astryxdesign/core/Heading";
@@ -11,7 +11,7 @@ import { VStack } from "@astryxdesign/core/VStack";
 import type { BotViewDto, ComputerViewDto, ThreadDto } from "@omarchy-bot/protocol";
 import { AvatarView } from "./AvatarView.tsx";
 
-const COMPUTER_LABELS: Record<ComputerViewDto["state"], string> = {
+const COMPUTER_TOOLTIPS: Record<ComputerViewDto["state"], string> = {
   idle: "Open computer",
   "bot-using": "Open computer, this bot is using it",
   waiting: "Open computer, this bot is waiting",
@@ -28,9 +28,11 @@ export interface ConversationHeaderProps {
   onOpenHistory: () => void;
   onOpenProfile: () => void;
   onOpenComputer: () => void;
+  mobileNavigationTriggerRef: RefObject<HTMLButtonElement | null>;
+  computerTriggerRef: RefObject<HTMLButtonElement | null>;
 }
 
-function MobileSidebarTrigger(): JSX.Element | null {
+function MobileSidebarTrigger({ triggerRef }: { triggerRef: RefObject<HTMLButtonElement | null> }): JSX.Element | null {
   const {
     isMobile,
     isMobileNavEnabled,
@@ -43,6 +45,7 @@ function MobileSidebarTrigger(): JSX.Element | null {
 
   return (
     <IconButton
+      ref={triggerRef}
       label="Open bot navigation"
       tooltip="Open bot navigation"
       icon={<Icon icon="menu" size="md" />}
@@ -66,6 +69,8 @@ export function ConversationHeader({
   onOpenHistory,
   onOpenProfile,
   onOpenComputer,
+  mobileNavigationTriggerRef,
+  computerTriggerRef,
 }: ConversationHeaderProps): JSX.Element {
   return (
     <LayoutHeader hasDivider label="Conversation">
@@ -76,13 +81,14 @@ export function ConversationHeader({
         vAlign="center"
         data-testid="conversation-header"
       >
-        <MobileSidebarTrigger />
+        <MobileSidebarTrigger triggerRef={mobileNavigationTriggerRef} />
         {bot !== undefined ? (
           <AvatarView
             avatar={bot.avatar}
             name={bot.name}
             size="sm"
             activity={bot.status === "working" ? "working" : "selected"}
+            decorative
           />
         ) : null}
         <StackItem size="fill">
@@ -92,19 +98,22 @@ export function ConversationHeader({
             </Heading>
             <HStack>
               <Button
-                label={thread?.title ?? "New conversation"}
+                label="Open conversation history"
                 variant="ghost"
                 size="sm"
                 isDisabled={bot === undefined}
                 onClick={onOpenHistory}
                 data-testid="thread-history-trigger"
-              />
+              >
+                {thread?.title ?? "New conversation"}
+              </Button>
             </HStack>
           </VStack>
         </StackItem>
         <IconButton
-          label={COMPUTER_LABELS[computerState]}
-          tooltip={COMPUTER_LABELS[computerState]}
+          ref={computerTriggerRef}
+          label="Open computer"
+          tooltip={COMPUTER_TOOLTIPS[computerState]}
           isDisabled={bot === undefined}
           icon={<Icon icon="viewColumns" size="md" />}
           variant={computerState === "idle" || computerState === "unavailable" ? "ghost" : "secondary"}

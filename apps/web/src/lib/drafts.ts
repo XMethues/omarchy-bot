@@ -6,6 +6,7 @@ export interface ConversationDraft {
   /** Current Composer insertion point, clamped to the draft text. */
   cursor: number;
   stagedIds: string[];
+  attachmentDraftToken?: string;
   /** Insertion point captured when dictation starts. */
   dictationAnchor?: number;
 }
@@ -17,6 +18,8 @@ interface StorageLike {
   setItem(key: string, value: string): void;
   removeItem(key: string): void;
 }
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 
 function windowSessionStorage(): StorageLike | undefined {
   try {
@@ -45,6 +48,11 @@ function normalizeDraft(value: unknown): ConversationDraft | undefined {
   const stagedIds = Array.isArray(candidate.stagedIds)
     ? [...new Set(candidate.stagedIds.filter((id): id is string => typeof id === "string" && id.length > 0))]
     : [];
+  const attachmentDraftToken = typeof candidate.attachmentDraftToken === "string" &&
+      candidate.attachmentDraftToken.length <= 128 &&
+      UUID_PATTERN.test(candidate.attachmentDraftToken)
+    ? candidate.attachmentDraftToken
+    : undefined;
   const dictationAnchor = candidate.dictationAnchor === undefined
     ? undefined
     : normalizePosition(candidate.dictationAnchor, text.length, cursor);
@@ -53,6 +61,7 @@ function normalizeDraft(value: unknown): ConversationDraft | undefined {
     text,
     cursor,
     stagedIds,
+    ...(attachmentDraftToken !== undefined ? { attachmentDraftToken } : {}),
     ...(dictationAnchor !== undefined ? { dictationAnchor } : {}),
   };
 }
@@ -107,7 +116,12 @@ export function saveDraft(
   const normalized = normalizeDraft(draft) ?? emptyDraft();
 
   try {
-    if (normalized.text === "" && normalized.stagedIds.length === 0 && normalized.dictationAnchor === undefined) {
+    if (
+      normalized.text === "" &&
+      normalized.stagedIds.length === 0 &&
+      normalized.attachmentDraftToken === undefined &&
+      normalized.dictationAnchor === undefined
+    ) {
       storage.removeItem(key);
     } else {
       storage.setItem(key, JSON.stringify(normalized));

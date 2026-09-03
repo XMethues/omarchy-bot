@@ -53,6 +53,17 @@ export class Supervisor {
     return w;
   }
 
+  async stopAgentWorker(agentId: AgentId): Promise<void> {
+    const restart = this.#restartTimers.get(agentId);
+    if (restart !== undefined) {
+      clearTimeout(restart);
+      this.#restartTimers.delete(agentId);
+    }
+    const worker = this.#agentWorkers.get(agentId);
+    this.#agentWorkers.delete(agentId);
+    if (worker !== undefined) await this.#killQuietly(worker);
+  }
+
   async computerWorker(): Promise<WorkerClient> {
     let w = this.#computerWorker;
     if (w?.alive) return w;

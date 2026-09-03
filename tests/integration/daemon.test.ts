@@ -429,10 +429,10 @@ describe("integration: legacy migration", () => {
       const visibleBots = await api<{ id: string; name: string; avatar: { recipe?: { rendererVersion?: string } } }[]>(contracted, "GET", "/api/bots");
       expect(visibleBots.map((bot) => bot.id).sort()).toEqual([
         "bot_11111111111111111111111111111111",
+        "bot_22222222222222222222222222222222",
         "bot_33333333333333333333333333333333",
       ]);
-      expect(visibleBots.every((bot) => bot.avatar.recipe?.rendererVersion === "10.7.0")).toBeTrue();
-      expect(visibleBots.some((bot) => bot.id === "bot_22222222222222222222222222222222")).toBeFalse();
+      expect(visibleBots.every((bot) => bot.avatar.recipe?.rendererVersion === "9.4.3")).toBeTrue();
     } finally {
       await contracted.stop();
       rmSync(legacyHome, { recursive: true, force: true });

@@ -7,6 +7,11 @@ import type { BotDto } from "../../packages/protocol/src/index.ts";
 import { handleAvatarRequest } from "../../apps/daemon/src/api/avatarRoutes.ts";
 import { AvatarService, type AvatarSupervisor } from "../../apps/daemon/src/modules/avatars/avatarService.ts";
 import { HttpError } from "../../apps/daemon/src/modules/bots/bots.ts";
+import {
+  CURRENT_AVATAR_RENDERER,
+  LEGACY_AVATAR_RENDERER,
+  renderAvatarRecipe,
+} from "../../apps/web/src/components/avatarRenderer.ts";
 import { api, apiStatus, makeBot, sendToBot, startDaemon, waitThreadIdle, type Harness } from "./helpers/harness.ts";
 
 let h: Harness;
@@ -75,6 +80,64 @@ async function avatarRequest(method: string, pathname: string, init: { json?: un
     throw error;
   }
 }
+function svgFromDataUri(dataUri: string | undefined): string {
+  if (dataUri === undefined) throw new Error("avatar recipe was not rendered");
+  const separator = dataUri.indexOf(",");
+  if (separator === -1) throw new Error("avatar renderer returned an invalid data URI");
+  return decodeURIComponent(dataUri.slice(separator + 1));
+}
+
+describe("pinned local avatar renderers", () => {
+  test("current active recipes use native DiceBear animation with reduced-motion CSS", () => {
+    const recipe = {
+      rendererVersion: CURRENT_AVATAR_RENDERER,
+      style: "shapes",
+      seed: "animated-current",
+      options: {},
+    };
+
+    const svg = svgFromDataUri(renderAvatarRecipe(recipe, "working"));
+    expect(svg).toContain("@keyframes");
+    expect(svg).toContain("@media (prefers-reduced-motion: no-preference)");
+    expect(svg).toContain("dbsh-medium");
+  });
+
+  test("legacy recipes retain their exact style identity, options, and deterministic static output", () => {
+    const micahRecipe = {
+      rendererVersion: LEGACY_AVATAR_RENDERER,
+      style: "micah",
+      seed: "legacy-micah",
+      options: { flip: true },
+    };
+    const pixelArtRecipe = {
+      rendererVersion: LEGACY_AVATAR_RENDERER,
+      style: "pixel-art",
+      seed: "legacy-pixel-art",
+      options: {},
+    };
+
+    const firstMicah = renderAvatarRecipe(micahRecipe, "idle");
+    expect(renderAvatarRecipe(micahRecipe, "working")).toBe(firstMicah);
+    expect(renderAvatarRecipe(micahRecipe, "idle")).toBe(firstMicah);
+    expect(svgFromDataUri(firstMicah)).toContain("<dc:title>Avatar Illustration System</dc:title>");
+    expect(renderAvatarRecipe({ ...micahRecipe, rendererVersion: CURRENT_AVATAR_RENDERER }, "idle")).toBeUndefined();
+    expect(renderAvatarRecipe({ ...pixelArtRecipe, rendererVersion: CURRENT_AVATAR_RENDERER }, "idle")).toBeUndefined();
+    expect(svgFromDataUri(firstMicah)).toContain('transform="scale(-1 1)');
+    expect(svgFromDataUri(renderAvatarRecipe(pixelArtRecipe, "idle"))).toContain("<dc:title>Pixel Art</dc:title>");
+    expect(micahRecipe.options).toEqual({ flip: true });
+  });
+
+  test("renderer identity selects the implementation instead of silently upgrading styles", () => {
+    const common = { style: "shapes", seed: "dispatch-seed", options: {} };
+    const current = renderAvatarRecipe({ ...common, rendererVersion: CURRENT_AVATAR_RENDERER }, "working");
+    const legacy = renderAvatarRecipe({ ...common, rendererVersion: LEGACY_AVATAR_RENDERER }, "working");
+
+    expect(current).not.toBe(legacy);
+    expect(svgFromDataUri(current)).toContain("dbsh-medium");
+    expect(svgFromDataUri(legacy)).not.toContain("dbsh-medium");
+    expect(renderAvatarRecipe({ ...common, rendererVersion: "10.7.0" }, "idle")).toBeUndefined();
+  });
+});
 
 beforeAll(async () => {
   h = await startDaemon();
@@ -92,7 +155,7 @@ describe("bot profile editing", () => {
     const initial = await api<BotDto>(h, "GET", `/api/bots/${botId}`);
     expect(initial.avatar).toEqual({
       kind: "generated",
-      recipe: { rendererVersion: "10.7.0", style: "shapes", seed: botId, options: {} },
+      recipe: { rendererVersion: CURRENT_AVATAR_RENDERER, style: "shapes", seed: botId, options: {} },
     });
 
     const first = await avatars.generate(botId);
@@ -216,7 +279,7 @@ describe("Agent-authored avatar recipe boundary", () => {
     const updated = (await response.json()) as BotDto;
     expect(updated.avatar).toEqual({
       kind: "recipe",
-      recipe: { rendererVersion: "10.7.0", style: "thumbs", seed: "calm-blue", options: {} },
+      recipe: { rendererVersion: CURRENT_AVATAR_RENDERER, style: "thumbs", seed: "calm-blue", options: {} },
     });
     expect(openedInstructions).toContain("Reply with exactly one JSON object");
     expect(closedSessions).toBeGreaterThan(0);

@@ -262,6 +262,12 @@ WHERE EXISTS (SELECT 1 FROM threads t WHERE t.bot_id = b.id)
      WHEN 'gemini' THEN 'Gemini' WHEN 'copilot' THEN 'Copilot' WHEN 'crush' THEN 'Crush'
      ELSE b.id
    END;
+-- Keep the generated legacy-conversation recipe tied to its new Bot identity.
+-- This is provenance evidence for fresh migrations and avoids manufacturing
+-- the random-seed signature used by older inventory placeholders.
+UPDATE bots_new
+SET avatar_recipe = json_set(avatar_recipe, '$.seed', id);
+
 
 -- Re-point threads at their migrated bot (ids preserved, zero message loss).
 INSERT INTO threads_new (id, bot_id, title, cwd, created_at, updated_at)
@@ -371,49 +377,89 @@ DELETE FROM events;
 `,
   },
   {
-    // Remove empty rows created by the first Bot migration from the old
-    // built-in Agent inventory. A migrated row is identifiable by the random
-    // recipe seed used by 0002; user-created Bots use their Bot id as the seed.
-    // Then move every retained local recipe to DiceBear's animated v10 styles.
+    // Kept as an inert historical step for databases that have not applied it.
+    // Destructive cleanup and recipe upgrades require explicit provenance;
+    // already-applied databases are repaired by the forward migration below.
     name: "0005-created-bots-animated-avatars",
     sql: `
-CREATE TEMP TABLE legacy_inventory_placeholders (id TEXT PRIMARY KEY);
-INSERT INTO legacy_inventory_placeholders (id)
-SELECT id FROM bots
-WHERE avatar_kind = 'generated'
-  AND trim(instructions) = ''
-  AND pinned = 0
-  AND archived = 0
-  AND NOT EXISTS (SELECT 1 FROM threads WHERE threads.bot_id = bots.id)
-  AND NOT EXISTS (SELECT 1 FROM attachments WHERE attachments.bot_id = bots.id)
-  AND json_valid(avatar_recipe)
-  AND json_extract(avatar_recipe, '$.rendererVersion') = '9.4.3'
-  AND json_extract(avatar_recipe, '$.seed') <> id
-  AND name = CASE agent_id
-    WHEN 'pi' THEN 'Pi' WHEN 'omp' THEN 'OMP' WHEN 'codex' THEN 'Codex'
-    WHEN 'claude' THEN 'Claude' WHEN 'grok' THEN 'Grok' WHEN 'opencode' THEN 'OpenCode'
-    WHEN 'gemini' THEN 'Gemini' WHEN 'copilot' THEN 'Copilot' WHEN 'crush' THEN 'Crush'
-    ELSE agent_id
-  END;
-DELETE FROM bot_state WHERE bot_id IN (SELECT id FROM legacy_inventory_placeholders);
-DELETE FROM bots WHERE id IN (SELECT id FROM legacy_inventory_placeholders);
-DROP TABLE legacy_inventory_placeholders;
+SELECT 1;
+`,
+  },
+  {
+    // Classify retained legacy Bots conservatively. bot_state is emitted
+    // atomically with user-created Bots, while conversations and the
+    // identity-tied recipe emitted by the repaired 0002 migration prove
+    // legacy user ownership. A recipe shape alone cannot prove inventory, so
+    // ambiguous rows keep the safe user_created default and nothing is deleted.
+    name: "0006-bot-provenance-repair",
+    sql: `
+ALTER TABLE bots ADD COLUMN provenance TEXT NOT NULL DEFAULT 'user_created'
+  CHECK (provenance IN ('user_created', 'legacy_conversation', 'legacy_inventory'));
 
 UPDATE bots
-SET avatar_recipe = json_object(
-  'rendererVersion', '10.7.0',
-  'style', CASE json_extract(avatar_recipe, '$.style')
-    WHEN 'pixel-art' THEN 'pixelbot'
-    WHEN 'micah' THEN 'thumbs'
-    WHEN 'pixelbot' THEN 'pixelbot'
-    WHEN 'thumbs' THEN 'thumbs'
-    ELSE 'shapes'
-  END,
-  'seed', COALESCE(json_extract(avatar_recipe, '$.seed'), id),
-  'options', json('{}')
+SET provenance = 'legacy_conversation'
+WHERE NOT EXISTS (SELECT 1 FROM bot_state WHERE bot_state.bot_id = bots.id)
+  AND (
+    trim(instructions) <> ''
+    OR pinned <> 0
+    OR archived <> 0
+    OR archived_at IS NOT NULL
+    OR avatar_file IS NOT NULL
+    OR avatar_kind <> 'generated'
+    OR EXISTS (SELECT 1 FROM threads WHERE threads.bot_id = bots.id)
+    OR EXISTS (SELECT 1 FROM attachments WHERE attachments.bot_id = bots.id)
+    OR EXISTS (SELECT 1 FROM turns WHERE turns.bot_id = bots.id)
+    OR EXISTS (SELECT 1 FROM bot_deletions WHERE bot_deletions.bot_id = bots.id)
+    OR EXISTS (SELECT 1 FROM bot_native_session_deletions WHERE bot_native_session_deletions.bot_id = bots.id)
+    OR EXISTS (
+      SELECT 1 FROM events
+      WHERE events.aggregate_type = 'bot' AND events.aggregate_id = bots.id
+    )
+    OR name <> CASE agent_id
+      WHEN 'pi' THEN 'Pi' WHEN 'omp' THEN 'OMP' WHEN 'codex' THEN 'Codex'
+      WHEN 'claude' THEN 'Claude' WHEN 'grok' THEN 'Grok' WHEN 'opencode' THEN 'OpenCode'
+      WHEN 'gemini' THEN 'Gemini' WHEN 'copilot' THEN 'Copilot' WHEN 'crush' THEN 'Crush'
+      ELSE agent_id
+    END
+    OR (
+      json_valid(avatar_recipe)
+      AND json_extract(avatar_recipe, '$.rendererVersion') = '9.4.3'
+      AND json_extract(avatar_recipe, '$.seed') = id
+    )
+  );
+
+`,
+  },
+  {
+    // Old 0005 deployments wrote DiceBear's core version alone. The renderer
+    // dispatch key now pins both packages; mutate only that recipe field.
+    name: "0007-pin-dicebear-renderer-id",
+    sql: `
+UPDATE bots
+SET avatar_recipe = json_set(
+  avatar_recipe,
+  '$.rendererVersion',
+  'dicebear-core@10.7.0+styles@10.6.0'
 )
-WHERE avatar_kind IN ('generated', 'recipe')
-  AND json_valid(avatar_recipe);
+WHERE json_valid(avatar_recipe)
+  AND json_type(avatar_recipe, '$') = 'object'
+  AND json_extract(avatar_recipe, '$.rendererVersion') = '10.7.0'
+  AND json_type(avatar_recipe, '$.style') = 'text'
+  AND json_type(avatar_recipe, '$.seed') = 'text'
+  AND json_type(avatar_recipe, '$.options') = 'object'
+  AND NOT EXISTS (
+    SELECT 1
+    FROM json_each(json_extract(bots.avatar_recipe, '$.options'))
+    WHERE type NOT IN ('text', 'integer', 'real', 'true', 'false')
+  );
+`,
+  },
+  {
+    // NULL marks staged rows created before draft ownership existed. They are
+    // deliberately unclaimable and remain eligible for the existing age GC.
+    name: "0008-staged-attachment-draft-ownership",
+    sql: `
+ALTER TABLE attachments ADD COLUMN draft_token TEXT;
 `,
   },
 ];

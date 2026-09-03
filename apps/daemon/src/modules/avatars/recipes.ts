@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { AvatarRecipeDto } from "@omarchy-bot/protocol";
 
-export const AVATAR_RENDERER_VERSION = "10.7.0";
+export const AVATAR_RENDERER_VERSION = "dicebear-core@10.7.0+styles@10.6.0";
 export const ALLOWED_AVATAR_STYLES = ["shapes", "pixelbot", "thumbs"] as const;
 export type AllowedAvatarStyle = (typeof ALLOWED_AVATAR_STYLES)[number];
 

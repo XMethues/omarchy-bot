@@ -1,10 +1,10 @@
-import type { JSX } from "react";
+import type { JSX, RefObject } from "react";
 import { useCallback, useEffect, useState } from "react";
 import * as stylex from "@stylexjs/stylex";
 import { Maximize2 } from "lucide-react";
 import { AspectRatio } from "@astryxdesign/core/AspectRatio";
+import { useAppShellMobile } from "@astryxdesign/core/AppShell";
 import { Banner } from "@astryxdesign/core/Banner";
-import { BottomSheet } from "@astryxdesign/core/BottomSheet";
 import { Button } from "@astryxdesign/core/Button";
 import { IconButton } from "@astryxdesign/core/IconButton";
 import { LayoutPanel } from "@astryxdesign/core/Layout";
@@ -16,14 +16,15 @@ import { Icon } from "@astryxdesign/core/Icon";
 import { Text } from "@astryxdesign/core/Text";
 import { StackItem } from "@astryxdesign/core/Stack";
 import { VStack } from "@astryxdesign/core/VStack";
-import { useMediaQuery } from "@astryxdesign/core/hooks";
 import type { BotViewDto, ComputerViewDto } from "@omarchy-bot/protocol";
+import { BottomSheetWithReturnFocus } from "./BottomSheetWithReturnFocus.tsx";
 
 export interface ComputerSheetProps {
   bot: Pick<BotViewDto, "id" | "name">;
   view: ComputerViewDto;
   snapshotUrl: string;
   open: boolean;
+  returnFocusRef: RefObject<HTMLButtonElement | null>;
   busy?: boolean;
   error?: string;
   loading?: boolean;
@@ -209,13 +210,18 @@ function ComputerSheetContent({
 }
 
 /** Docked desktop drawer with a native bottom sheet on narrow screens. */
-export function ComputerSheet({ open, onClose, ...contentProps }: ComputerSheetProps): JSX.Element | null {
-  const isSmallScreen = useMediaQuery("(max-width: 767px)");
+export function ComputerSheet({
+  open,
+  onClose,
+  returnFocusRef,
+  ...contentProps
+}: ComputerSheetProps): JSX.Element | null {
+  const { isMobile: isSmallScreen } = useAppShellMobile();
   const [previewExpanded, setPreviewExpanded] = useState(false);
   const closePanel = useCallback((): void => {
     onClose();
-    requestAnimationFrame(() => document.querySelector<HTMLElement>('[data-testid="header-computer"]')?.focus());
-  }, [onClose]);
+    requestAnimationFrame(() => returnFocusRef.current?.focus());
+  }, [onClose, returnFocusRef]);
   const content = (
     <ComputerSheetContent
       {...contentProps}
@@ -249,9 +255,15 @@ export function ComputerSheet({ open, onClose, ...contentProps }: ComputerSheetP
   if (isSmallScreen) {
     return (
       <>
-        <BottomSheet label="Computer" isOpen={open} onOpenChange={(nextOpen) => !nextOpen && onClose()} height="tall">
+        <BottomSheetWithReturnFocus
+          label="Computer"
+          returnFocusRef={returnFocusRef}
+          isOpen={open}
+          onOpenChange={(nextOpen) => !nextOpen && onClose()}
+          height="tall"
+        >
           {content}
-        </BottomSheet>
+        </BottomSheetWithReturnFocus>
         {lightbox}
       </>
     );

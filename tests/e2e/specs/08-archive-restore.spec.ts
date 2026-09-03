@@ -1,25 +1,26 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
 async function createBot(page: Page, name: string): Promise<string> {
-  await page.getByTestId("sidebar-create-bot").click();
-  await page.getByTestId("create-bot-name").fill(name);
-  await page.getByTestId("create-bot-instructions").fill("Archive lifecycle E2E bot");
+  await page.getByRole("navigation", { name: "Bot navigation" }).getByRole("button", { name: "New bot" }).click();
+  await page.getByRole("textbox", { name: "Name" }).fill(name);
+  await page.getByRole("textbox", { name: "Job / Instructions" }).fill("Archive lifecycle E2E bot");
   await page.getByRole("radio", { name: /^Pi/ }).check();
-  await page.getByTestId("create-bot-submit").click();
+  await page.getByRole("button", { name: "Create bot" }).click();
 
-  const row = page.locator("[data-testid^='sidebar-bot-']", { hasText: name });
-  await expect(row).toBeVisible();
-  const testId = await row.getAttribute("data-testid");
-  if (testId === null) throw new Error(`missing sidebar test id for ${name}`);
-  return testId.slice("sidebar-bot-".length);
+  await expect(page.getByRole("button", { name, exact: true })).toBeVisible();
+  const botId = new URL(page.url()).searchParams.get("bot");
+  if (botId === null) throw new Error(`missing selected bot id for ${name}`);
+  return botId;
 }
 
 function composerInput(page: Page): Locator {
-  return page.getByTestId("composer").locator('[contenteditable="true"]');
+  return page.getByRole("textbox", { name: "Message input" });
 }
 
-async function archiveFromSidebar(page: Page, botId: string): Promise<void> {
-  await page.getByTestId(`sidebar-bot-actions-${botId}`).click();
+async function archiveFromSidebar(page: Page, botName: string): Promise<void> {
+  await page.getByRole("navigation", { name: "Bot navigation" })
+    .getByRole("button", { name: `Actions for ${botName}` })
+    .click();
   await page.getByRole("menuitem", { name: /Archive/ }).click();
 }
 
@@ -44,20 +45,23 @@ test.describe("archive and restore bots", () => {
     const draftKey = `draft:v1:${archivedBotId}:blank`;
     await expect.poll(() => page.evaluate((key) => sessionStorage.getItem(key), draftKey)).not.toBeNull();
 
-    await archiveFromSidebar(page, archivedBotId);
+    await archiveFromSidebar(page, "Idle archive bot");
 
-    await expect(page.getByTestId(`sidebar-bot-${archivedBotId}`)).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Idle archive bot", exact: true })).toHaveCount(0);
     await expect(page).toHaveURL(new RegExp(`(?:\\?|&)bot=${fallbackBotId}(?:&|$)`));
     await expect.poll(() => page.evaluate((key) => sessionStorage.getItem(key), draftKey)).toBeNull();
 
-    await page.getByTestId("sidebar-settings").click();
-    await expect(page.getByTestId(`settings-archived-bot-${archivedBotId}`)).toBeVisible();
-    await page.getByTestId(`settings-restore-${archivedBotId}`).click();
+    await page.getByRole("navigation", { name: "Bot navigation" }).getByRole("button", { name: "Settings", exact: true }).click();
+    const settings = page.getByRole("dialog", { name: "Settings" });
+    await expect(settings.getByRole("button", { name: "Restore Idle archive bot" })).toBeVisible();
+    await settings.getByRole("button", { name: "Restore Idle archive bot" }).click();
 
-    await expect(page.getByTestId(`settings-archived-bot-${archivedBotId}`)).toHaveCount(0);
-    await expect(page.getByTestId(`sidebar-bot-${archivedBotId}`)).toBeVisible();
-    const firstActiveTestId = await page.locator("[data-testid^='sidebar-bot-bot_']").first().getAttribute("data-testid");
-    expect(firstActiveTestId).toBe(`sidebar-bot-${archivedBotId}`);
+    await expect(settings.getByRole("button", { name: "Restore Idle archive bot" })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Idle archive bot", exact: true })).toBeVisible();
+    const firstActiveBot = page.getByRole("navigation", { name: "Bot navigation" })
+      .getByRole("button", { name: /^(?:Idle archive bot|Archive fallback bot)$/ })
+      .first();
+    await expect(firstActiveBot).toHaveAccessibleName("Idle archive bot");
   });
 
   test("keeps active work on cancel, then stops and archives only after confirmation", async ({ page }) => {
@@ -70,23 +74,23 @@ test.describe("archive and restore bots", () => {
     await composerInput(page).press("Enter");
     await expect(page.getByTestId("streaming-message")).toContainText("hanging", { timeout: 15_000 });
 
-    await archiveFromSidebar(page, workingBotId);
-    const confirmation = page.getByTestId("archive-working-confirmation");
+    await archiveFromSidebar(page, "Working archive bot");
+    const confirmation = page.getByRole("alertdialog", { name: "Stop work and archive?" });
     await expect(confirmation).toBeVisible();
     await expect(confirmation).toContainText("current work will be stopped");
 
     await page.getByRole("button", { name: "Keep working" }).click();
     await expect(confirmation).not.toBeVisible();
-    await expect(page.getByTestId(`sidebar-bot-${workingBotId}`)).toBeVisible();
+    await expect(page.getByRole("button", { name: "Working archive bot", exact: true })).toBeVisible();
     await expect(page.getByTestId("streaming-message")).toContainText("hanging");
 
-    await archiveFromSidebar(page, workingBotId);
+    await archiveFromSidebar(page, "Working archive bot");
     await page.getByRole("button", { name: "Stop and archive" }).click();
 
-    await expect(page.getByTestId(`sidebar-bot-${workingBotId}`)).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Working archive bot", exact: true })).toHaveCount(0);
     await expect(page).toHaveURL(new RegExp(`(?:\\?|&)bot=${fallbackBotId}(?:&|$)`));
 
-    await page.getByTestId("sidebar-settings").click();
-    await expect(page.getByTestId(`settings-archived-bot-${workingBotId}`)).toBeVisible();
+    await page.getByRole("navigation", { name: "Bot navigation" }).getByRole("button", { name: "Settings", exact: true }).click();
+    await expect(page.getByRole("dialog", { name: "Settings" }).getByRole("button", { name: "Restore Working archive bot" })).toBeVisible();
   });
 });

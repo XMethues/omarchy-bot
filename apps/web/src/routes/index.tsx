@@ -6,6 +6,7 @@ import { EmptyState } from "@astryxdesign/core/EmptyState";
 import { Icon } from "@astryxdesign/core/Icon";
 import { Layout, LayoutContent } from "@astryxdesign/core/Layout";
 import { Skeleton } from "@astryxdesign/core/Skeleton";
+import { MobileNav } from "@astryxdesign/core/MobileNav";
 import { VStack } from "@astryxdesign/core/VStack";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -22,7 +23,7 @@ import { ProfileDialog } from "../components/ProfileDialog.tsx";
 import { SettingsDialog } from "../components/SettingsDialog.tsx";
 import { ComputerSheet } from "../components/ComputerSheet.tsx";
 import { EmergencyComputerControl } from "../components/EmergencyComputerControl.tsx";
-import { VoiceSettingsControl, useVoiceAutoSendSetting } from "../components/VoiceSettingsControl.tsx";
+import { useVoiceAutoSendSetting } from "../components/VoiceSettingsControl.tsx";
 import { TranscriptAttention } from "../components/TranscriptAttention.tsx";
 
 export const Route = createFileRoute("/")({
@@ -57,8 +58,13 @@ function HomeScreen(): JSX.Element {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [autoSendVoice, setAutoSendVoice] = useVoiceAutoSendSetting();
   const [isOnline, setIsOnline] = useState(() => typeof navigator === "undefined" || navigator.onLine);
+  const [notificationPermission, setNotificationPermission] = useState<NotificationPermission | "unsupported">(() =>
+    typeof Notification === "undefined" ? "unsupported" : Notification.permission,
+  );
   const selectedBotRef = useRef<string | undefined>(selectedBotId);
   const botNamesRef = useRef<Record<string, string>>({});
+  const mobileNavigationTriggerRef = useRef<HTMLButtonElement>(null);
+  const computerTriggerRef = useRef<HTMLButtonElement>(null);
   selectedBotRef.current = selectedBotId;
 
   const invalidate = useCallback(
@@ -128,6 +134,11 @@ function HomeScreen(): JSX.Element {
   const computer = useQuery({
     queryKey: ["computer", bot?.id],
     queryFn: () => api.computerState(bot?.id),
+    refetchInterval: 15_000,
+  });
+  const computerSafety = useQuery({
+    queryKey: ["computer", { scope: "global" }],
+    queryFn: () => api.computerState(),
     refetchInterval: 15_000,
   });
 
@@ -212,6 +223,7 @@ function HomeScreen(): JSX.Element {
     [agents.data, bot],
   );
   const isAgentReady = selectedAgent?.status === "ready";
+  const supportsSteering = selectedAgent?.capabilities?.steering === true;
 
   const workspaceBanner: ReactNode =
     !isOnline ? (
@@ -272,7 +284,10 @@ function HomeScreen(): JSX.Element {
       <Banner
         status="warning"
         title="Agent unavailable"
-        description="This bot’s conversation is still available, but new messages cannot be sent until its agent is ready."
+        description={
+          selectedAgent?.guidance
+          ?? "This bot’s conversation is still available, but new messages cannot be sent until its agent is ready."
+        }
         container="section"
       />
     ) : undefined;
@@ -375,46 +390,56 @@ function HomeScreen(): JSX.Element {
               }}
               onMessageSent={onMessageSent}
               isAgentReady={isAgentReady}
+              supportsSteering={supportsSteering}
             />
           </TranscriptAttention>
       </VStack>
     );
   }
 
+  const sidebar = (
+    <Sidebar
+      bots={bots.data ?? []}
+      {...(selectedBotId !== undefined ? { selectedBotId } : {})}
+      onSelectBot={selectBot}
+      onCreateBot={() => setCreateOpen(true)}
+      onOpenSettings={() => {
+        setNotificationPermission(typeof Notification === "undefined" ? "unsupported" : Notification.permission);
+        setSettingsOpen(true);
+      }}
+      onPinBot={async (botId, pinned) => {
+        await api.pinBot(botId, { pinned });
+        invalidate("bots");
+      }}
+      onArchiveBot={(botId, body) => api.archiveBot(botId, body)}
+      onBotArchived={(botId) => {
+        qc.setQueryData(["bots"], (current: typeof bots.data) => current?.filter((candidate) => candidate.id !== botId));
+        invalidate("bots");
+        if (selectedBotId === botId) void navigate({ search: {}, replace: true });
+      }}
+      safetyControl={
+        <EmergencyComputerControl
+          view={computerSafety.data ?? { state: "unavailable" }}
+          busy={computerAction.isPending}
+          onEmergencyStop={() => computerAction.mutate("stop")}
+          onResume={() => computerAction.mutate("resume")}
+        />
+      }
+    />
+  );
+
   return (
     <AppShell
       height="fill"
       contentPadding={0}
       variant="section"
-      mobileNav={{ breakpoint: "md", hasToggle: false }}
+      mobileNav={{
+        breakpoint: "md",
+        hasToggle: false,
+        content: <MobileNav header="Bot navigation">{sidebar}</MobileNav>,
+      }}
       {...(workspaceBanner !== undefined ? { banner: workspaceBanner } : {})}
-      sideNav={
-        <Sidebar
-          bots={bots.data ?? []}
-          {...(selectedBotId !== undefined ? { selectedBotId } : {})}
-          onSelectBot={selectBot}
-          onCreateBot={() => setCreateOpen(true)}
-          onOpenSettings={() => setSettingsOpen(true)}
-          onPinBot={async (botId, pinned) => {
-            await api.pinBot(botId, { pinned });
-            invalidate("bots");
-          }}
-          onArchiveBot={(botId, body) => api.archiveBot(botId, body)}
-          onBotArchived={(botId) => {
-            qc.setQueryData(["bots"], (current: typeof bots.data) => current?.filter((candidate) => candidate.id !== botId));
-            invalidate("bots");
-            if (selectedBotId === botId) void navigate({ search: {}, replace: true });
-          }}
-          safetyControl={
-            <EmergencyComputerControl
-              view={computer.data ?? { state: "unavailable" }}
-              busy={computerAction.isPending}
-              onEmergencyStop={() => computerAction.mutate("stop")}
-              onResume={() => computerAction.mutate("resume")}
-            />
-          }
-        />
-      }
+      sideNav={sidebar}
     >
       <Layout
         height="fill"
@@ -427,6 +452,8 @@ function HomeScreen(): JSX.Element {
             onOpenProfile={() => setProfileOpen(true)}
             computerState={computer.data?.state ?? "unavailable"}
             onOpenComputer={() => setComputerOpen(true)}
+            mobileNavigationTriggerRef={mobileNavigationTriggerRef}
+            computerTriggerRef={computerTriggerRef}
           />
         }
         content={
@@ -450,6 +477,7 @@ function HomeScreen(): JSX.Element {
               }
               snapshotUrl={api.computerImageUrl()}
               open={computerOpen}
+              returnFocusRef={computerTriggerRef}
               busy={computerAction.isPending}
               {...(computer.isPending ? { loading: true } : {})}
               {...(computer.error !== null ? { onRetry: () => void computer.refetch() } : {})}
@@ -463,6 +491,7 @@ function HomeScreen(): JSX.Element {
       />
       <CreateBotDialog
         isOpen={createOpen}
+        mobileReturnFocusRef={mobileNavigationTriggerRef}
         onClose={() => setCreateOpen(false)}
         onCreated={(botId) => {
           void qc.invalidateQueries({ queryKey: ["bots"] }).then(() => {
@@ -481,6 +510,7 @@ function HomeScreen(): JSX.Element {
           />
           <ProfileDialog
             bot={bot}
+            agentDisplayName={selectedAgent?.displayName ?? bot.agentId}
             open={profileOpen}
             onClose={() => setProfileOpen(false)}
             onUpdated={() => invalidate("bots")}
@@ -489,6 +519,7 @@ function HomeScreen(): JSX.Element {
       ) : null}
       <SettingsDialog
         open={settingsOpen}
+        mobileReturnFocusRef={mobileNavigationTriggerRef}
         onClose={() => setSettingsOpen(false)}
         archivedBots={allBots.data ?? []}
         {...(allBots.isPending ? { archivedBotsLoading: true } : {})}
@@ -496,6 +527,26 @@ function HomeScreen(): JSX.Element {
           ? { archivedBotsError: apiErrorMessage(allBots.error, "Archived bots could not be loaded.") }
           : {})}
         {...(allBots.error !== null ? { onRetryArchivedBots: () => void allBots.refetch() } : {})}
+        agents={agents.data ?? []}
+        {...(agents.isPending ? { agentsLoading: true } : {})}
+        {...(agents.error !== null
+          ? { agentsError: apiErrorMessage(agents.error, "Agent integrations could not be checked.") }
+          : {})}
+        dictation={
+          dictation.data
+          ?? {
+            state: "unavailable",
+            ...(dictation.error !== null
+              ? { error: apiErrorMessage(dictation.error, "Voice dictation status could not be checked.") }
+              : {}),
+          }
+        }
+        autoSendVoice={autoSendVoice}
+        onAutoSendVoiceChange={setAutoSendVoice}
+        notificationPermission={notificationPermission}
+        onRequestNotifications={() => {
+          void requestDesktopNotificationPermission().then(setNotificationPermission);
+        }}
         onRestoreBot={(botId) => api.restoreBot(botId)}
         onBotRestored={() => invalidate("bots")}
         onDeleteBot={async (botId, confirmName) => {
@@ -512,17 +563,7 @@ function HomeScreen(): JSX.Element {
           invalidate("bots");
           if (selectedBotId === botId) void navigate({ search: {}, replace: true });
         }}
-      >
-        <>
-          <VoiceSettingsControl value={autoSendVoice} onChange={setAutoSendVoice} />
-          <Button
-            label="Enable desktop notifications"
-            variant="secondary"
-            onClick={() => void requestDesktopNotificationPermission()}
-            data-testid="enable-notifications"
-          />
-        </>
-      </SettingsDialog>
+      />
     </AppShell>
   );
 }

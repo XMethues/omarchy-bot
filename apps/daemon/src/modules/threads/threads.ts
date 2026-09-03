@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Database } from "bun:sqlite";
+import type { AgentCapabilityInventory } from "@omarchy-bot/agent-contract";
+import type { AgentId } from "@omarchy-bot/domain";
 import type { AttachmentDto, MessageDto, ThreadDto, TurnDto } from "@omarchy-bot/protocol";
 import type { EventLog } from "../events/eventLog.ts";
 
@@ -25,16 +27,19 @@ export interface NativeThreadTitleUpdater {
   }): Promise<void>;
 }
 
+export interface NativeThreadCapabilitySource {
+  capabilityInventory(agentId: AgentId): AgentCapabilityInventory | undefined;
+}
+
 /**
- * Descriptive adapter inventory. An absent entry means the Agent has no
- * truthful native rename operation; local display metadata is never used as a
- * substitute.
+ * Operations execute actions authorized by the probed Agent inventory. Their
+ * presence alone never declares support.
  */
-export type ThreadTitleCapabilityInventory = Readonly<
-  Record<string, NativeThreadTitleUpdater | undefined>
+export type NativeThreadOperationAdapters = Readonly<
+  Partial<Record<AgentId, NativeThreadTitleUpdater>>
 >;
 
-const NO_NATIVE_THREAD_RENAME: ThreadTitleCapabilityInventory = Object.freeze({});
+const NO_NATIVE_THREAD_OPERATIONS: NativeThreadOperationAdapters = Object.freeze({});
 
 export class ThreadTitleConflict extends Error {
   readonly status = 409;
@@ -51,7 +56,8 @@ export class ThreadsService {
   constructor(
     private readonly db: Database,
     private readonly events: EventLog,
-    private readonly titleCapabilities: ThreadTitleCapabilityInventory = NO_NATIVE_THREAD_RENAME,
+    private readonly capabilities: NativeThreadCapabilitySource,
+    private readonly nativeOperations: NativeThreadOperationAdapters = NO_NATIVE_THREAD_OPERATIONS,
   ) {}
 
   /** Insert without events — used inside multi-row transactions. */
@@ -126,11 +132,14 @@ export class ThreadsService {
       .get(id) as { agent_id: string; native_session_id: string | null } | undefined;
     if (identity === undefined) return undefined;
 
-    const updater = this.titleCapabilities[identity.agent_id];
-    if (updater === undefined) throw new ThreadTitleConflict(identity.agent_id);
+    const agentId = identity.agent_id as AgentId;
+    const inventory = this.capabilities.capabilityInventory(agentId);
+    if (!inventory?.nativeThreadActions.includes("rename")) throw new ThreadTitleConflict(agentId);
+    const updater = this.nativeOperations[agentId];
+    if (updater === undefined) throw new ThreadTitleConflict(agentId);
 
     await updater.renameThread({
-      agentId: identity.agent_id,
+      agentId,
       threadId: id,
       title: normalizedTitle,
       ...(identity.native_session_id !== null ? { nativeSessionId: identity.native_session_id } : {}),

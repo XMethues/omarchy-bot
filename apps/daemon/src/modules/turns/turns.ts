@@ -38,6 +38,10 @@ function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+function agentEventFamily(event: AgentEvent): string {
+  return event.type === "native" ? "native" : event.type.split(".", 1)[0]!;
+}
+
 /**
  * Owns the turn lifecycle: send (atomic thread+message+turn when the thread
  * is new), steer (mid-turn redirect), and the worker event routing that ends
@@ -48,6 +52,7 @@ export class TurnService {
   #turns = new Map<string, TurnContext>(); // workerSessionId -> ctx
   #turnStarts = new Map<string, Promise<TurnContext>>();
   #terminalWaiters = new Map<string, Set<TerminalTurnWaiter>>();
+  #timeoutQueues = new Map<AgentId, Promise<void>>();
 
   constructor(
     private readonly db: Database,
@@ -97,12 +102,17 @@ export class TurnService {
     threadId: string | null,
     text: string,
     attachmentIds: string[] = [],
+    attachmentDraftToken?: string,
     opts: { cwd?: string } = {},
   ): Promise<SendResultDto> {
     const bot = this.db.query(`SELECT * FROM bots WHERE id = ? AND archived = 0`).get(botId) as { id: string; agent_id: string; instructions: string } | undefined;
     if (!bot) throw new HttpError(404, `unknown bot ${botId}`);
     const agentId = bot.agent_id as AgentId;
-    if (!this.agents.isReady(agentId)) {
+    if (this.#timeoutQueues.has(agentId)) {
+      throw new HttpError(409, `agent '${agentId}' is stopping a timed-out session; the bot cannot chat right now`);
+    }
+    const capabilities = this.agents.capabilityInventory(agentId);
+    if (!this.agents.isReady(agentId) || capabilities === undefined) {
       throw new HttpError(409, `agent '${agentId}' is not ready; the bot cannot chat right now`);
     }
 
@@ -114,7 +124,13 @@ export class TurnService {
       const active = this.threads.activeTurn(existingThreadId);
       if (active !== undefined) {
         if (attachmentIds.length > 0) throw new HttpError(409, "attachments cannot be added while steering an active turn");
-        return this.#steer(active, text);
+        return this.#steer(active, text, agentId);
+      }
+      if (
+        this.threads.getNativeSession(existingThreadId) !== undefined
+        && !capabilities.nativeThreadActions.includes("resume")
+      ) {
+        throw new HttpError(409, `session resume is not supported by ${agentId}`);
       }
     }
 
@@ -145,7 +161,7 @@ export class TurnService {
         botId,
         threadId: tid,
         messageId: userMsg.id,
-        agentId,
+        draftToken: attachmentDraftToken,
       });
       return { threadId: tid, messageId: userMsg.id, workerAttachments };
     })();
@@ -184,7 +200,12 @@ export class TurnService {
     const worker = await this.supervisor.agentWorker(agentId);
     const nativeSessionId = this.threads.getNativeSession(threadId);
     const options = { cwd: thread.cwd ?? process.cwd(), instructions: botRow?.instructions ?? "" };
-
+    if (
+      nativeSessionId !== undefined
+      && !this.agents.capabilityInventory(agentId)?.nativeThreadActions.includes("resume")
+    ) {
+      throw new HttpError(409, `session resume is not supported by ${agentId}`);
+    }
     const opened = nativeSessionId
       ? await worker.request({ type: "session.resume", botId, threadId, nativeSessionId, options }, 30_000)
       : await worker.request({ type: "session.open", botId, threadId, options }, 30_000);
@@ -193,8 +214,8 @@ export class TurnService {
     this.db.query(`UPDATE turns SET worker_session_id = ?, native_session_id = ? WHERE id = ?`).run(opened.sessionId, opened.nativeSessionId, turnId);
 
     const turnTimeout = setTimeout(() => {
-      this.#emitSystemNote(threadId, `turn timed out after ${Math.round(this.cfg.turnTimeoutMs / 1000)}s; failing closed`);
-      void this.abortTurn(turnId, "timeout").catch(() => {});
+      const active = this.#turns.get(opened.sessionId);
+      if (active !== undefined) this.#queueTimeout(active);
     }, this.cfg.turnTimeoutMs);
     turnTimeout.unref?.();
 
@@ -224,9 +245,12 @@ export class TurnService {
     return ctx;
   }
 
-  async #steer(turn: TurnDto, text: string): Promise<SendResultDto> {
-    // Persist and publish first so the user's redirect appears immediately,
-    // even while the initial worker session is still opening.
+  async #steer(turn: TurnDto, text: string, agentId: AgentId): Promise<SendResultDto> {
+    if (!this.agents.capabilityInventory(agentId)?.steering) {
+      throw new HttpError(409, `steering is not supported by ${agentId}`);
+    }
+    // Supported redirects appear immediately, even while the initial worker
+    // session is still opening.
     const userMsg = this.threads.appendMessage(turn.threadId, {
       author: { kind: "user" }, kind: "text", text, payload: { turnId: turn.id },
     });
@@ -241,6 +265,9 @@ export class TurnService {
       const current = this.threads.turnRow(turn.id);
       if (!current || isTerminalTurn(current.status as TurnStatus) || this.#turns.get(ctx.workerSessionId) !== ctx) {
         throw new Error("turn is no longer active");
+      }
+      if (!this.agents.capabilityInventory(ctx.agentId)?.steering) {
+        throw new Error(`steering is no longer supported by ${ctx.agentId}`);
       }
       const worker = await this.supervisor.agentWorker(ctx.agentId);
       await worker.request({ type: "message.steer", sessionId: ctx.workerSessionId, text }, 30_000);
@@ -262,7 +289,20 @@ export class TurnService {
 
   /** Central agent-event router: worker events become transcript activity and turn transitions. */
   onAgentEvent(agentId: AgentId, event: AgentEvent): void {
-    const sessionId = (event as { sessionId?: string }).sessionId;
+    const family = agentEventFamily(event);
+    if (!this.agents.capabilityInventory(agentId)?.nativeEventFamilies.includes(family)) {
+      this.events.append("agent", agentId, "agent.event_rejected", {
+        agentId,
+        family,
+        eventType: event.type,
+        ...(event.type === "native"
+          ? { capability: event.capability, sensitivity: event.sensitivity }
+          : {}),
+        reason: "event family was not declared by the ready agent capability inventory",
+      });
+      return;
+    }
+    const sessionId = event.sessionId;
     if (event.type !== "error" || sessionId !== undefined) {
       const ctx = sessionId !== undefined ? this.#turns.get(sessionId) : undefined;
       if (ctx) return this.#routeTurnEvent(ctx, event);
@@ -321,7 +361,7 @@ export class TurnService {
         const transcriptPayload = {
           capability: event.capability,
           sensitivity: event.sensitivity,
-          ...(event.sensitivity === "secret" ? { redacted: true } : { payload: event.payload }),
+          ...(event.sensitivity === "public" ? { payload: event.payload } : { redacted: true }),
         };
         this.threads.appendMessage(ctx.threadId, {
           author: { kind: "bot" },
@@ -331,9 +371,7 @@ export class TurnService {
         this.events.append("turn", ctx.turnId, "agent.native", {
           threadId: ctx.threadId,
           botId: ctx.botId,
-          capability: event.capability,
-          sensitivity: event.sensitivity,
-          payload: event.payload,
+          ...transcriptPayload,
         });
         break;
       }
@@ -363,6 +401,51 @@ export class TurnService {
     this.threads.appendMessage(threadId, { author: { kind: "system" }, kind: "event", text });
   }
 
+  #queueTimeout(ctx: TurnContext): void {
+    const previous = this.#timeoutQueues.get(ctx.agentId) ?? Promise.resolve();
+    const queued = previous
+      .catch(() => {
+        // A prior timeout still must not prevent this expired turn from settling.
+      })
+      .then(() => this.#timeoutTurn(ctx))
+      .finally(() => {
+        if (this.#timeoutQueues.get(ctx.agentId) === queued) {
+          this.#timeoutQueues.delete(ctx.agentId);
+        }
+      });
+    this.#timeoutQueues.set(ctx.agentId, queued);
+  }
+
+  async #timeoutTurn(ctx: TurnContext): Promise<void> {
+    if (this.#turns.get(ctx.workerSessionId) !== ctx) return;
+    const reason = `timed out after ${Math.round(this.cfg.turnTimeoutMs / 1000)}s`;
+    let cancellationConfirmed = false;
+    try {
+      if (this.agents.capabilityInventory(ctx.agentId)?.abort) {
+        ctx.abortReason = reason;
+        const worker = await this.supervisor.agentWorker(ctx.agentId);
+        await worker.request({ type: "turn.abort", sessionId: ctx.workerSessionId }, 30_000);
+        await this.waitForTerminal(ctx.turnId, 5_000);
+        cancellationConfirmed = true;
+      }
+    } catch {
+      // A failed or unconfirmed native abort falls through to worker quarantine.
+    }
+    if (cancellationConfirmed) return;
+
+    await this.supervisor.stopAgentWorker(ctx.agentId);
+    this.agents.markOffline(ctx.agentId, `worker stopped after ${reason}`);
+    for (const active of [...this.#turns.values()]) {
+      if (active.agentId !== ctx.agentId) continue;
+      this.#finishTurn(
+        active,
+        "failed",
+        active === ctx ? reason : `agent worker stopped after another turn ${reason}`,
+      );
+    }
+  }
+
+
   /**
    * Resolve only after the persisted turn is terminal. Archive uses this
    * barrier so a Bot cannot disappear while its native Agent is still working.
@@ -391,15 +474,27 @@ export class TurnService {
   async abortTurn(turnId: string, reason: string): Promise<void> {
     const t = this.threads.turnRow(turnId);
     if (!t || isTerminalTurn(t.status as TurnStatus)) return;
+    const bot = this.db.query(`SELECT agent_id FROM bots WHERE id = ?`).get(t.bot_id) as { agent_id: AgentId } | undefined;
+    const agentId = bot?.agent_id;
+    if (agentId === undefined || !this.agents.capabilityInventory(agentId)?.abort) {
+      throw new HttpError(409, `turn abort is not supported by ${agentId ?? "the turn's agent"}`);
+    }
     let ctx = [...this.#turns.values()].find((candidate) => candidate.turnId === turnId);
     if (!ctx) {
       const starting = this.#turnStarts.get(turnId);
       if (starting) ctx = await starting.catch(() => undefined);
     }
     if (ctx) {
+      if (!this.agents.capabilityInventory(ctx.agentId)?.abort) {
+        throw new HttpError(409, `turn abort is not supported by ${ctx.agentId}`);
+      }
       ctx.abortReason = reason;
-      const worker = await this.supervisor.agentWorker(ctx.agentId).catch(() => undefined);
-      await worker?.request({ type: "turn.abort", sessionId: ctx.workerSessionId }, 30_000).catch(() => {});
+      try {
+        const worker = await this.supervisor.agentWorker(ctx.agentId);
+        await worker.request({ type: "turn.abort", sessionId: ctx.workerSessionId }, 30_000);
+      } catch (error) {
+        throw new HttpError(409, `turn abort failed: ${errorMessage(error)}`);
+      }
       return;
     }
     this.#setTurnStatus(turnId, "cancelled", reason);

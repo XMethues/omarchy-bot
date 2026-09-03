@@ -1,21 +1,20 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
 async function createBot(page: Page, name: string): Promise<string> {
-  await page.getByTestId("sidebar-create-bot").click();
-  await page.getByTestId("create-bot-name").fill(name);
-  await page.getByTestId("create-bot-instructions").fill("E2E chat teammate");
+  await page.getByRole("navigation", { name: "Bot navigation" }).getByRole("button", { name: "New bot" }).click();
+  await page.getByRole("textbox", { name: "Name" }).fill(name);
+  await page.getByRole("textbox", { name: "Job / Instructions" }).fill("E2E chat teammate");
   await page.getByRole("radio", { name: /^Pi/ }).check();
-  await page.getByTestId("create-bot-submit").click();
+  await page.getByRole("button", { name: "Create bot" }).click();
 
-  const row = page.locator("[data-testid^='sidebar-bot-']", { hasText: name });
-  await expect(row).toBeVisible();
-  const testId = await row.getAttribute("data-testid");
-  if (testId === null) throw new Error(`missing sidebar test id for ${name}`);
-  return testId.slice("sidebar-bot-".length);
+  await expect(page.getByRole("button", { name, exact: true })).toBeVisible();
+  const botId = new URL(page.url()).searchParams.get("bot");
+  if (botId === null) throw new Error(`missing selected bot id for ${name}`);
+  return botId;
 }
 
 function composerInput(page: Page): Locator {
-  return page.getByTestId("composer").locator('[contenteditable="true"]');
+  return page.getByRole("textbox", { name: "Message input" });
 }
 
 async function send(page: Page, text: string): Promise<void> {
@@ -57,14 +56,14 @@ test.describe("chat through a bot", () => {
     const threadId = await waitForPersistedThread(page);
     await expect(page.getByTestId("streaming-message")).toContainText(/hel|hello streaming/);
     await expect(page.getByTestId("assistant-message").last()).toContainText("hello streaming", { timeout: 15_000 });
-    await expect(page.getByTestId("thread-history-trigger")).toHaveText("say: hello streaming");
+    await expect(page.getByRole("button", { name: "Open conversation history" })).toHaveText("say: hello streaming");
 
     await page.reload();
     await expect(page).toHaveURL(new RegExp(`bot=${botId}.*thread=${threadId}`));
     await expect(page.getByTestId("assistant-message").last()).toContainText("hello streaming");
 
     await createBot(page, "Newer Blank Bot");
-    await page.getByTestId(`sidebar-bot-${botId}`).click();
+    await page.getByRole("button", { name: "Streaming Bot", exact: true }).click();
     await expect(page).toHaveURL(new RegExp(`bot=${botId}.*thread=${threadId}`));
     await expect(page.getByTestId("assistant-message").last()).toContainText("hello streaming");
   });
@@ -75,20 +74,18 @@ test.describe("chat through a bot", () => {
     await send(page, "tool please");
     await waitForPersistedThread(page);
 
-    const activity = page.getByTestId("activity");
-    await expect(activity).toContainText("Activity (2)");
-    await expect(activity).toBeVisible();
-    const trigger = activity.locator("button").first();
+    const trigger = page.getByRole("button", { name: "Activity (2)" });
+    await expect(trigger).toBeVisible();
     await expect(trigger).toHaveAttribute("aria-expanded", "false");
     await expect(page.getByTestId("assistant-message").last()).toContainText("tool finished", { timeout: 15_000 });
-    await expect(activity.getByTestId("assistant-message")).toHaveCount(0);
+    await expect(trigger.locator("..").getByRole("article", { name: "Message from assistant" })).toHaveCount(0);
 
     await trigger.click();
     await expect(trigger).toHaveAttribute("aria-expanded", "true");
-    await expect(activity.getByText("fake.progress").first()).toBeVisible();
+    await expect(page.getByText("fake.progress", { exact: true }).first()).toBeVisible();
 
     await page.reload();
-    await expect(page.getByTestId("activity")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Activity (2)" })).toBeVisible();
     await expect(page.getByTestId("assistant-message").last()).toContainText("tool finished");
   });
 
@@ -104,10 +101,9 @@ test.describe("chat through a bot", () => {
     await page.goto("/");
     await createBot(page, "Steering Bot");
 
-    await expect(page.getByTestId("sidebar")).toBeVisible();
-    await expect(page.getByTestId("conversation-header")).toContainText("Steering Bot");
-    await expect(page.getByTestId("transcript")).toBeVisible();
-    await expect(page.getByTestId("top-nav")).toHaveCount(0);
+    await expect(page.getByRole("navigation", { name: "Bot navigation" })).toBeVisible();
+    await expect(page.getByRole("heading", { level: 1, name: "Steering Bot" })).toBeVisible();
+    await expect(page.getByRole("navigation", { includeHidden: true })).toHaveCount(1);
     await expect(page.getByRole("button", { name: /^Stop$/i })).toHaveCount(0);
 
     await send(page, "steer-echo");

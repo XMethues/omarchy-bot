@@ -50,29 +50,29 @@ Every adapter owns a machine-readable record tied to the exact Agent version:
 
 ```ts
 interface AgentCapabilityInventory {
-  agentId: AgentId;
-  agentVersion: string;
-  protocolVersion?: string;
-  verifiedAt: string;
-  operations: Record<
-    string,
-    {
-      support: "native" | "unavailable";
-      evidence: string;
-      conformanceCase?: string;
-    }
+  version: 1;
+  steering: boolean;
+  abort: boolean;
+  sessionDeletion: boolean;
+  nativeThreadActions: Array<
+    "resume" | "history" | "close" | "rename" | "delete" | "fork" | "compact"
   >;
-  nativeEventTypes: string[];
+  attachments: {
+    text: boolean;
+    image: boolean;
+    maxTextBytes?: number;
+  };
+  nativeEventFamilies: string[];
 }
 ```
 
 Rules:
 
-1. `native` means the official interface was exercised, not merely documented.
-2. `unavailable` is honest metadata and must not trigger an emulated substitute.
-3. Unknown native envelopes are retained with sensitivity metadata and reported as capability drift.
-4. Upgrading the Agent invalidates the previous readiness record until conformance passes again.
-5. Feature UI reads the inventory only to present truthful native actions; it never uses it to approve or deny Agent tools.
+1. A claimed operation or modality means the official interface was exercised by conformance, not merely documented.
+2. `false` or an absent action is honest unavailability and must not trigger an emulated substitute.
+3. Unknown native envelopes remain typed `native` events with sensitivity metadata and are reported as capability drift.
+4. Upgrading the Agent invalidates the previous readiness record and inventory until conformance passes again.
+5. Feature UI and daemon services read this inventory as the sole source for support decisions; it never approves or denies Agent tools.
 
 ## Worker boundary
 

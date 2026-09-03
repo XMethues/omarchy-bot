@@ -1,29 +1,28 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
 async function createBot(page: Page, name: string): Promise<string> {
-  await page.getByTestId("sidebar-create-bot").click();
-  await page.getByTestId("create-bot-name").fill(name);
-  await page.getByTestId("create-bot-instructions").fill("Inspect local attachments");
+  await page.getByRole("navigation", { name: "Bot navigation" }).getByRole("button", { name: "New bot" }).click();
+  await page.getByRole("textbox", { name: "Name" }).fill(name);
+  await page.getByRole("textbox", { name: "Job / Instructions" }).fill("Inspect local attachments");
   await page.getByRole("radio", { name: /^Pi/ }).check();
-  await page.getByTestId("create-bot-submit").click();
+  await page.getByRole("button", { name: "Create bot" }).click();
 
-  const row = page.locator("[data-testid^='sidebar-bot-']", { hasText: name });
-  await expect(row).toBeVisible();
-  const testId = await row.getAttribute("data-testid");
-  if (testId === null) throw new Error(`missing sidebar test id for ${name}`);
-  return testId.slice("sidebar-bot-".length);
+  await expect(page.getByRole("button", { name, exact: true })).toBeVisible();
+  const botId = new URL(page.url()).searchParams.get("bot");
+  if (botId === null) throw new Error(`missing selected bot id for ${name}`);
+  return botId;
 }
 
-function composer(page: Page): Locator {
-  return page.getByTestId("composer");
+function stagedAttachments(page: Page): Locator {
+  return page.getByLabel("Staged attachments");
 }
 
 function composerInput(page: Page): Locator {
-  return composer(page).locator('[contenteditable="true"]');
+  return page.getByRole("textbox", { name: "Message input" });
 }
 
 async function dropFile(page: Page, file: { name: string; mediaType: string; bytes: number[] }): Promise<void> {
-  await composer(page).evaluate((element, dropped) => {
+  await composerInput(page).evaluate((element, dropped) => {
     const transfer = new DataTransfer();
     transfer.items.add(new File([Uint8Array.from(dropped.bytes)], dropped.name, { type: dropped.mediaType }));
     element.dispatchEvent(new DragEvent("dragover", { bubbles: true, cancelable: true, dataTransfer: transfer }));
@@ -32,8 +31,8 @@ async function dropFile(page: Page, file: { name: string; mediaType: string; byt
 }
 
 async function openHistory(page: Page): Promise<void> {
-  await page.getByTestId("thread-history-trigger").click();
-  await expect(page.getByTestId("history-dialog")).toBeVisible();
+  await page.getByRole("button", { name: "Open conversation history" }).click();
+  await expect(page.getByRole("dialog", { name: "Conversation history" })).toBeVisible();
 }
 async function sendAndWait(page: Page, text: string): Promise<void> {
   const priorReplies = await page.getByTestId("assistant-message").count();
@@ -52,19 +51,24 @@ test.describe("managed attachments", () => {
     await page.goto("/");
     await createBot(page, "Attachment Draft Bot");
     await sendAndWait(page, "say: ready");
-    await page.getByTestId("attachment-input").setInputFiles({
+    const threadId = new URL(page.url()).searchParams.get("thread");
+    if (threadId === null || threadId === "blank") throw new Error("active thread id missing");
+    await page.getByLabel("Choose files to attach").setInputFiles({
       name: "notes.txt",
       mimeType: "application/octet-stream",
       buffer: Buffer.from("window-local notes"),
     });
-    const row = page.getByTestId("staged-file-row").filter({ hasText: "notes.txt" });
-    await expect(row).toContainText("text/plain");
-    await expect(row).toContainText("18 B");
+    const staged = stagedAttachments(page);
+    const row = staged.getByText("notes.txt", { exact: true });
+    const attachmentId = await page.getByTestId("staged-attachment").getAttribute("data-attachment-id");
+    if (attachmentId === null) throw new Error("staged attachment id missing");
+    await expect(staged.getByText("text/plain", { exact: true })).toBeVisible();
+    await expect(staged.getByText("18 B", { exact: true })).toBeVisible();
 
     await composerInput(page).fill("attachment-echo");
     await openHistory(page);
-    await page.getByTestId("history-new-conversation").click();
-    await expect(page.getByTestId("staged-file-row")).toHaveCount(0);
+    await page.getByRole("button", { name: "New conversation" }).click();
+    await expect(stagedAttachments(page)).toHaveCount(0);
     await expect(composerInput(page)).toHaveText("");
 
     await page.goBack();
@@ -76,65 +80,105 @@ test.describe("managed attachments", () => {
     const secondPage = await page.context().newPage();
     try {
       await secondPage.goto(page.url());
-      await expect(secondPage.getByTestId("staged-file-row")).toHaveCount(0);
+      await expect(stagedAttachments(secondPage)).toHaveCount(0);
       await expect(composerInput(secondPage)).toHaveText("");
+      const otherDraftToken = await secondPage.evaluate(() => crypto.randomUUID());
+      const headers = { "x-attachment-draft-token": otherDraftToken };
+      expect((await secondPage.request.get(`/api/attachments/staged/${attachmentId}`, { headers })).status()).toBe(404);
+      expect((await secondPage.request.delete(`/api/attachments/staged/${attachmentId}`, { headers })).status()).toBe(404);
+      expect(
+        (
+          await secondPage.request.post(`/api/threads/${threadId}/messages`, {
+            data: {
+              text: "attachment-echo",
+              attachmentIds: [attachmentId],
+              attachmentDraftToken: otherDraftToken,
+            },
+          })
+        ).status(),
+      ).toBe(400);
     } finally {
       await secondPage.close();
     }
+
+    await page.reload();
+    await expect(row).toBeVisible();
+    await expect(composerInput(page)).toHaveText("attachment-echo");
+    const priorReplies = await page.getByTestId("assistant-message").count();
+    await composerInput(page).press("Enter");
+    await expect(page.getByTestId("assistant-message")).toHaveCount(priorReplies + 1, { timeout: 15_000 });
+    await expect(page.getByRole("link", { name: /notes\.txt/ })).toBeVisible();
   });
 
-  test("supports dropped image previews and preserves the whole draft after unsupported media fails", async ({ page }) => {
+  test("rejects unsupported attachments without losing the supported draft", async ({ page }) => {
     await page.goto("/");
     await createBot(page, "Attachment Failure Bot");
+
+    await page.getByLabel("Choose files to attach").setInputFiles({
+      name: "notes.txt",
+      mimeType: "text/plain",
+      buffer: Buffer.from("keep this complete draft"),
+    });
+    await composerInput(page).fill("attachment-echo");
+    const supportedRow = stagedAttachments(page).getByText("notes.txt", { exact: true });
+    await expect(supportedRow).toBeVisible();
 
     await dropFile(page, {
       name: "pixel.png",
       mediaType: "application/octet-stream",
       bytes: [137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13],
     });
-    await expect(page.getByTestId("staged-image-preview")).toHaveAttribute("alt", "pixel.png");
+    await expect(page.getByText("This bot can’t use pixel.png. Remove it or choose a supported file.", { exact: true })).toBeVisible();
+    await expect(composerInput(page)).toHaveText("attachment-echo");
+    await expect(supportedRow).toBeVisible();
+    await expect(page.getByRole("img", { name: "pixel.png" })).toHaveCount(0);
 
-    await page.getByTestId("attachment-input").setInputFiles({
+    await page.getByLabel("Choose files to attach").setInputFiles({
       name: "unsupported.pdf",
       mimeType: "application/pdf",
       buffer: Buffer.from("%PDF-1.7\nnot consumable by pi"),
     });
-    await composerInput(page).fill("attachment-echo");
-    await composerInput(page).press("Enter");
-
-    await expect(composer(page)).toContainText("pi cannot consume attachment media type application/pdf");
+    await expect(page.getByText("This bot can’t use unsupported.pdf. Remove it or choose a supported file.", { exact: true })).toBeVisible();
     await expect(composerInput(page)).toHaveText("attachment-echo");
-    await expect(page.getByTestId("staged-image-preview")).toHaveCount(1);
-    await expect(page.getByTestId("staged-file-row").filter({ hasText: "unsupported.pdf" })).toHaveCount(1);
+    await expect(supportedRow).toBeVisible();
+    await expect(stagedAttachments(page).getByText("unsupported.pdf", { exact: true })).toHaveCount(0);
 
-    await page.getByRole("button", { name: "Remove unsupported.pdf" }).click();
-    await expect(page.getByTestId("staged-file-row").filter({ hasText: "unsupported.pdf" })).toHaveCount(0);
     await composerInput(page).press("Enter");
     await page.waitForURL((url) => {
       const threadId = url.searchParams.get("thread");
       return threadId !== null && threadId !== "blank";
     });
-    await expect(page.getByTestId("staged-attachment")).toHaveCount(0);
+    await expect(stagedAttachments(page)).toHaveCount(0);
     await expect(composerInput(page)).toHaveText("");
-    await expect(page.getByTestId("message-image-attachment")).toHaveAttribute("src", /\/api\/attachments\/att_/);
+    await expect(page.getByRole("link", { name: /notes\.txt/ })).toBeVisible();
   });
 
   test("drops missing staged references on reload with a contextual notice", async ({ page }) => {
     await page.goto("/");
     const botId = await createBot(page, "Attachment Restore Bot");
-    await page.getByTestId("attachment-input").setInputFiles({
+    await page.getByLabel("Choose files to attach").setInputFiles({
       name: "temporary.txt",
       mimeType: "text/plain",
       buffer: Buffer.from("temporary"),
     });
     const attachmentId = await page.getByTestId("staged-attachment").getAttribute("data-attachment-id");
     if (attachmentId === null) throw new Error("staged attachment id missing");
-    const deleted = await page.request.delete(`/api/attachments/staged/${attachmentId}`);
+    const draftToken = await page.evaluate((key) => {
+      const raw = sessionStorage.getItem(key);
+      if (raw === null) return undefined;
+      const parsed: unknown = JSON.parse(raw);
+      if (parsed === null || typeof parsed !== "object" || !("attachmentDraftToken" in parsed)) return undefined;
+      return parsed.attachmentDraftToken;
+    }, `draft:v1:${botId}:blank`);
+    if (typeof draftToken !== "string") throw new Error("attachment draft token missing");
+    const deleted = await page.request.delete(`/api/attachments/staged/${attachmentId}`, {
+      headers: { "x-attachment-draft-token": draftToken },
+    });
     expect(deleted.status()).toBe(204);
 
     await page.reload();
-    await expect(page.getByTestId("staged-attachment")).toHaveCount(0);
-    await expect(composer(page)).toContainText("A staged attachment is no longer available and was removed from this draft.");
+    await expect(stagedAttachments(page)).toHaveCount(0);
+    await expect(page.getByText("A staged attachment is no longer available and was removed from this draft.", { exact: true })).toBeVisible();
     await expect.poll(() => page.evaluate((key) => sessionStorage.getItem(key), `draft:v1:${botId}:blank`)).toBeNull();
   });
 });

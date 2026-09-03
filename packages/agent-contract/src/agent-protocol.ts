@@ -41,16 +41,54 @@ export type WorkerOutbound =
   | { type: "event"; event: AgentEvent }
   | AgentResult;
 
+export const AGENT_CAPABILITY_INVENTORY_VERSION = 1 as const;
+
+export const NATIVE_THREAD_ACTIONS = ["resume", "history", "close", "rename", "delete", "fork", "compact"] as const;
+export type NativeThreadAction = (typeof NATIVE_THREAD_ACTIONS)[number];
+
+/** Versioned facts reported by an adapter about behavior its native surface actually supports. */
+export interface AgentCapabilityInventory {
+  version: typeof AGENT_CAPABILITY_INVENTORY_VERSION;
+  steering: boolean;
+  abort: boolean;
+  sessionDeletion: boolean;
+  nativeThreadActions: NativeThreadAction[];
+  attachments: {
+    text: boolean;
+    image: boolean;
+    /** Adapter input bound for inlined text. Omitted when only the daemon upload bound applies. */
+    maxTextBytes?: number;
+  };
+  nativeEventFamilies: string[];
+}
+
+export function isAgentCapabilityInventory(value: unknown): value is AgentCapabilityInventory {
+  if (value === null || typeof value !== "object") return false;
+  const inventory = value as Partial<AgentCapabilityInventory>;
+  const attachments = inventory.attachments as Partial<AgentCapabilityInventory["attachments"]> | null | undefined;
+  return inventory.version === AGENT_CAPABILITY_INVENTORY_VERSION &&
+    typeof inventory.steering === "boolean" &&
+    typeof inventory.abort === "boolean" &&
+    typeof inventory.sessionDeletion === "boolean" &&
+    Array.isArray(inventory.nativeThreadActions) &&
+    inventory.nativeThreadActions.every((action) => NATIVE_THREAD_ACTIONS.includes(action)) &&
+    attachments !== null &&
+    attachments !== undefined &&
+    typeof attachments.text === "boolean" &&
+    typeof attachments.image === "boolean" &&
+    (attachments.maxTextBytes === undefined ||
+      (Number.isSafeInteger(attachments.maxTextBytes) && attachments.maxTextBytes > 0)) &&
+    Array.isArray(inventory.nativeEventFamilies) &&
+    inventory.nativeEventFamilies.every((family) => typeof family === "string" && family.length > 0);
+}
+
 export interface ProbePayload {
   agentId: string;
   installed: boolean;
   agentVersion: string;
   sdkOk: boolean;
   reason?: string;
-  capabilities: {
-    /** True only when the adapter has a tested native operation that permanently removes a session. */
-    sessionDeletion: boolean;
-  };
+  capabilities: AgentCapabilityInventory;
 }
 
 export interface SessionOpenedPayload {

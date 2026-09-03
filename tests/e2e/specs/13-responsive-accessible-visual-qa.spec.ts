@@ -28,7 +28,7 @@ interface SeedOptions {
 const avatar = (seed: string) => ({
   kind: "generated",
   recipe: {
-    rendererVersion: "10.7.0",
+    rendererVersion: "dicebear-core@10.7.0+styles@10.6.0",
     style: "shapes",
     seed,
     options: {},
@@ -81,7 +81,21 @@ async function seedWorkspaceApi(page: Page, options: SeedOptions = {}): Promise<
 
   await page.route("**/api/agents", (route) =>
     fulfillJson(route, [
-      { id: "pi", displayName: "Pi", version: "fixture", status: "ready" },
+      {
+        id: "pi",
+        displayName: "Pi",
+        version: "fixture",
+        status: "ready",
+        capabilities: {
+          version: 1,
+          steering: true,
+          abort: true,
+          sessionDeletion: false,
+          nativeThreadActions: ["resume", "history", "close"],
+          attachments: { text: true, image: false, maxTextBytes: 64 * 1024 },
+          nativeEventFamilies: ["message", "tool", "turn", "error"],
+        },
+      },
       {
         id: "claude",
         displayName: "Claude",
@@ -215,17 +229,19 @@ async function expectInsideViewport(page: Page, locator: Locator): Promise<void>
 }
 
 async function expectWorkspaceContract(page: Page): Promise<void> {
-  await expect(page.getByTestId("top-nav")).toHaveCount(0);
+  await expect(page.getByRole("navigation", { includeHidden: true })).toHaveCount(1);
   await expect(page.getByRole("heading", { level: 1 })).toHaveCount(1);
-  await expect(page.getByTestId("attachment-picker")).toBeVisible();
-  await expect(page.getByTestId("attachment-input")).toBeHidden();
+  await expect(page.getByRole("button", { name: "Attach files" })).toBeVisible();
+  await expect(page.getByLabel("Choose files to attach")).toBeHidden();
   await expect(page.getByRole("button", { name: "Attach files" })).toHaveCount(1);
 
-  const composerInput = page.getByTestId("composer").locator('[contenteditable="true"]');
+  const composerInput = page.getByRole("textbox", { name: "Message input" });
   await expect(composerInput).toBeEnabled();
   await composerInput.fill("A keyboard-ready draft");
   await expect(composerInput).toHaveText("A keyboard-ready draft");
   await composerInput.fill("");
+  const selectedBotButton = page.getByRole("button", { name: "Release Partner", exact: true });
+  await expect(selectedBotButton).toHaveCount((await page.getByRole("navigation", { name: "Bot navigation" }).isVisible()) ? 1 : 0);
 }
 
 async function prepareVisualCapture(page: Page): Promise<void> {
@@ -261,7 +277,7 @@ test.describe("ticket 13 responsive, accessible, and visual QA", () => {
     await seedWorkspaceApi(page, { empty: true });
     await gotoSeededWorkspace(page, true);
 
-    await expect(page.getByTestId("top-nav")).toHaveCount(0);
+    await expect(page.getByRole("navigation", { includeHidden: true })).toHaveCount(1);
     await expect(page.getByRole("heading", { level: 1 })).toHaveCount(1);
     await expectNoSeriousOrCriticalViolations(page, "Empty workspace");
   });
@@ -281,7 +297,7 @@ test.describe("ticket 13 responsive, accessible, and visual QA", () => {
     await gotoSeededWorkspace(page);
 
     const selectedAvatar = page
-      .getByTestId(`sidebar-bot-${PRIMARY_BOT_ID}`)
+      .getByRole("button", { name: "Release Partner", exact: true })
       .getByTestId("avatar-view");
     const selectedImage = selectedAvatar.getByTestId("avatar-shapes").locator("img");
     const selectedSrc = await selectedImage.getAttribute("src");
@@ -291,7 +307,7 @@ test.describe("ticket 13 responsive, accessible, and visual QA", () => {
     expect(selectedSvg).toContain("prefers-reduced-motion");
 
     const idleAvatar = page
-      .getByTestId(`sidebar-bot-${SECONDARY_BOT_ID}`)
+      .getByRole("button", { name: "Offline Researcher", exact: true })
       .getByTestId("avatar-view");
     const idleSrc = await idleAvatar.getByTestId("avatar-shapes").locator("img").getAttribute("src");
     const idleSvg = decodeURIComponent(idleSrc!.slice(idleSrc!.indexOf(",") + 1));
@@ -304,45 +320,46 @@ test.describe("ticket 13 responsive, accessible, and visual QA", () => {
     await seedWorkspaceApi(page);
     await gotoSeededWorkspace(page);
 
-    await expectInsideViewport(page, page.getByTestId("sidebar"));
+    await expectInsideViewport(page, page.getByRole("navigation", { name: "Bot navigation" }));
     await expectInsideViewport(page, page.getByTestId("conversation-header"));
-    await expectInsideViewport(page, page.getByTestId("transcript"));
+    await expectInsideViewport(page, page.getByRole("log"));
     await expectInsideViewport(page, page.getByTestId("composer"));
 
     await page.setViewportSize(narrowViewport);
-    await expect(page.getByTestId("sidebar")).toBeHidden();
+    await expect(page.getByRole("navigation", { name: "Bot navigation" })).toBeHidden();
     await expectInsideViewport(page, page.getByTestId("conversation-header"));
-    await expectInsideViewport(page, page.getByTestId("transcript"));
+    await expectInsideViewport(page, page.getByRole("log"));
     await expectInsideViewport(page, page.getByTestId("composer"));
     await expectWorkspaceContract(page);
 
-    await page.getByTestId("thread-history-trigger").click();
+    await page.getByRole("button", { name: "Open conversation history" }).click();
     const history = page.getByRole("dialog", { name: "Conversation history" });
     await expectInsideViewport(page, history);
     await page.keyboard.press("Escape");
     await expect(history).toBeHidden();
 
-    await page.getByTestId("profile-open").click();
+    await page.getByRole("button", { name: "Edit bot profile" }).click();
     const profile = page.getByRole("dialog", { name: "Bot profile" });
     await expectInsideViewport(page, profile);
     await page.keyboard.press("Escape");
     await expect(profile).toBeHidden();
 
-    await page.getByTestId("header-computer").click();
+    await page.getByRole("button", { name: "Open computer", exact: true }).click();
     const computer = page.getByRole("dialog", { name: "Computer" });
     await expectInsideViewport(page, computer);
     await page.keyboard.press("Escape");
     await expect(computer).toBeHidden();
 
-    await page.getByTestId("mobile-sidebar-trigger").click();
-    await page.getByTestId("mobile-sidebar").getByTestId("sidebar-create-bot").click();
+    await page.getByRole("button", { name: "Open bot navigation" }).click();
+    await page.getByRole("navigation", { name: "Bot navigation" }).getByRole("button", { name: "New bot" }).click();
     const createBot = page.getByRole("dialog", { name: "Create a bot" });
     await expectInsideViewport(page, createBot);
+    await expect.poll(() => createBot.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
     await page.keyboard.press("Escape");
     await expect(createBot).toBeHidden();
 
-    await page.getByTestId("mobile-sidebar-trigger").click();
-    await page.getByTestId("mobile-sidebar").getByTestId("sidebar-settings").click();
+    await page.getByRole("button", { name: "Open bot navigation" }).click();
+    await page.getByRole("navigation", { name: "Bot navigation" }).getByRole("button", { name: "Settings", exact: true }).click();
     const settings = page.getByRole("dialog", { name: "Settings" });
     await expectInsideViewport(page, settings);
     await page.keyboard.press("Escape");
@@ -365,15 +382,18 @@ test.describe("ticket 13 responsive, accessible, and visual QA", () => {
     messages.resolve();
     await expect(page.getByTestId("assistant-message").last()).toContainText("rollback rehearsal");
 
-    await page.getByTestId(`sidebar-bot-${SECONDARY_BOT_ID}`).click();
+    await page.getByRole("button", { name: "Offline Researcher", exact: true }).click();
     await expect(page.getByRole("heading", { level: 1, name: "Offline Researcher" })).toBeVisible();
     await expect(page.getByText("Agent unavailable", { exact: true })).toBeVisible();
+    const conversationWorkspace = page.getByLabel("Conversation workspace");
+    const unavailableNotice = conversationWorkspace.getByRole("alert").filter({ hasText: "Agent unavailable" });
+    await expect(unavailableNotice).toContainText("Reconnect Claude before sending a message.");
     await expect(page.getByRole("textbox", { name: "Message input" })).toHaveAttribute("contenteditable", "false");
 
-    await page.getByTestId("header-computer").click();
+    await page.getByRole("button", { name: "Open computer", exact: true }).click();
     const computer = page.getByRole("complementary", { name: "Computer", exact: true });
     await expect(computer.getByRole("heading", { name: "Computer unavailable", exact: true })).toBeVisible();
-    await expect(computer.getByTestId("computer-preview")).toHaveCount(0);
+    await expect(computer.getByAltText("Latest computer preview for Offline Researcher")).toHaveCount(0);
   });
 
   test("opens and closes narrow bot navigation by keyboard and closes it after bot selection", async ({ page }) => {
@@ -381,24 +401,22 @@ test.describe("ticket 13 responsive, accessible, and visual QA", () => {
     await seedWorkspaceApi(page);
     await gotoSeededWorkspace(page);
 
-    const trigger = page.getByTestId("mobile-sidebar-trigger");
+    const trigger = page.getByRole("button", { name: "Open bot navigation" });
     await trigger.focus();
     await trigger.press("Enter");
-    await expect(page.getByTestId("mobile-sidebar")).toBeVisible();
+    const navigation = page.getByRole("navigation", { name: "Bot navigation" });
+    await expect(navigation).toBeVisible();
     await expect(trigger).toHaveAttribute("aria-expanded", "true");
 
     await page.keyboard.press("Escape");
-    await expect(page.getByTestId("mobile-sidebar")).toBeHidden();
+    await expect(navigation).toBeHidden();
     await expect(trigger).toBeFocused();
 
     await trigger.press("Enter");
-    const secondaryBot = page
-      .getByTestId(`sidebar-bot-${SECONDARY_BOT_ID}`)
-      .locator("button")
-      .first();
+    const secondaryBot = navigation.getByRole("button", { name: "Offline Researcher", exact: true });
     await secondaryBot.focus();
     await secondaryBot.press("Enter");
-    await expect(page.getByTestId("mobile-sidebar")).toBeHidden();
+    await expect(navigation).toBeHidden();
     await expect(page).toHaveURL(new RegExp(`bot=${SECONDARY_BOT_ID}`));
     await expect(page.getByRole("heading", { level: 1, name: "Offline Researcher" })).toBeVisible();
   });
@@ -408,7 +426,7 @@ test.describe("ticket 13 responsive, accessible, and visual QA", () => {
     await seedWorkspaceApi(page);
     await gotoSeededWorkspace(page);
 
-    const profileTrigger = page.getByTestId("profile-open");
+    const profileTrigger = page.getByRole("button", { name: "Edit bot profile" });
     await profileTrigger.focus();
     await profileTrigger.press("Enter");
     await expect(page.getByRole("dialog", { name: "Bot profile" })).toBeVisible();
@@ -417,13 +435,46 @@ test.describe("ticket 13 responsive, accessible, and visual QA", () => {
     await expect(profileTrigger).toBeFocused();
 
     await page.setViewportSize(narrowViewport);
-    const computerTrigger = page.getByTestId("header-computer");
+    const computerTrigger = page.getByRole("button", { name: "Open computer", exact: true });
     await computerTrigger.focus();
     await computerTrigger.press("Enter");
     await expect(page.getByRole("dialog", { name: "Computer" })).toBeVisible();
     await page.keyboard.press("Escape");
     await expect(page.getByRole("dialog", { name: "Computer" })).toBeHidden();
     await expect(computerTrigger).toBeFocused();
+
+    const mobileNavigationTrigger = page.getByRole("button", { name: "Open bot navigation" });
+    await mobileNavigationTrigger.press("Enter");
+    const settingsTrigger = page
+      .getByRole("navigation", { name: "Bot navigation" }).getByRole("button", { name: "Settings", exact: true });
+    await settingsTrigger.press("Enter");
+    const settings = page.getByRole("dialog", { name: "Settings" });
+    await expect(settings).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(settings).toBeHidden();
+    await expect(mobileNavigationTrigger).toBeFocused();
+  });
+
+  test("shows immutable Agent identity, system-following appearance state, and setup guidance", async ({ page }) => {
+    await page.setViewportSize(desktopViewport);
+    await page.emulateMedia({ colorScheme: "dark" });
+    await page.addInitScript(() => localStorage.setItem("settings:v1:appearance", "light"));
+    await seedWorkspaceApi(page);
+    await gotoSeededWorkspace(page);
+
+    await page.getByRole("button", { name: "Edit bot profile" }).click();
+    const profile = page.getByRole("dialog", { name: "Bot profile" });
+    await expect(profile.getByText("Backing Agent", { exact: true })).toBeVisible();
+    await expect(profile.getByText("Pi", { exact: true })).toBeVisible();
+    await expect(profile.getByText("Fixed for this bot.", { exact: true })).toBeVisible();
+    await page.keyboard.press("Escape");
+
+    await page.getByRole("navigation", { name: "Bot navigation" }).getByRole("button", { name: "Settings", exact: true }).click();
+    const settings = page.getByRole("dialog", { name: "Settings" });
+    await expect(settings.getByText("Follows your current Omarchy and system appearance.", { exact: true })).toBeVisible();
+    await expect(settings.getByRole("radio")).toHaveCount(0);
+    await expect.poll(() => page.locator("html").getAttribute("data-theme")).toBeNull();
+    await expect(settings.getByText("Reconnect Claude before sending a message.", { exact: true })).toBeVisible();
   });
 
   test("matches the fixed light desktop workspace", async ({ page }) => {
@@ -447,12 +498,12 @@ test.describe("ticket 13 responsive, accessible, and visual QA", () => {
     await seedWorkspaceApi(page, { computerState: "bot-using" });
     await gotoSeededWorkspace(page);
 
-    await page.getByTestId("header-computer").click();
+    await page.getByRole("button", { name: "Open computer", exact: true }).click();
     await expect(page.getByRole("complementary", { name: "Computer", exact: true })).toBeVisible();
     await expect(page.getByRole("dialog", { name: "Computer" })).toHaveCount(0);
     await captureWorkspace(page, "ticket-13-computer-drawer-dark.png");
 
-    await page.getByTestId("computer-preview-expand").click();
+    await page.getByRole("button", { name: "Expand desktop preview" }).click();
     await expect(page.getByAltText("Expanded computer preview for Release Partner")).toBeVisible();
     await captureWorkspace(page, "ticket-13-computer-preview-modal-dark.png");
   });
@@ -473,7 +524,7 @@ test.describe("ticket 13 responsive, accessible, and visual QA", () => {
     await gotoSeededWorkspace(page);
 
     const workingAvatar = page
-      .getByTestId(`sidebar-bot-${PRIMARY_BOT_ID}`)
+      .getByRole("button", { name: "Release Partner", exact: true })
       .getByTestId("avatar-view");
     await expect(workingAvatar).toHaveCSS("animation-name", "none");
     await captureWorkspace(page, "ticket-13-workspace-reduced-motion-dark.png");

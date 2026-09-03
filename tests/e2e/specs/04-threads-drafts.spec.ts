@@ -1,21 +1,20 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
 async function createBot(page: Page, name: string): Promise<string> {
-  await page.getByTestId("sidebar-create-bot").click();
-  await page.getByTestId("create-bot-name").fill(name);
-  await page.getByTestId("create-bot-instructions").fill("Own thread history tests");
+  await page.getByRole("navigation", { name: "Bot navigation" }).getByRole("button", { name: "New bot" }).click();
+  await page.getByRole("textbox", { name: "Name" }).fill(name);
+  await page.getByRole("textbox", { name: "Job / Instructions" }).fill("Own thread history tests");
   await page.getByRole("radio", { name: /^Pi/ }).check();
-  await page.getByTestId("create-bot-submit").click();
+  await page.getByRole("button", { name: "Create bot" }).click();
 
-  const row = page.locator("[data-testid^='sidebar-bot-']", { hasText: name });
-  await expect(row).toBeVisible();
-  const testId = await row.getAttribute("data-testid");
-  if (testId === null) throw new Error(`missing sidebar test id for ${name}`);
-  return testId.slice("sidebar-bot-".length);
+  await expect(page.getByRole("button", { name, exact: true })).toBeVisible();
+  const botId = new URL(page.url()).searchParams.get("bot");
+  if (botId === null) throw new Error(`missing selected bot id for ${name}`);
+  return botId;
 }
 
 function composerInput(page: Page): Locator {
-  return page.getByTestId("composer").locator('[contenteditable="true"]');
+  return page.getByRole("textbox", { name: "Message input" });
 }
 
 async function send(page: Page, text: string): Promise<string> {
@@ -31,8 +30,8 @@ async function send(page: Page, text: string): Promise<string> {
 }
 
 async function openHistory(page: Page): Promise<void> {
-  await page.getByTestId("thread-history-trigger").click();
-  await expect(page.getByTestId("history-dialog")).toBeVisible();
+  await page.getByRole("button", { name: "Open conversation history" }).click();
+  await expect(page.getByRole("dialog", { name: "Conversation history" })).toBeVisible();
 }
 
 test.describe("thread history and window drafts", () => {
@@ -42,28 +41,50 @@ test.describe("thread history and window drafts", () => {
     const firstThreadId = await send(page, "say: First history answer");
 
     await openHistory(page);
-    await page.getByTestId("history-search").fill("does not exist");
+    await page.getByRole("textbox", { name: "Search conversations" }).fill("does not exist");
     await expect(page.getByText("No matching conversations")).toBeVisible();
-    await page.getByTestId("history-search").fill("First history");
-    await expect(page.getByTestId(`history-thread-${firstThreadId}`)).toBeVisible();
-    await page.getByTestId("history-new-conversation").click();
+    await page.getByRole("textbox", { name: "Search conversations" }).fill("First history");
+    await expect(page.getByRole("button", { name: /First history answer/ })).toBeVisible();
+    await page.getByRole("button", { name: "New conversation" }).click();
     await expect(page).toHaveURL(new RegExp(`(?:\\?|&)bot=${botId}(?:&|$)`));
     await expect(page).toHaveURL(/(?:\?|&)thread=blank(?:&|$)/);
 
     await composerInput(page).fill("blank conversation draft");
     await openHistory(page);
-    await page.getByTestId(`history-thread-${firstThreadId}`).click();
+    await page.getByRole("button", { name: /First history answer/ }).click();
     await expect(page).toHaveURL(new RegExp(`(?:\\?|&)thread=${firstThreadId}(?:&|$)`));
     await expect(composerInput(page)).toHaveText("");
 
     await composerInput(page).fill("first thread draft");
     await openHistory(page);
-    await page.getByTestId("history-new-conversation").click();
+    await page.getByRole("button", { name: "New conversation" }).click();
     await expect(composerInput(page)).toHaveText("blank conversation draft");
 
     await openHistory(page);
-    await page.getByTestId(`history-thread-${firstThreadId}`).click();
+    await page.getByRole("button", { name: /First history answer/ }).click();
     await expect(composerInput(page)).toHaveText("first thread draft");
+  });
+
+  test("uses a Dialog on desktop and a viewport-contained Bottom Sheet at 390px", async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto("/");
+    await createBot(page, "Responsive History Bot");
+    const trigger = page.getByRole("button", { name: "Open conversation history" });
+    await openHistory(page);
+    const desktopHistory = page.getByRole("dialog", { name: "Conversation history" });
+    const desktopBox = await desktopHistory.boundingBox();
+    expect(desktopBox?.width).toBeLessThan(640);
+    await page.keyboard.press("Escape");
+    await expect(trigger).toBeFocused();
+
+    await page.setViewportSize({ width: 390, height: 780 });
+    await openHistory(page);
+    const narrowHistory = page.getByRole("dialog", { name: "Conversation history" });
+    const narrowBox = await narrowHistory.boundingBox();
+    expect(narrowBox?.width).toBe(390);
+    await expect
+      .poll(() => narrowHistory.evaluate((element) => element.scrollWidth <= element.clientWidth))
+      .toBe(true);
   });
 
   test("restores after refresh without sharing a draft with a second page", async ({ page }) => {

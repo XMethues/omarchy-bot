@@ -3,6 +3,10 @@ import path from "node:path";
 import type { Database } from "bun:sqlite";
 import { AGENT_IDS, type AgentId, type AgentStatus } from "@omarchy-bot/domain";
 import type { AgentDto } from "@omarchy-bot/protocol";
+import {
+  isAgentCapabilityInventory,
+  type AgentCapabilityInventory,
+} from "@omarchy-bot/agent-contract";
 import type { EventLog } from "../events/eventLog.ts";
 import type { Supervisor } from "../../supervision/supervisor.ts";
 
@@ -25,6 +29,9 @@ export class AgentsRegistry {
     private readonly cfg: { conformanceDir: string; workersAgentsDir: string },
     private readonly supervisor: Supervisor,
   ) {}
+
+  readonly #capabilityInventories = new Map<AgentId, AgentCapabilityInventory>();
+  readonly #recheckGenerations = new Map<AgentId, number>();
 
   init(): void {
     const now = new Date().toISOString();
@@ -54,6 +61,7 @@ export class AgentsRegistry {
   }
 
   #setStatus(id: AgentId, status: AgentStatus, reason?: string, agentVersion?: string): void {
+    if (status !== "ready") this.#capabilityInventories.delete(id);
     this.db
       .query(`UPDATE agents SET status = ?, reason = ?, agent_version = COALESCE(?, agent_version), updated_at = ? WHERE id = ?`)
       .run(status, reason ?? null, agentVersion ?? null, new Date().toISOString(), id);
@@ -61,16 +69,18 @@ export class AgentsRegistry {
   }
 
   toDto(row: AgentRow): AgentDto {
+    const id = row.id as AgentId;
+    const status = row.status as AgentStatus;
+    const guidance = this.guidance(id, status);
+    const capabilities = status === "ready" ? this.#capabilityInventories.get(id) : undefined;
     return {
-      id: row.id as AgentId,
+      id,
       displayName: row.display_name,
       version: row.agent_version,
-      status: row.status as AgentStatus,
+      status,
       ...(row.reason !== null ? { reason: row.reason } : {}),
-      ...(() => {
-        const g = this.guidance(row.id as AgentId, row.status as AgentStatus);
-        return g !== undefined ? { guidance: g } : {};
-      })(),
+      ...(guidance !== undefined ? { guidance } : {}),
+      ...(capabilities !== undefined ? { capabilities } : {}),
     };
   }
 
@@ -109,6 +119,15 @@ export class AgentsRegistry {
     return this.status(id) === "ready";
   }
 
+  markOffline(id: AgentId, reason: string): void {
+    this.#recheckGenerations.set(id, (this.#recheckGenerations.get(id) ?? 0) + 1);
+    this.#setStatus(id, "offline", reason);
+  }
+
+  capabilityInventory(id: AgentId): AgentCapabilityInventory | undefined {
+    return this.isReady(id) ? this.#capabilityInventories.get(id) : undefined;
+  }
+
   conformanceRecord(agentId: string, version: string): { ok: boolean; reason?: string } | undefined {
     const file = path.join(this.cfg.conformanceDir, `${agentId}-${version}.json`);
     if (!existsSync(file)) return undefined;
@@ -121,14 +140,22 @@ export class AgentsRegistry {
 
   /** Async probe + conformance gate. Called at boot and on demand. */
   async recheck(id: AgentId): Promise<AgentDto> {
+    const generation = (this.#recheckGenerations.get(id) ?? 0) + 1;
+    this.#recheckGenerations.set(id, generation);
     this.#setStatus(id, "checking");
+    const isCurrent = (): boolean => this.#recheckGenerations.get(id) === generation;
     if (!this.#adapterPresent(id)) {
-      this.#setStatus(id, "missing", "adapter not installed in this build");
+      if (isCurrent()) this.#setStatus(id, "missing", "adapter not installed in this build");
       return this.get(id)!;
     }
     try {
       const w = await this.supervisor.agentWorker(id);
       const probe = await w.request({ type: "probe" }, 30_000);
+      if (!isCurrent()) return this.get(id)!;
+      if (!isAgentCapabilityInventory(probe?.capabilities)) {
+        this.#setStatus(id, "incompatible", "agent probe returned an invalid capability inventory", probe?.agentVersion);
+        return this.get(id)!;
+      }
       if (!probe?.installed || !probe?.sdkOk) {
         this.#setStatus(id, "incompatible", probe?.reason ?? "probe failed", probe?.agentVersion);
         return this.get(id)!;
@@ -142,9 +169,13 @@ export class AgentsRegistry {
         this.#setStatus(id, "incompatible", record.reason ?? "conformance failed", probe.agentVersion);
         return this.get(id)!;
       }
+      this.#capabilityInventories.set(id, probe.capabilities);
       this.#setStatus(id, "ready", undefined, probe.agentVersion);
-    } catch (err) {
-      this.#setStatus(id, "offline", String((err as Error).message));
+    } catch (error) {
+      if (isCurrent()) {
+        const reason = error instanceof Error ? error.message : String(error);
+        this.#setStatus(id, "offline", reason);
+      }
     }
     return this.get(id)!;
   }

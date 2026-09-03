@@ -1,21 +1,22 @@
-import { Avatar as DiceBearAvatar, Style } from "@dicebear/core";
-import pixelbotDefinition from "@dicebear/styles/pixelbot.json";
-import shapesDefinition from "@dicebear/styles/shapes.json";
-import thumbsDefinition from "@dicebear/styles/thumbs.json";
 import * as stylex from "@stylexjs/stylex";
 import type { JSX } from "react";
-import type { AvatarDto, AvatarRecipeDto } from "@omarchy-bot/protocol";
+import type { AvatarDto } from "@omarchy-bot/protocol";
 import { Avatar, AvatarStatusDot } from "@astryxdesign/core/Avatar";
 import { HStack } from "@astryxdesign/core/HStack";
+import { renderAvatarRecipe, type AvatarActivity } from "./avatarRenderer.ts";
 
-export type AvatarActivity = "idle" | "selected" | "working" | "streaming";
+export type { AvatarActivity } from "./avatarRenderer.ts";
 
-interface AvatarViewProps {
+interface AvatarViewBaseProps {
   avatar: AvatarDto;
   name: string;
   size?: "xsm" | "sm" | "md" | "lg" | number;
   activity?: AvatarActivity;
 }
+
+export type AvatarViewProps =
+  | (AvatarViewBaseProps & { decorative: true; label?: never })
+  | (AvatarViewBaseProps & { decorative?: false; label?: string });
 
 const breathe = stylex.keyframes({
   "0%, 100%": { transform: "scale(1)" },
@@ -43,47 +44,18 @@ const styles = stylex.create({
   },
 });
 
-const pixelbotStyle = new Style(pixelbotDefinition);
-const shapesStyle = new Style(shapesDefinition);
-const thumbsStyle = new Style(thumbsDefinition);
-
-type AnimationVariant = "slowest" | "medium" | "fast";
-
-function animationVariant(activity: AvatarActivity): AnimationVariant | undefined {
-  switch (activity) {
-    case "selected":
-      return "slowest";
-    case "working":
-      return "medium";
-    case "streaming":
-      return "fast";
-    case "idle":
-      return undefined;
-  }
-}
-
-function recipeDataUri(recipe: AvatarRecipeDto, activity: AvatarActivity): string {
-  const variant = animationVariant(activity);
-  const options = variant === undefined
-    ? { seed: recipe.seed }
-    : { seed: recipe.seed, animationVariant: variant };
-
-  switch (recipe.style) {
-    case "pixelbot":
-      return new DiceBearAvatar(pixelbotStyle, options).toDataUri();
-    case "thumbs":
-      return new DiceBearAvatar(thumbsStyle, options).toDataUri();
-    case "shapes":
-    default:
-      return new DiceBearAvatar(shapesStyle, options).toDataUri();
-  }
-}
-
 /**
  * Safe Bot avatar rendering. Recipe data is rendered by pinned local DiceBear
  * styles only; uploaded images must use the daemon's same-origin avatar route.
  */
-export function AvatarView({ avatar, name, size = "md", activity = "idle" }: AvatarViewProps): JSX.Element {
+export function AvatarView({
+  avatar,
+  name,
+  size = "md",
+  activity = "idle",
+  decorative = false,
+  label,
+}: AvatarViewProps): JSX.Element {
   const active = activity !== "idle";
   const status = active ? (
     <AvatarStatusDot
@@ -92,7 +64,7 @@ export function AvatarView({ avatar, name, size = "md", activity = "idle" }: Ava
     />
   ) : undefined;
   const uploadedUrl = avatar.kind === "upload" && /^\/api\/bots\/[\w-]+\/avatar$/.test(avatar.url) ? avatar.url : undefined;
-  const src = avatar.kind === "upload" ? uploadedUrl : recipeDataUri(avatar.recipe, activity);
+  const src = avatar.kind === "upload" ? uploadedUrl : renderAvatarRecipe(avatar.recipe, activity);
   const motionStyle =
     avatar.kind !== "upload"
       ? undefined
@@ -113,6 +85,10 @@ export function AvatarView({ avatar, name, size = "md", activity = "idle" }: Ava
     >
       <Avatar
         name={name}
+        {...(decorative
+          ? { "aria-hidden": "true" as const, "aria-label": "", role: "presentation" as const, tooltip: false as const }
+          : {})}
+        {...(!decorative && label !== undefined ? { alt: label } : {})}
         {...(src !== undefined ? { src } : {})}
         size={size}
         {...(status !== undefined ? { status } : {})}

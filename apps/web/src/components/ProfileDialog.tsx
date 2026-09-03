@@ -17,6 +17,7 @@ import { AvatarView } from "./AvatarView.tsx";
 export interface ProfileDialogProps {
   bot: BotViewDto;
   open: boolean;
+  agentDisplayName: string;
   onClose: () => void;
   onUpdated: (bot: BotDto) => void;
 }
@@ -25,7 +26,7 @@ type BusyAction = "save" | "variation" | "upload" | "recipe";
 type InvalidField = "name" | "avatarDescription";
 
 /** Profile fields and avatar choices for one bot. Its agent remains fixed. */
-export function ProfileDialog({ bot, open, onClose, onUpdated }: ProfileDialogProps): JSX.Element {
+export function ProfileDialog({ bot, agentDisplayName, open, onClose, onUpdated }: ProfileDialogProps): JSX.Element {
   const [current, setCurrent] = useState<BotDto>(bot);
   const [name, setName] = useState(bot.name);
   const [instructions, setInstructions] = useState(bot.instructions);
@@ -183,7 +184,11 @@ export function ProfileDialog({ bot, open, onClose, onUpdated }: ProfileDialogPr
             width="100%"
             data-testid="profile-instructions"
           />
-          <Text color="secondary">This bot will keep using its current agent. Create a new bot to choose a different one.</Text>
+          <VStack gap={0.5}>
+            <Text type="label-lg">Backing Agent</Text>
+            <Text>{agentDisplayName}</Text>
+            <Text color="secondary">Fixed for this bot.</Text>
+          </VStack>
           <Button
             label="Save profile"
             variant="primary"

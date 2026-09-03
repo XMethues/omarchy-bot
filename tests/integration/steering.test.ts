@@ -1,4 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { readFileSync, writeFileSync } from "node:fs";
+import path from "node:path";
 import { api, apiStatus, makeBot, sendToBot, sendToThread, startDaemon, waitThreadIdle, type Harness } from "./helpers/harness.ts";
 
 interface MessageView {
@@ -56,6 +58,24 @@ async function messages(threadId: string): Promise<MessageView[]> {
 
 async function abort(turnId: string): Promise<void> {
   await h.svc.turns.abortTurn(turnId, "test cleanup");
+}
+
+function setCapabilities(capabilities: Record<string, unknown>): void {
+  writeFileSync(
+    path.join(h.home, "conformance", "pi-fake-pi-1.json"),
+    JSON.stringify({ ok: true, image: "verified", fakeCapabilities: capabilities }),
+  );
+}
+
+function workerCommandCount(command: string): number {
+  try {
+    return readFileSync(path.join(h.home, "fake-worker-commands.log"), "utf8")
+      .split("\n")
+      .filter((entry) => entry === command)
+      .length;
+  } catch {
+    return 0;
+  }
 }
 
 describe("integration: native turn steering", () => {
@@ -173,6 +193,58 @@ describe("integration: native turn steering", () => {
 
     await abort(sent.turnId);
     await waitThreadIdle(h, sent.threadId);
+  });
+
+  test("undeclared steering and abort are rejected before persistence or worker dispatch", async () => {
+    setCapabilities({
+      steering: false,
+      abort: false,
+      nativeThreadActions: ["resume", "history", "close"],
+      nativeEventFamilies: ["message", "tool", "turn", "error", "native"],
+    });
+    await h.svc.agents.recheck("pi");
+
+    let turnId: string | undefined;
+    let threadId: string | undefined;
+    try {
+      const botId = await makeBot(h, "Unsupported turn controls");
+      const sent = await sendToBot(h, botId, "hang");
+      turnId = sent.turnId;
+      threadId = sent.threadId;
+      await until(() => (rowForTurn(sent.turnId).worker_session_id?.length ?? 0) > 0);
+
+      const beforeMessages = await messages(sent.threadId);
+      const steerCommands = workerCommandCount("message.steer");
+      const abortCommands = workerCommandCount("turn.abort");
+
+      const steer = await apiStatus(h, "POST", `/api/threads/${sent.threadId}/messages`, { text: "not persisted" });
+      expect(steer).toEqual({
+        status: 409,
+        body: { error: "steering is not supported by pi" },
+      });
+      expect(await messages(sent.threadId)).toEqual(beforeMessages);
+      expect(workerCommandCount("message.steer")).toBe(steerCommands);
+
+      const archive = await apiStatus(h, "POST", `/api/bots/${botId}/archive`, { confirmStop: true });
+      expect(archive).toEqual({
+        status: 409,
+        body: { error: "turn abort is not supported by pi" },
+      });
+      expect(rowForTurn(sent.turnId).status).toBe("working");
+      expect(workerCommandCount("turn.abort")).toBe(abortCommands);
+      const bot = await api<{ archived: boolean }>(h, "GET", `/api/bots/${botId}`);
+      expect(bot.archived).toBeFalse();
+    } finally {
+      setCapabilities({
+        steering: true,
+        abort: true,
+        nativeThreadActions: ["resume", "history", "close"],
+        nativeEventFamilies: ["message", "tool", "turn", "error", "native"],
+      });
+      await h.svc.agents.recheck("pi");
+      if (turnId !== undefined) await abort(turnId);
+      if (threadId !== undefined) await waitThreadIdle(h, threadId);
+    }
   });
 
 });

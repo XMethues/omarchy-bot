@@ -17,5 +17,5 @@ An operation the selected Agent can already perform in the user's Omarchy Linux 
 _Avoid_: Bot permission, provisioned capability
 
 **Agent Capability Inventory**:
-Versioned, tested metadata describing operations an Agent exposes through its official interface. Each adapter maintains its own inventory and the UI uses it to present native actions contextually; it is not a permission manifest or allowlist.
-_Avoid_: Bot permission, capability gate
+Compact, adapter-owned metadata returned by the Agent probe. It truthfully describes native steering, abort, session deletion, Thread actions, accepted attachment modalities, and native event families for the probed Agent version. It is the sole support-policy source for UI and service behavior, not a permission manifest or a promise to emulate missing features.
+_Avoid_: Bot permission, capability gate, speculative capability list

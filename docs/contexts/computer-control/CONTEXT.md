@@ -16,6 +16,10 @@ _Avoid_: Permission manager, visible lease panel
 A contextual handoff of the Shared Screen from a Bot to the user when human input is required. It appears only when relevant and returns control after the computer is observed again.
 _Avoid_: Permanent human lease, general approval
 
+**Emergency Control**:
+A fail-safe that immediately stops or resumes automated Shared Screen input. It is available while computer input is active and remains available in the stopped state, but it is not a permanent idle Sidebar affordance.
+_Avoid_: Persistent panic button, routine Takeover
+
 **Bot Screen**:
 A future independent visual and input surface assigned to one Bot while sharing intended machine resources. Genuine Bot Screens are required for parallel desktop operation; a Hyprland workspace alone is not a Bot Screen.
 _Avoid_: Hyprland workspace, current Shared Screen

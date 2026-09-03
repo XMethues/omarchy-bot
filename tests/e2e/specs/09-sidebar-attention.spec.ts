@@ -1,20 +1,19 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
 async function createBot(page: Page, name: string): Promise<string> {
-  await page.getByTestId("sidebar-create-bot").click();
-  await page.getByTestId("create-bot-name").fill(name);
-  await page.getByTestId("create-bot-instructions").fill("Sidebar attention E2E bot");
+  await page.getByRole("navigation", { name: "Bot navigation" }).getByRole("button", { name: "New bot" }).click();
+  await page.getByRole("textbox", { name: "Name" }).fill(name);
+  await page.getByRole("textbox", { name: "Job / Instructions" }).fill("Sidebar attention E2E bot");
   await page.getByRole("radio", { name: /^Pi/ }).check();
-  await page.getByTestId("create-bot-submit").click();
-  const row = page.locator("[data-testid^='sidebar-bot-']", { hasText: name });
-  await expect(row).toBeVisible();
-  const testId = await row.getAttribute("data-testid");
-  if (testId === null) throw new Error(`missing sidebar test id for ${name}`);
-  return testId.slice("sidebar-bot-".length);
+  await page.getByRole("button", { name: "Create bot" }).click();
+  await expect(page.getByRole("button", { name, exact: true })).toBeVisible();
+  const botId = new URL(page.url()).searchParams.get("bot");
+  if (botId === null) throw new Error(`missing selected bot id for ${name}`);
+  return botId;
 }
 
 function composerInput(page: Page): Locator {
-  return page.getByTestId("composer").locator('[contenteditable="true"]');
+  return page.getByRole("textbox", { name: "Message input" });
 }
 
 async function sendAndWait(page: Page, text: string): Promise<void> {
@@ -40,7 +39,7 @@ async function postMessage(page: Page, threadId: string, text: string): Promise<
 }
 
 async function scrollTranscriptToTop(page: Page): Promise<void> {
-  await page.getByTestId("transcript-attention").evaluate((root) => {
+  await page.getByRole("log").evaluate((root) => {
     const container = root as HTMLElement;
     const candidates: HTMLElement[] = [container, ...container.querySelectorAll<HTMLElement>("*")];
     let ancestor = container.parentElement;
@@ -58,18 +57,24 @@ async function scrollTranscriptToTop(page: Page): Promise<void> {
 test.describe("Sidebar attention", () => {
   test("pins without changing recency and startup still opens the most recently active Bot", async ({ page }) => {
     await page.goto("/");
-    const pinnedBotId = await createBot(page, `Pinned older ${Date.now()}`);
+    const pinnedBotName = `Pinned older ${Date.now()}`;
+    const pinnedBotId = await createBot(page, pinnedBotName);
     await sendAndWait(page, "say: older useful preview");
     const pinnedThreadId = await currentThreadId(page);
 
-    await page.getByTestId(`sidebar-bot-actions-${pinnedBotId}`).click();
+    await page.getByRole("navigation", { name: "Bot navigation" })
+      .getByRole("button", { name: `Actions for ${pinnedBotName}` })
+      .click();
     await page.getByRole("menuitem", { name: /^Pin/ }).click();
-    await expect(page.getByTestId(`sidebar-pinned-${pinnedBotId}`)).toBeVisible();
-    await expect(page.locator("[data-testid^='sidebar-bot-bot_']").first()).toHaveAttribute("data-testid", `sidebar-bot-${pinnedBotId}`);
+    await expect(page.getByRole("navigation", { name: "Bot navigation" }).getByText("Pinned", { exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: pinnedBotName, exact: true })).toBeVisible();
 
-    const recentBotId = await createBot(page, `Recent unpinned ${Date.now()}`);
+    const recentBotName = `Recent unpinned ${Date.now()}`;
+    const recentBotId = await createBot(page, recentBotName);
     await sendAndWait(page, "say: newest useful preview");
-    await expect(page.locator("[data-testid^='sidebar-bot-bot_']").first()).toHaveAttribute("data-testid", `sidebar-bot-${pinnedBotId}`);
+    const orderedBots = page.getByRole("navigation", { name: "Bot navigation" })
+      .getByRole("button", { name: new RegExp(`^(?:${pinnedBotName}|${recentBotName})$`) });
+    await expect(orderedBots.first()).toHaveAccessibleName(pinnedBotName);
 
     await page.goto("/");
     await expect(page).toHaveURL(new RegExp(`(?:\\?|&)bot=${recentBotId}(?:&|$)`));
@@ -88,12 +93,12 @@ test.describe("Sidebar attention", () => {
     await scrollTranscriptToTop(page);
 
     await postMessage(page, threadId, "say: background output at the precise read boundary");
-    await expect(page.getByTestId(`sidebar-unread-${botId}`)).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByRole("navigation", { name: "Bot navigation" }).getByLabel("1 unread message")).toBeVisible({ timeout: 15_000 });
     const scrollToLatest = page.getByRole("button", { name: "New messages" });
     await expect(scrollToLatest).toBeVisible();
 
     await scrollToLatest.click();
-    await expect(page.getByTestId(`sidebar-unread-${botId}`)).toHaveCount(0, { timeout: 15_000 });
+    await expect(page.getByRole("navigation", { name: "Bot navigation" }).getByLabel("1 unread message")).toHaveCount(0, { timeout: 15_000 });
     await expect(scrollToLatest).toBeHidden();
   });
 
@@ -131,6 +136,6 @@ test.describe("Sidebar attention", () => {
     expect(notification?.title).toContain("finished working");
     expect(notification?.title).toContain("Notification target");
     expect(await page.evaluate(() => (globalThis as typeof globalThis & { __notificationPermissionRequests: number }).__notificationPermissionRequests)).toBe(0);
-    await expect(page.getByTestId(`sidebar-unread-${affectedBotId}`)).toBeVisible();
+    await expect(page.getByRole("navigation", { name: "Bot navigation" }).getByLabel("1 unread message")).toBeVisible();
   });
 });

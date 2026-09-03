@@ -23,7 +23,10 @@ export async function startDaemon(existingHome?: string): Promise<Harness> {
   // Fake conformance record so the fake pi worker probes to `ready`.
   const conf = path.join(home, "conformance");
   mkdirSync(conf, { recursive: true });
-  writeFileSync(path.join(conf, "pi-fake-pi-1.json"), JSON.stringify({ ok: true }));
+  writeFileSync(
+    path.join(conf, "pi-fake-pi-1.json"),
+    JSON.stringify({ ok: true, image: "verified" }),
+  );
 
   process.env.OMARCHY_BOT_HOME = home;
   process.env.OMARCHY_BOT_STATE = state;

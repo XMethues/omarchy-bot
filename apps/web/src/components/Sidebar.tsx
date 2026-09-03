@@ -199,9 +199,11 @@ export function Sidebar({
                         name={bot.name}
                         size="sm"
                         activity={bot.status === "working" ? "working" : bot.id === selectedBotId ? "selected" : "idle"}
+                        decorative
                       />
                     }
                     label={bot.name}
+                    aria-label={bot.name}
                     actions={
                       <DropdownMenu
                         button={{

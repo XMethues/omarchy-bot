@@ -1,36 +1,38 @@
-import type { JSX } from "react";
+import type { JSX, RefObject } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Banner } from "@astryxdesign/core/Banner";
+import { useAppShellMobile } from "@astryxdesign/core/AppShell";
 import { Button } from "@astryxdesign/core/Button";
 import { Dialog, DialogHeader } from "@astryxdesign/core/Dialog";
 import { EmptyState } from "@astryxdesign/core/EmptyState";
+import { Heading } from "@astryxdesign/core/Heading";
 import { Icon } from "@astryxdesign/core/Icon";
 import { RadioList, RadioListItem } from "@astryxdesign/core/RadioList";
 import { TextArea } from "@astryxdesign/core/TextArea";
 import { TextInput } from "@astryxdesign/core/TextInput";
 import { VStack } from "@astryxdesign/core/VStack";
-import type { AgentDto, AgentStatusDto } from "@omarchy-bot/protocol";
+import type { AgentDto } from "@omarchy-bot/protocol";
+import { agentAvailabilityDescription } from "../lib/agentPresentation.ts";
 import { api, apiErrorMessage } from "../lib/api.ts";
+import { BottomSheetWithReturnFocus } from "./BottomSheetWithReturnFocus.tsx";
 
 interface CreateBotDialogProps {
   isOpen: boolean;
   onClose: () => void;
   onCreated: (botId: string) => void;
+  mobileReturnFocusRef: RefObject<HTMLElement | null>;
 }
 
 type InvalidField = "name" | "agent";
 
-const AGENT_STATUS_DESCRIPTION: Record<AgentStatusDto, string> = {
-  ready: "Ready to work",
-  checking: "Checking availability",
-  missing: "Not available in this installation",
-  unconfigured: "Needs setup before it can run a bot",
-  incompatible: "Needs an update or setup check before it can run a bot",
-  offline: "Not responding right now",
-};
-
 /** Creates a teammate from the available local agents. */
-export function CreateBotDialog({ isOpen, onClose, onCreated }: CreateBotDialogProps): JSX.Element {
+export function CreateBotDialog({
+  isOpen,
+  onClose,
+  onCreated,
+  mobileReturnFocusRef,
+}: CreateBotDialogProps): JSX.Element {
+  const { isMobile } = useAppShellMobile();
   const [name, setName] = useState("");
   const [instructions, setInstructions] = useState("");
   const [agentId, setAgentId] = useState("");
@@ -107,100 +109,117 @@ export function CreateBotDialog({ isOpen, onClose, onCreated }: CreateBotDialogP
     }
   }, [name, instructions, agents, agentId, onCreated, onClose, reset]);
 
-  return (
-    <Dialog
-      isOpen={isOpen}
-      onOpenChange={(open) => {
-        if (!open) {
-          onClose();
-          reset();
-        }
+  const handleOpenChange = (open: boolean): void => {
+    if (!open) {
+      onClose();
+      reset();
+    }
+  };
+
+  const content = (
+    <form
+      noValidate
+      onSubmit={(event) => {
+        event.preventDefault();
+        void submit();
       }}
-      width={520}
-      purpose="form"
     >
-      <DialogHeader title="Create a bot" subtitle="Name your teammate, describe its job, and pick the agent that runs it." />
-      <form
-        noValidate
-        onSubmit={(event) => {
-          event.preventDefault();
-          void submit();
-        }}
-      >
-        <VStack padding={4} gap={4}>
-          {error !== undefined ? <Banner status="error" title={error} /> : null}
-          <TextInput
-            ref={nameRef}
-            autoFocus
-            label="Name"
-            value={name}
+      <VStack padding={4} gap={4}>
+        {isMobile ? <Heading level={2}>Create a bot</Heading> : null}
+        {error !== undefined ? <Banner status="error" title={error} /> : null}
+        <TextInput
+          ref={nameRef}
+          autoFocus
+          label="Name"
+          value={name}
+          onChange={(value) => {
+            setName(value);
+            if (invalidField === "name" && value.trim().length > 0) setInvalidField(undefined);
+          }}
+          placeholder="e.g. Release Shepherd"
+          isRequired
+          {...(invalidField === "name" ? { status: { type: "error" as const, message: "Enter a name." } } : {})}
+          width="100%"
+          data-testid="create-bot-name"
+        />
+        <TextArea
+          label="Job / Instructions"
+          value={instructions}
+          onChange={setInstructions}
+          placeholder="What should this bot do?"
+          width="100%"
+          data-testid="create-bot-instructions"
+        />
+        {loadingAgents ? (
+          <EmptyState
+            icon={<Icon icon="clock" size="lg" />}
+            title="Checking agents"
+            description="Finding agents that are ready to run this bot."
+            isCompact
+          />
+        ) : agents.length === 0 ? (
+          <EmptyState
+            icon={<Icon icon="warning" size="lg" />}
+            title="No agents available"
+            description="Try again to check for agents that can run a bot."
+            actions={<Button label="Check again" variant="secondary" onClick={() => void loadAgents()} />}
+            isCompact
+          />
+        ) : (
+          <RadioList
+            ref={agentListRef}
+            label="Agent"
+            value={agentId}
             onChange={(value) => {
-              setName(value);
-              if (invalidField === "name" && value.trim().length > 0) setInvalidField(undefined);
+              setAgentId(value);
+              setInvalidField(undefined);
             }}
-            placeholder="e.g. Release Shepherd"
-            isRequired
-            {...(invalidField === "name" ? { status: { type: "error" as const, message: "Enter a name." } } : {})}
+            {...(invalidField === "agent" ? { status: { type: "error" as const, message: "Choose an agent that is ready." } } : {})}
             width="100%"
-            data-testid="create-bot-name"
-          />
-          <TextArea
-            label="Job / Instructions"
-            value={instructions}
-            onChange={setInstructions}
-            placeholder="What should this bot do?"
-            width="100%"
-            data-testid="create-bot-instructions"
-          />
-          {loadingAgents ? (
-            <EmptyState
-              icon={<Icon icon="clock" size="lg" />}
-              title="Checking agents"
-              description="Finding agents that are ready to run this bot."
-              isCompact
-            />
-          ) : agents.length === 0 ? (
-            <EmptyState
-              icon={<Icon icon="warning" size="lg" />}
-              title="No agents available"
-              description="Try again to check for agents that can run a bot."
-              actions={<Button label="Check again" variant="secondary" onClick={() => void loadAgents()} />}
-              isCompact
-            />
-          ) : (
-            <RadioList
-              ref={agentListRef}
-              label="Agent"
-              value={agentId}
-              onChange={(value) => {
-                setAgentId(value);
-                setInvalidField(undefined);
-              }}
-              {...(invalidField === "agent" ? { status: { type: "error" as const, message: "Choose an agent that is ready." } } : {})}
-              width="100%"
-              data-testid="create-bot-agent"
-            >
-              {agents.map((agent) => (
-                <RadioListItem
-                  key={agent.id}
-                  value={agent.id}
-                  label={agent.displayName}
-                  isDisabled={agent.status !== "ready"}
-                  description={AGENT_STATUS_DESCRIPTION[agent.status]}
-                />
-              ))}
-            </RadioList>
-          )}
-          <Button
-            label="Create bot"
-            variant="primary"
-            type="submit"
-            isLoading={creating}
-            isDisabled={loadingAgents || agents.length === 0}
-            data-testid="create-bot-submit"
-          />
-        </VStack>
-      </form>
+            data-testid="create-bot-agent"
+          >
+            {agents.map((agent) => (
+              <RadioListItem
+                key={agent.id}
+                value={agent.id}
+                label={agent.displayName}
+                isDisabled={agent.status !== "ready"}
+                description={agentAvailabilityDescription(agent)}
+              />
+            ))}
+          </RadioList>
+        )}
+        <Button
+          label="Create bot"
+          variant="primary"
+          type="submit"
+          isLoading={creating}
+          isDisabled={loadingAgents || agents.length === 0}
+          data-testid="create-bot-submit"
+        />
+      </VStack>
+    </form>
+  );
+
+  if (isMobile) {
+    return (
+      <BottomSheetWithReturnFocus
+        label="Create a bot"
+        returnFocusRef={mobileReturnFocusRef}
+        isOpen={isOpen}
+        onOpenChange={handleOpenChange}
+        height="tall"
+        purpose="form"
+      >
+        {content}
+      </BottomSheetWithReturnFocus>
+    );
+  }
+
+  return (
+    <Dialog isOpen={isOpen} onOpenChange={handleOpenChange} width={520} purpose="form">
+      <DialogHeader title="Create a bot" subtitle="Name your teammate, describe its job, and pick the agent that runs it." />
+      {content}
     </Dialog>
   );
 }

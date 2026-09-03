@@ -1,0 +1,13 @@
+{
+  "name": "@omarchy-bot/avatar-renderer-v9",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "dependencies": {
+    "@dicebear/core": "9.4.3",
+    "@dicebear/micah": "9.4.3",
+    "@dicebear/pixel-art": "9.4.3",
+    "@dicebear/shapes": "9.4.3"
+  }
+}

@@ -1,10 +1,19 @@
 import { z } from "zod";
+import {
+  isAgentCapabilityInventory,
+  type AgentCapabilityInventory,
+} from "@omarchy-bot/agent-contract";
 import { AGENT_IDS } from "@omarchy-bot/domain";
 
 // ----- Agents -----
 
 export const AgentStatusSchema = z.enum(["ready", "missing", "unconfigured", "incompatible", "checking", "offline"]);
 export type AgentStatusDto = z.infer<typeof AgentStatusSchema>;
+
+const AgentCapabilityInventoryDto = z.custom<AgentCapabilityInventory>(
+  isAgentCapabilityInventory,
+  "invalid agent capability inventory",
+);
 
 export const AgentDto = z.object({
   id: z.enum(AGENT_IDS),
@@ -14,16 +23,31 @@ export const AgentDto = z.object({
   reason: z.string().optional(),
   /** Plain-language setup guidance shown when the Agent is not ready. */
   guidance: z.string().optional(),
+  capabilities: AgentCapabilityInventoryDto.optional(),
+}).superRefine((agent, context) => {
+  if (agent.status === "ready" && agent.capabilities === undefined) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "ready agents must expose capabilities", path: ["capabilities"] });
+  }
+  if (agent.status !== "ready" && agent.capabilities !== undefined) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "non-ready agents cannot expose capabilities", path: ["capabilities"] });
+  }
 });
 export type AgentDto = z.infer<typeof AgentDto>;
 
 // ----- Avatars -----
 
+const AvatarOptionValueDto = z.union([
+  z.string(),
+  z.number(),
+  z.boolean(),
+  z.array(z.union([z.string(), z.number(), z.boolean()])),
+]);
+
 export const AvatarRecipeDto = z.object({
   rendererVersion: z.string(),
   style: z.string(),
   seed: z.string(),
-  options: z.record(z.union([z.string(), z.number(), z.boolean()])),
+  options: z.record(AvatarOptionValueDto),
 });
 export type AvatarRecipeDto = z.infer<typeof AvatarRecipeDto>;
 
@@ -212,10 +236,22 @@ export type DeleteBotResultDto = z.infer<typeof DeleteBotResultDto>;
 export const AvatarRecipeBody = z.object({ prompt: z.string().trim().min(1).max(2000) });
 export type AvatarRecipeBodyDto = z.infer<typeof AvatarRecipeBody>;
 
+export const AttachmentDraftToken = z.string().max(128).uuid();
+export type AttachmentDraftTokenDto = z.infer<typeof AttachmentDraftToken>;
+
 export const SendMessageBody = z.object({
   text: z.string().refine((t) => t.trim().length >= 1, { message: "text required" }),
   attachmentIds: z.array(z.string()).optional(),
+  attachmentDraftToken: AttachmentDraftToken.optional(),
   clientTag: z.string().optional(),
+}).superRefine((body, ctx) => {
+  if ((body.attachmentIds?.length ?? 0) > 0 && body.attachmentDraftToken === undefined) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["attachmentDraftToken"],
+      message: "attachmentDraftToken is required when attachmentIds are present",
+    });
+  }
 });
 export type SendMessageBodyDto = z.infer<typeof SendMessageBody>;
 

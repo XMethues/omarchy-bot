@@ -5,16 +5,20 @@ The end-user context for creating AI teammates and working with them through con
 ## Language
 
 **Bot**:
-A persistent assistant created and named by the user, with its own job instructions, configuration, and identity. Each Bot uses one Agent; multiple Bots may use the same Agent.
+A persistent assistant created and named by the user, with its own job instructions, configuration, and identity. Each Bot uses one Agent; multiple Bots may use the same Agent. Ambiguous legacy rows are conservatively treated as Bots until evidence permits another classification; enabled Agent inventory is never itself a Bot.
 _Avoid_: Agent Bot, runtime Bot, Agent instance
 
+**Bot Provenance**:
+Internal evidence for why a persisted Bot exists: `user_created`, `legacy_conversation`, or `legacy_inventory`. Provenance makes migration conservative: only proven `legacy_inventory` rows may be removed, while ambiguous rows are preserved.
+_Avoid_: Agent type, user-facing Bot category
+
 **Bot Profile**:
-The user-authored identity of a Bot: its name, job instructions, and avatar. The avatar may be a locally uploaded image or an animated DiceBear avatar generated from a prompt interpreted by the Bot's Agent. Runtime choices and technical diagnostics are settings, not profile fields.
-_Avoid_: Role contract, capability manifest
+The identity presented for a Bot: its editable name, job instructions, and avatar, plus the immutable Agent identity shown as read-only context. The avatar may be a locally uploaded image or an animated DiceBear avatar generated from a prompt interpreted by the Bot's Agent. Runtime readiness and technical diagnostics are settings, not editable profile fields.
+_Avoid_: Role contract, capability manifest, editable Agent
 
 **Avatar Recipe**:
-A validated, versioned set of DiceBear style options produced from a user's visual prompt. The Agent produces recipe data rather than executable SVG; Omarchy Bot renders and stores the avatar deterministically.
-_Avoid_: Agent-generated SVG, avatar capability
+A validated set of DiceBear style options stored with the exact renderer identity that produced it. The Agent produces recipe data rather than executable SVG; Omarchy Bot renders it deterministically. Legacy recipes retain their renderer identity until the user explicitly requests an upgrade.
+_Avoid_: Agent-generated SVG, avatar capability, implicit renderer upgrade
 
 **Thread**:
 A conversation between the user and one Bot. A Bot may have multiple Threads; selecting a Bot opens its most recently active Thread.

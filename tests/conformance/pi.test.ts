@@ -158,9 +158,10 @@ describe("pi conformance (10 steps, real model)", () => {
       const cancelled = events.slice(before).find((e) => e.type === "turn.cancelled");
       expect(cancelled).toBeDefined();
       await Bun.sleep(2500); // settle window: nothing may land after cancel
+      const cancelledIndex = events.findIndex((event) => event === cancelled);
       const lateWrites = events
-        .slice(before)
-        .filter((e) => e.type === "tool.started" || (e.type === "message.delta" && events.indexOf(e) > events.findIndex((x) => x === cancelled)));
+        .slice(cancelledIndex + 1)
+        .filter((event) => event.type === "tool.started" || event.type === "message.delta");
       expect(lateWrites).toEqual([]);
       console.log("conformance: step 5 ok — cancelled mid-turn, no late writes");
 
@@ -205,49 +206,37 @@ describe("pi conformance (10 steps, real model)", () => {
       writeFileSync(textPath, "The secret phrase is CONFORM-TEXT-42.");
       const pngPath = path.join(cwd, "red.png");
       writeFileSync(pngPath, RED_PIXEL_PNG);
-      // Image input requires a vision-capable model; pick one from the user's
-      // configured providers when available, else test text attachments only.
-      const visionModels: string[] = [];
-      try {
-        const modelsJson = JSON.parse(await Bun.file(path.join(os.homedir(), ".pi/agent/models.json")).text());
-        for (const [provider, p] of Object.entries(modelsJson.providers as Record<string, { models?: { id: string; input?: string[] }[] }>)) {
-          for (const m of p.models ?? []) {
-            if (m.input?.includes("image")) visionModels.push(`${provider}/${m.id}`);
-          }
-        }
-      } catch {
-        // no models.json — default model only
-      }
-      let imageResult: "ok" | "provider-unsupported" | "untested" = "untested";
-      let imageNote = "no vision-capable model configured";
+      // Capabilities are global to normal Bot turns, so image support must be
+      // exercised through the same default-model session path used in production.
+      let imageResult: "ok" | "provider-unsupported" = "provider-unsupported";
+      let imageNote = "default model did not identify the image";
       let attachReply = "";
-      for (const spec of visionModels) {
-        const vs = (await pi.request({ type: "session.open", requestId: crypto.randomUUID(), botId: "bot_conformance", threadId: "thread_conformance_vision", options: { cwd, instructions: "", model: spec } }, 30_000)) as { sessionId: string };
+      try {
+        const imageSession = (await pi.request({
+          type: "session.open",
+          requestId: crypto.randomUUID(),
+          botId: "bot_conformance",
+          threadId: "thread_conformance_vision",
+          options: { cwd, instructions: "" },
+        }, 30_000)) as { sessionId: string };
         const recent = await turn(
-          vs.sessionId,
-          "A text attachment contains a secret phrase and an image attachment is a solid color. Reply in one line: the secret phrase, then the color word.",
-          { attachments: [{ id: "a1", name: "secret.txt", path: textPath, mediaType: "text/plain" }, { id: "a2", name: "red.png", path: pngPath, mediaType: "image/png" }] },
-          );
+          imageSession.sessionId,
+          "A text attachment contains a secret phrase and an image attachment is solid red. Reply in one line: the secret phrase, then the color word.",
+          {
+            attachments: [
+              { id: "a1", name: "secret.txt", path: textPath, mediaType: "text/plain" },
+              { id: "a2", name: "red.png", path: pngPath, mediaType: "image/png" },
+            ],
+          },
+        );
         attachReply = assistantText(recent);
-        if (!attachReply.includes("CONFORM-TEXT-42")) continue; // model unusable — try next
-        if (/no image|don't see|cannot see|omitted/i.test(attachReply)) {
-          imageResult = "provider-unsupported";
-          imageNote = `${spec} reports image omitted`;
-        } else {
+        if (attachReply.includes("CONFORM-TEXT-42") && /\bred\b/i.test(attachReply)) {
           imageResult = "ok";
-          imageNote = `${spec} described the image`;
+          imageNote = "default model identified the solid red image";
         }
-        break;
+      } catch (error) {
+        imageNote = `default model rejected image input: ${error instanceof Error ? error.message : String(error)}`;
       }
-      if (imageResult === "untested" && visionModels.length > 0) {
-        // Every vision-declared model returned unusable/empty replies (e.g. the
-        // ark agent-plan endpoint silently drops multimodal input). The text
-        // attachment itself is still verified on the default session below.
-        imageResult = "provider-unsupported";
-        imageNote = `vision-declared models returned unusable replies: ${visionModels.join(", ")}`;
-      }
-      // With zero vision-declared models the image leg is legitimately untested.
-      if (visionModels.length > 0) expect(imageResult).not.toBe("untested");
       const textAttachRecent = attachReply.includes("CONFORM-TEXT-42")
         ? null
         : await (async () => {

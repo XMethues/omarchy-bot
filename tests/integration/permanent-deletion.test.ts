@@ -4,12 +4,22 @@ import path from "node:path";
 import type { AttachmentDto, BotViewDto, DeleteBotResultDto } from "../../packages/protocol/src/index.ts";
 import { api, apiStatus, makeBot, sendToBot, startDaemon, waitThreadIdle, type Harness } from "./helpers/harness.ts";
 
-async function stageAttachment(h: Harness, botId: string, contents: string, name: string): Promise<AttachmentDto> {
+async function stageAttachment(
+  h: Harness,
+  botId: string,
+  contents: string,
+  name: string,
+  draftToken = crypto.randomUUID(),
+): Promise<AttachmentDto> {
   const form = new FormData();
   form.set("file", new Blob([contents], { type: "text/plain" }), name);
   const response = await fetch(`${h.baseUrl}/api/attachments/stage`, {
     method: "POST",
-    headers: { "x-bot-id": botId, "x-command-id": crypto.randomUUID() },
+    headers: {
+      "x-bot-id": botId,
+      "x-attachment-draft-token": draftToken,
+      "x-command-id": crypto.randomUUID(),
+    },
     body: form,
   });
   if (!response.ok) throw new Error(`attachment staging failed: ${response.status} ${await response.text()}`);
@@ -42,11 +52,13 @@ describe("permanent archived Bot deletion", () => {
   test("removes Bot-owned database rows and files while preserving the shared Agent and sibling Bot", async () => {
     const botId = await makeBot(h, "Delete all owned data");
     const siblingId = await makeBot(h, "Shared Agent sibling survives");
-    const managed = await stageAttachment(h, botId, "managed bytes", "managed.txt");
-    const staged = await stageAttachment(h, botId, "staged bytes", "staged.txt");
+    const draftToken = crypto.randomUUID();
+    const managed = await stageAttachment(h, botId, "managed bytes", "managed.txt", draftToken);
+    const staged = await stageAttachment(h, botId, "staged bytes", "staged.txt", draftToken);
     const sent = await api<{ threadId: string; messageId: string; turnId: string }>(h, "POST", `/api/bots/${botId}/messages`, {
       text: "attachment-echo",
       attachmentIds: [managed.id],
+      attachmentDraftToken: draftToken,
     });
     await waitThreadIdle(h, sent.threadId);
 

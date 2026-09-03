@@ -4,6 +4,8 @@
  * Each omarchy-bot thread maps to one native Pi AgentSession with its own
  * session file; normalized events preserve Pi's native runtime behavior.
  */
+import os from "node:os";
+import path from "node:path";
 import {
   createAgentSession,
   DefaultResourceLoader,
@@ -17,6 +19,7 @@ import {
   PROTOCOL_VERSION,
   readJsonl,
   writeJsonl,
+  AGENT_CAPABILITY_INVENTORY_VERSION,
   type AgentCommand,
   type AgentEvent,
   type AgentResult,
@@ -52,6 +55,19 @@ async function hasAuthenticatedModel(): Promise<boolean> {
     authAvailable = false;
   }
   return authAvailable;
+}
+
+async function hasVerifiedImageInput(agentVersion: string): Promise<boolean> {
+  const dataDir = process.env.OMARCHY_BOT_HOME ?? path.join(os.homedir(), ".local/share/omarchy-bot");
+  try {
+    const record = await Bun.file(path.join(dataDir, "conformance", `${AGENT_ID}-${agentVersion}.json`)).json() as {
+      ok?: unknown;
+      image?: unknown;
+    };
+    return record.ok === true && record.image === "verified";
+  } catch {
+    return false;
+  }
 }
 
 function emit(event: AgentEvent): void {
@@ -141,12 +157,25 @@ async function handleMessage(cmd: AgentCommand): Promise<void> {
       case "probe": {
         const sdkOk = true; // reaching here means the SDK imported and ran
         const authed = await hasAuthenticatedModel();
+        const agentVersion = sdkVersion();
         const payload: ProbePayload = {
           agentId: AGENT_ID,
           installed: sdkOk,
-          agentVersion: sdkVersion(),
+          agentVersion,
           sdkOk,
-          capabilities: { sessionDeletion: false },
+          capabilities: {
+            version: AGENT_CAPABILITY_INVENTORY_VERSION,
+            steering: true,
+            abort: true,
+            sessionDeletion: false,
+            nativeThreadActions: ["resume", "history", "close"],
+            attachments: {
+              text: true,
+              image: await hasVerifiedImageInput(agentVersion),
+              maxTextBytes: 64 * 1024,
+            },
+            nativeEventFamilies: ["message", "tool", "turn", "error"],
+          },
           ...(authed ? {} : { reason: "no authenticated model provider (run `pi` once or fill ~/.pi/agent/auth.json)" }),
         };
         reply({ requestId: cmd.requestId, ok: true, payload });

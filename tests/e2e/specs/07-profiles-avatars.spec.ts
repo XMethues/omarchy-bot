@@ -1,21 +1,21 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 
 async function createBot(page: Page, name: string): Promise<string> {
   await page.goto("/");
-  await page.getByTestId("sidebar-create-bot").click();
-  await page.getByTestId("create-bot-name").fill(name);
-  await page.getByTestId("create-bot-instructions").fill("Original instructions");
+  await page.getByRole("navigation", { name: "Bot navigation" }).getByRole("button", { name: "New bot" }).click();
+  await page.getByRole("textbox", { name: "Name" }).fill(name);
+  await page.getByRole("textbox", { name: "Job / Instructions" }).fill("Original instructions");
   await page.getByRole("radio", { name: /^Pi/ }).check();
-  await page.getByTestId("create-bot-submit").click();
-  const row = page.locator("[data-testid^='sidebar-bot-']", { hasText: name });
+  await page.getByRole("button", { name: "Create bot" }).click();
+  const row = page.getByRole("button", { name, exact: true });
   await expect(row).toBeVisible();
-  const testId = await row.getAttribute("data-testid");
-  if (testId === null) throw new Error("created Bot row has no test id");
-  return testId.slice("sidebar-bot-".length);
+  const botId = new URL(page.url()).searchParams.get("bot");
+  if (botId === null) throw new Error(`missing selected bot id for ${name}`);
+  return botId;
 }
 
 async function openProfile(page: Page): Promise<void> {
-  await page.getByTestId("profile-open").click();
+  await page.getByRole("button", { name: "Edit bot profile" }).click();
   await expect(page.getByRole("dialog", { name: "Bot profile" })).toBeVisible();
 }
 
@@ -23,27 +23,37 @@ const onePixelPng = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
   "base64",
 );
+async function avatarSvg(avatar: Locator): Promise<string> {
+  const dataUri = await avatar.locator("img").getAttribute("src");
+  if (dataUri === null || !dataUri.startsWith("data:image/svg+xml")) {
+    throw new Error("avatar did not render a local SVG data URI");
+  }
+  return decodeURIComponent(dataUri.slice(dataUri.indexOf(",") + 1));
+}
 
 test.describe("Bot profiles and avatars", () => {
   test("edits profile fields, creates a variation, and uploads a local image", async ({ page }) => {
     const botId = await createBot(page, "Profile Bot");
     await openProfile(page);
 
-    await expect(page.getByText("This bot will keep using its current agent. Create a new bot to choose a different one.")).toBeVisible();
-    await page.getByTestId("profile-name").fill("Renamed Profile Bot");
-    await page.getByTestId("profile-instructions").fill("Use the latest profile instructions");
-    await page.getByTestId("profile-save").click();
-    await expect(page.getByTestId(`sidebar-bot-${botId}`)).toContainText("Renamed Profile Bot");
+    const profile = page.getByRole("dialog", { name: "Bot profile" });
+    await expect(profile.getByText("Backing Agent", { exact: true })).toBeVisible();
+    await expect(profile.getByText("Pi", { exact: true })).toBeVisible();
+    await expect(profile.getByText("Fixed for this bot.", { exact: true })).toBeVisible();
+    await profile.getByRole("textbox", { name: "Name" }).fill("Renamed Profile Bot");
+    await profile.getByRole("textbox", { name: "Job / Instructions" }).fill("Use the latest profile instructions");
+    await profile.getByRole("button", { name: "Save profile" }).click();
+    await expect(page.getByRole("button", { name: "Renamed Profile Bot", exact: true })).toBeVisible();
 
-    const profileAvatar = page.getByRole("dialog").getByTestId("avatar-view");
-    const beforeSrc = await profileAvatar.locator("img").getAttribute("src");
-    await page.getByTestId("avatar-variation").click();
-    await expect.poll(() => profileAvatar.locator("img").getAttribute("src")).not.toBe(beforeSrc);
+    const profileAvatar = profile.getByRole("img", { name: "Renamed Profile Bot" }).locator("img");
+    const beforeSrc = await profileAvatar.getAttribute("src");
+    await profile.getByRole("button", { name: "New variation" }).click();
+    await expect.poll(() => profileAvatar.getAttribute("src")).not.toBe(beforeSrc);
 
-    await page.getByTestId("avatar-upload-input").setInputFiles({ name: "avatar.png", mimeType: "image/png", buffer: onePixelPng });
-    await expect(page.getByRole("dialog").getByTestId("avatar-upload")).toBeVisible();
-    const uploadedSrc = await page.getByRole("dialog").getByTestId("avatar-upload").locator("img").getAttribute("src");
-    expect(uploadedSrc).toBe(`/api/bots/${botId}/avatar`);
+    await page.getByLabel("Choose an avatar image").setInputFiles({ name: "avatar.png", mimeType: "image/png", buffer: onePixelPng });
+    await expect
+      .poll(() => profile.getByRole("img", { name: "Renamed Profile Bot" }).locator("img").getAttribute("src"))
+      .toBe(`/api/bots/${botId}/avatar`);
   });
 
   test("applies a validated prompt recipe through the profile UI", async ({ page, request }) => {
@@ -59,30 +69,90 @@ test.describe("Bot profiles and avatars", () => {
           ...current,
           avatar: {
             kind: "recipe",
-            recipe: { rendererVersion: "10.7.0", style: "thumbs", seed: "e2e-recipe", options: {} },
+            recipe: {
+              rendererVersion: "dicebear-core@10.7.0+styles@10.6.0",
+              style: "thumbs",
+              seed: "e2e-recipe",
+              options: {},
+            },
           },
         }),
       });
     });
 
     await openProfile(page);
-    await page.getByTestId("avatar-prompt").fill("A friendly teammate with round glasses");
-    await page.getByTestId("avatar-recipe-submit").click();
-    await expect(page.getByRole("dialog").getByTestId("avatar-thumbs")).toBeVisible();
+    await page.getByRole("textbox", { name: "Describe avatar" }).fill("A friendly teammate with round glasses");
+    await page.getByRole("button", { name: "Create from description" }).click();
+    await expect(page.getByRole("dialog", { name: "Bot profile" }).getByTestId("avatar-thumbs")).toBeVisible();
+  });
+
+  test("dispatches exact renderer versions without upgrading legacy style identities", async ({ page, request }) => {
+    const botId = await createBot(page, "Pinned Renderer Bot");
+    const currentResponse = await request.get(`/api/bots/${botId}`);
+    const current: unknown = await currentResponse.json();
+    if (current === null || typeof current !== "object") throw new Error("Bot API returned an invalid profile");
+
+    let recipe: {
+      rendererVersion: string;
+      style: string;
+      seed: string;
+      options: Record<string, string | number | boolean>;
+    } = { rendererVersion: "9.4.3", style: "micah", seed: "legacy-e2e", options: { flip: true } };
+    await page.route(`**/api/bots/${botId}/avatar/recipe`, async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ ...current, avatar: { kind: "recipe", recipe } }),
+      });
+    });
+
+    await openProfile(page);
+    const prompt = page.getByRole("textbox", { name: "Describe avatar" });
+    await prompt.fill("Keep my pinned renderer");
+    await page.getByRole("button", { name: "Create from description" }).click();
+    const legacyAvatar = page.getByRole("dialog", { name: "Bot profile" }).getByTestId("avatar-micah");
+    await expect(legacyAvatar).toBeVisible();
+    const legacySvg = await avatarSvg(legacyAvatar);
+    expect(legacySvg).toContain("<dc:title>Avatar Illustration System</dc:title>");
+    expect(legacySvg).not.toContain("dbsh-");
+
+    recipe = {
+      rendererVersion: "dicebear-core@10.7.0+styles@10.6.0",
+      style: "shapes",
+      seed: "current-e2e",
+      options: {},
+    };
+    await prompt.fill("Use the current pinned renderer");
+    await page.getByRole("button", { name: "Create from description" }).click();
+    const currentAvatar = page.getByRole("dialog", { name: "Bot profile" }).getByTestId("avatar-shapes");
+    await expect(currentAvatar).toBeVisible();
+    const currentSvg = await avatarSvg(currentAvatar);
+    expect(currentSvg).toContain("@keyframes");
+    expect(currentSvg).toContain("@media (prefers-reduced-motion: no-preference)");
+    expect(currentSvg).toContain("dbsh-slowest");
+    expect(currentSvg).not.toBe(legacySvg);
   });
 
   test("shows selected and streaming activity without moving transcript content", async ({ page }) => {
-    const botId = await createBot(page, "Activity Avatar Bot");
+    await createBot(page, "Activity Avatar Bot");
     await page.emulateMedia({ reducedMotion: "no-preference" });
-    await expect(page.getByTestId(`sidebar-bot-${botId}`).getByTestId("avatar-view")).toHaveAttribute("data-avatar-activity", "selected");
+    const selectedAvatar = page.getByRole("button", { name: "Activity Avatar Bot", exact: true }).getByTestId("avatar-view");
+    await expect(selectedAvatar).toHaveAttribute("data-avatar-activity", "selected");
+    await expect(selectedAvatar.locator('[role="presentation"][aria-hidden="true"]')).toBeVisible();
+    const selectedSvg = await avatarSvg(selectedAvatar);
+    expect(selectedSvg).toContain("@keyframes");
+    expect(selectedSvg).toContain("@media (prefers-reduced-motion: no-preference)");
 
-    const composer = page.getByTestId("composer").locator('[contenteditable="true"]');
+    const composer = page.getByRole("textbox", { name: "Message input" });
     await composer.fill("steer-echo");
     await composer.press("Enter");
     const streamingMessage = page.getByTestId("streaming-message");
     await expect(streamingMessage).toBeVisible();
     const streamingAvatar = streamingMessage.getByTestId("avatar-view");
     await expect(streamingAvatar).toHaveAttribute("data-avatar-activity", "streaming");
+    await expect(
+      streamingAvatar.getByRole("img", { name: "Activity Avatar Bot, Streaming", exact: true }),
+    ).toBeVisible();
     await expect(streamingMessage).toHaveCSS("transform", "none");
 
     await composer.fill("finish activity");
@@ -90,17 +160,15 @@ test.describe("Bot profiles and avatars", () => {
     await expect(page.getByTestId("assistant-message").last()).toContainText("steered: finish activity", { timeout: 15_000 });
   });
 
-  test("reduced motion keeps a static semantic state indicator", async ({ page }) => {
+  test("reduced motion gates native SVG animation while retaining activity state", async ({ page }) => {
     await page.emulateMedia({ reducedMotion: "reduce" });
     await createBot(page, "Reduced Motion Bot");
     await openProfile(page);
 
-    const avatar = page.getByRole("dialog").getByTestId("avatar-view");
+    const avatar = page.getByRole("dialog", { name: "Bot profile" }).getByTestId("avatar-view");
     await expect(avatar).toHaveAttribute("data-avatar-activity", "selected");
-    await expect(avatar).toHaveCSS("animation-name", "none");
-    await expect(page.getByRole("dialog")).toHaveScreenshot("profile-reduced-motion.png", {
-      animations: "disabled",
-      mask: [avatar],
-    });
+    const svg = await avatarSvg(avatar);
+    expect(svg).toContain("@keyframes");
+    expect(svg).toContain("@media (prefers-reduced-motion: no-preference)");
   });
 });

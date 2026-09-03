@@ -2,13 +2,12 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync, renameSync, rmSync, unlinkSync } from "node:fs";
 import path from "node:path";
 import type { Database } from "bun:sqlite";
-import type { WorkerUserMessage } from "@omarchy-bot/agent-contract";
+import type { AgentCapabilityInventory, WorkerUserMessage } from "@omarchy-bot/agent-contract";
 import type { AttachmentDto } from "@omarchy-bot/protocol";
 import type { AgentId } from "@omarchy-bot/domain";
 import { HttpError } from "../bots/bots.ts";
 
 export const MAX_ATTACHMENT_BYTES = 32 * 1024 * 1024;
-export const MAX_INLINE_TEXT_BYTES = 64 * 1024;
 const STAGED_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 interface AttachmentRow {
@@ -22,6 +21,7 @@ interface AttachmentRow {
   size: number;
   rel_path: string;
   source_sha256: string | null;
+  draft_token: string | null;
   created_at: string;
 }
 
@@ -29,6 +29,10 @@ export interface ManagedAttachmentFile {
   path: string;
   mediaType: string;
   size: number;
+}
+
+export interface AgentCapabilitySource {
+  capabilityInventory(agentId: AgentId): AgentCapabilityInventory | undefined;
 }
 
 function hasPrefix(bytes: Uint8Array, prefix: readonly number[]): boolean {
@@ -76,18 +80,32 @@ export function sniffAttachmentMediaType(bytes: Uint8Array): string | undefined 
   return "text/plain";
 }
 
-function assertAgentSupportsAttachment(agentId: AgentId, attachment: AttachmentRow): void {
-  const isPiImage = attachment.media_type === "image/png" ||
-    attachment.media_type === "image/jpeg" ||
-    attachment.media_type === "image/gif" ||
-    attachment.media_type === "image/webp";
-  const isPiText = attachment.media_type === "text/plain" || attachment.media_type === "application/json";
-  if (agentId === "pi" && (isPiImage || (isPiText && attachment.size <= MAX_INLINE_TEXT_BYTES))) return;
-
-  if (agentId === "pi" && isPiText) {
-    throw new HttpError(400, `pi cannot consume attachment media type ${attachment.media_type} larger than 64 KB (${attachment.name})`);
+function assertAgentSupportsAttachment(
+  agentId: AgentId,
+  capabilities: AgentCapabilityInventory | undefined,
+  attachment: Pick<AttachmentRow, "media_type" | "name" | "size">,
+): void {
+  if (capabilities === undefined) {
+    throw new HttpError(400, `${agentId} has not reported attachment capabilities (${attachment.name})`);
   }
-  throw new HttpError(400, `${agentId} cannot consume attachment media type ${attachment.media_type} (${attachment.name})`);
+
+  const modality = attachment.media_type.startsWith("image/")
+    ? "image"
+    : attachment.media_type.startsWith("text/") || attachment.media_type === "application/json"
+      ? "text"
+      : undefined;
+  if (modality === undefined || !capabilities.attachments[modality]) {
+    throw new HttpError(400, `${agentId} cannot consume attachment media type ${attachment.media_type} (${attachment.name})`);
+  }
+
+  const maxTextBytes = capabilities.attachments.maxTextBytes;
+  if (modality === "text" && maxTextBytes !== undefined && attachment.size > maxTextBytes) {
+    const limit = maxTextBytes % 1024 === 0 ? `${maxTextBytes / 1024} KB` : `${maxTextBytes} bytes`;
+    throw new HttpError(
+      400,
+      `${agentId} cannot consume attachment media type ${attachment.media_type} larger than ${limit} (${attachment.name})`,
+    );
+  }
 }
 
 /** Owns local staged copies and their one-way, immutable promotion into message history. */
@@ -98,6 +116,7 @@ export class AttachmentsService {
   constructor(
     private readonly db: Database,
     private readonly attachmentsDir: string,
+    private readonly agents: AgentCapabilitySource,
   ) {
     this.#stagedDir = path.join(attachmentsDir, "staged");
     this.#managedDir = path.join(attachmentsDir, "managed");
@@ -105,24 +124,34 @@ export class AttachmentsService {
     mkdirSync(this.#managedDir, { recursive: true });
   }
 
-  async stage(botId: string, file: File): Promise<AttachmentDto> {
-    const bot = this.db.query("SELECT id FROM bots WHERE id = ? AND archived = 0").get(botId);
+  async stage(botId: string, draftToken: string, file: File): Promise<AttachmentDto> {
+    const bot = this.db.query("SELECT id, agent_id FROM bots WHERE id = ? AND archived = 0").get(botId) as {
+      id: string;
+      agent_id: AgentId;
+    } | null;
     if (!bot) throw new HttpError(404, `unknown bot ${botId}`);
     if (file.size > MAX_ATTACHMENT_BYTES) throw new HttpError(400, "attachments must be 32 MB or smaller");
 
     const bytes = new Uint8Array(await file.arrayBuffer());
     const mediaType = sniffAttachmentMediaType(bytes);
     if (mediaType === undefined) throw new HttpError(400, "unsupported or invalid file content");
+    const name = file.name.trim() || "attachment";
+    assertAgentSupportsAttachment(bot.agent_id, this.agents.capabilityInventory(bot.agent_id), {
+      media_type: mediaType,
+      name,
+      size: bytes.byteLength,
+    });
 
     const id = `att_${randomUUID().replaceAll("-", "")}`;
     const relPath = path.join("staged", id);
     const target = path.join(this.attachmentsDir, relPath);
-    const name = file.name.trim() || "attachment";
     await Bun.write(target, bytes);
     try {
       this.db.query(
-        `INSERT INTO attachments (id, kind, bot_id, thread_id, message_id, name, media_type, size, rel_path, source_sha256, created_at)
-         VALUES (?, 'staged', ?, NULL, NULL, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO attachments (
+           id, kind, bot_id, thread_id, message_id, name, media_type, size, rel_path, source_sha256, created_at, draft_token
+         )
+         VALUES (?, 'staged', ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?)`,
       ).run(
         id,
         botId,
@@ -132,6 +161,7 @@ export class AttachmentsService {
         relPath,
         createHash("sha256").update(bytes).digest("hex"),
         new Date().toISOString(),
+        draftToken,
       );
     } catch (error) {
       try { unlinkSync(target); } catch { /* the database error remains authoritative */ }
@@ -140,16 +170,15 @@ export class AttachmentsService {
     return { id, kind: "staged", name, mediaType, size: bytes.byteLength };
   }
 
-  getStaged(id: string): AttachmentDto | undefined {
+  getStaged(id: string, draftToken: string): AttachmentDto | undefined {
     const row = this.#row(id);
-    return row?.kind === "staged" ? this.#dto(row) : undefined;
+    return row?.kind === "staged" && row.draft_token === draftToken ? this.#dto(row) : undefined;
   }
 
-  deleteStaged(id: string): boolean {
+  deleteStaged(id: string, draftToken: string): boolean {
     const row = this.#row(id);
-    if (row === undefined || row.kind !== "staged") return false;
-    try { unlinkSync(path.join(this.attachmentsDir, row.rel_path)); } catch { /* deleting the row prevents stale ownership */ }
-    this.db.query("DELETE FROM attachments WHERE id = ? AND kind = 'staged'").run(id);
+    if (row === undefined || row.kind !== "staged" || row.draft_token !== draftToken) return false;
+    this.#deleteStagedRow(row);
     return true;
   }
 
@@ -165,19 +194,33 @@ export class AttachmentsService {
     botId: string;
     threadId: string;
     messageId: string;
-    agentId: AgentId;
+    draftToken: string | undefined;
   }): NonNullable<WorkerUserMessage["attachments"]> {
     if (input.attachmentIds.length === 0) return [];
+    const draftToken = input.draftToken;
+    if (draftToken === undefined) throw new HttpError(400, "attachmentDraftToken is required");
     if (new Set(input.attachmentIds).size !== input.attachmentIds.length) {
       throw new HttpError(400, "attachmentIds must not contain duplicates");
     }
 
+    const bot = this.db.query("SELECT agent_id FROM bots WHERE id = ? AND archived = 0").get(input.botId) as {
+      agent_id: AgentId;
+    } | null;
+    if (!bot) throw new HttpError(404, `unknown bot ${input.botId}`);
+    const capabilities = this.agents.capabilityInventory(bot.agent_id);
+
     const rows = input.attachmentIds.map((id) => {
       const row = this.#row(id);
-      if (row === undefined || row.kind !== "staged" || row.bot_id !== input.botId) {
-        throw new HttpError(400, `attachment ${id} is not staged for this bot`);
+      if (
+        row === undefined ||
+        row.kind !== "staged" ||
+        row.bot_id !== input.botId ||
+        row.draft_token === null ||
+        row.draft_token !== draftToken
+      ) {
+        throw new HttpError(400, `attachment ${id} is not staged for this draft`);
       }
-      assertAgentSupportsAttachment(input.agentId, row);
+      assertAgentSupportsAttachment(bot.agent_id, capabilities, row);
       return row;
     });
 
@@ -189,10 +232,11 @@ export class AttachmentsService {
         const target = path.join(this.attachmentsDir, relPath);
         renameSync(source, target);
         moved.push({ source, target });
-        this.db.query(
-          `UPDATE attachments SET kind = 'managed', thread_id = ?, message_id = ?, rel_path = ?
-           WHERE id = ? AND kind = 'staged' AND bot_id = ?`,
-        ).run(input.threadId, input.messageId, relPath, row.id, input.botId);
+        const updated = this.db.query(
+          `UPDATE attachments SET kind = 'managed', thread_id = ?, message_id = ?, rel_path = ?, draft_token = NULL
+           WHERE id = ? AND kind = 'staged' AND bot_id = ? AND draft_token = ?`,
+        ).run(input.threadId, input.messageId, relPath, row.id, input.botId, draftToken);
+        if (updated.changes !== 1) throw new HttpError(400, `attachment ${row.id} is not staged for this draft`);
       }
     } catch (error) {
       for (const move of moved.reverse()) {
@@ -236,8 +280,13 @@ export class AttachmentsService {
   gcStaged(maxAgeMs = STAGED_MAX_AGE_MS): number {
     const cutoff = new Date(Date.now() - maxAgeMs).toISOString();
     const rows = this.db.query("SELECT * FROM attachments WHERE kind = 'staged' AND created_at < ?").all(cutoff) as AttachmentRow[];
-    for (const row of rows) this.deleteStaged(row.id);
+    for (const row of rows) this.#deleteStagedRow(row);
     return rows.length;
+  }
+
+  #deleteStagedRow(row: AttachmentRow): void {
+    try { unlinkSync(path.join(this.attachmentsDir, row.rel_path)); } catch { /* deleting the row prevents stale ownership */ }
+    this.db.query("DELETE FROM attachments WHERE id = ? AND kind = 'staged'").run(row.id);
   }
 
   #row(id: string): AttachmentRow | undefined {
