@@ -29,7 +29,7 @@ const avatar = (seed: string) => ({
   kind: "generated",
   recipe: {
     rendererVersion: "dicebear-core@10.7.0+styles@10.6.0",
-    style: "shapes",
+    style: "pixelbot",
     seed,
     options: {},
   },
@@ -315,7 +315,7 @@ test.describe("ticket 13 responsive, accessible, and visual QA", () => {
     expect(Number(await selectedName.evaluate((element) => getComputedStyle(element).fontWeight))).toBeGreaterThanOrEqual(600);
     expect(selectedPreviewBox.y).toBeGreaterThan(selectedNameBox.y);
 
-    const selectedImage = selectedAvatar.getByTestId("avatar-shapes").locator("img");
+    const selectedImage = selectedAvatar.getByTestId("avatar-pixelbot").locator("img");
     const selectedSrc = await selectedImage.getAttribute("src");
     expect(selectedSrc).toMatch(/^data:image\/svg\+xml/);
     const selectedSvg = decodeURIComponent(selectedSrc!.slice(selectedSrc!.indexOf(",") + 1));
@@ -323,7 +323,7 @@ test.describe("ticket 13 responsive, accessible, and visual QA", () => {
     expect(selectedSvg).toContain("prefers-reduced-motion");
 
     const idleAvatar = page.getByTestId(`sidebar-bot-${SECONDARY_BOT_ID}`).getByTestId("avatar-view");
-    const idleSrc = await idleAvatar.getByTestId("avatar-shapes").locator("img").getAttribute("src");
+    const idleSrc = await idleAvatar.getByTestId("avatar-pixelbot").locator("img").getAttribute("src");
     const idleSvg = decodeURIComponent(idleSrc!.slice(idleSrc!.indexOf(",") + 1));
     expect(idleSvg).not.toContain("@keyframes");
     await expect(page.getByTestId(`sidebar-bot-${SECONDARY_BOT_ID}`)
@@ -453,6 +453,38 @@ test.describe("ticket 13 responsive, accessible, and visual QA", () => {
     expect(identityBox).not.toBeNull();
     expect(sessionBox).not.toBeNull();
     expect(Math.abs(identityBox!.y + identityBox!.height / 2 - (sessionBox!.y + sessionBox!.height / 2))).toBeLessThan(2);
+    const headerPadding = await page.getByTestId("conversation-header").evaluate((element) => {
+      const container = element.parentElement?.getBoundingClientRect();
+      const row = element.getBoundingClientRect();
+      if (container === undefined) throw new Error("Conversation header padding container is missing");
+      return {
+        top: row.top - container.top,
+        bottom: container.bottom - row.bottom,
+      };
+    });
+    expect(headerPadding).toEqual({ top: 8, bottom: 8 });
+    await profileTrigger.hover();
+    const identityPadding = await profileTrigger.evaluate((element) => {
+      const avatar = element.querySelector<HTMLElement>('[data-testid="avatar-view"]');
+      if (avatar === null) throw new Error("Conversation header avatar is missing");
+      const buttonBox = element.getBoundingClientRect();
+      const buttonStyle = getComputedStyle(element);
+      const avatarStyle = getComputedStyle(avatar);
+      return {
+        blockStart: buttonStyle.paddingBlockStart,
+        blockEnd: buttonStyle.paddingBlockEnd,
+        inlineStart: buttonStyle.paddingInlineStart,
+        inlineEnd: buttonStyle.paddingInlineEnd,
+        verticalSpace: buttonBox.height - Number.parseFloat(avatarStyle.height),
+      };
+    });
+    expect(identityPadding).toEqual({
+      blockStart: "4px",
+      blockEnd: "4px",
+      inlineStart: "6px",
+      inlineEnd: "6px",
+      verticalSpace: 8,
+    });
     await expect(profileTrigger).toHaveAccessibleName("Open profile for Release Partner");
     await expect(profileTrigger).toHaveAttribute("aria-expanded", "false");
     await profileTrigger.focus();
@@ -561,7 +593,7 @@ test.describe("ticket 13 responsive, accessible, and visual QA", () => {
     await gotoSeededWorkspace(page);
 
     const workingAvatar = page.getByTestId(`sidebar-bot-${PRIMARY_BOT_ID}`).getByTestId("avatar-view");
-    await expect(workingAvatar).toHaveCSS("animation-name", "none");
+    await expect(workingAvatar.getByTestId("avatar-pixelbot")).toHaveCSS("animation-name", "none");
     await captureWorkspace(page, "ticket-13-workspace-reduced-motion-dark.png");
   });
 });

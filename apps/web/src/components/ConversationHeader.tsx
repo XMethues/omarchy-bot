@@ -2,12 +2,11 @@ import type { JSX, RefObject } from "react";
 import { Monitor } from "lucide-react";
 import { Button } from "@astryxdesign/core/Button";
 import { useAppShellMobile } from "@astryxdesign/core/AppShell";
-import { Heading } from "@astryxdesign/core/Heading";
+import { Text } from "@astryxdesign/core/Text";
 import { HStack } from "@astryxdesign/core/HStack";
 import { Icon } from "@astryxdesign/core/Icon";
 import { IconButton } from "@astryxdesign/core/IconButton";
 import { LayoutHeader } from "@astryxdesign/core/Layout";
-import { Text } from "@astryxdesign/core/Text";
 import { StackItem } from "@astryxdesign/core/Stack";
 import type { BotViewDto, ComputerViewDto, ThreadDto } from "@omarchy-bot/protocol";
 import { AvatarView } from "./AvatarView.tsx";
@@ -80,7 +79,7 @@ export function ConversationHeader({
   profileTriggerRef,
 }: ConversationHeaderProps): JSX.Element {
   return (
-    <LayoutHeader hasDivider label="Conversation">
+    <LayoutHeader hasDivider label="Conversation" padding={2}>
       <HStack
         gap={3}
         vAlign="center"
@@ -97,10 +96,17 @@ export function ConversationHeader({
                 size="sm"
                 onClick={onToggleProfile}
                 data-testid="profile-open"
-                style={{ minWidth: 0, maxWidth: "min(220px, 45vw)", overflow: "hidden" }}
+                style={{
+                  minWidth: 0,
+                  maxWidth: "min(220px, 45vw)",
+                  height: "auto",
+                  paddingBlock: 4,
+                  paddingInline: 6,
+                  overflow: "hidden",
+                }}
                 aria-expanded={profileOpen}
               >
-                <HStack gap={2} vAlign="center">
+                <HStack gap={1} vAlign="center">
                   <AvatarView
                     avatar={bot.avatar}
                     name={bot.name}
@@ -108,15 +114,15 @@ export function ConversationHeader({
                     activity={bot.status === "working" ? "working" : "selected"}
                     decorative
                   />
-                  <Heading level={1} maxLines={1}>
+                  <Text as="h1" type="body" weight="medium" maxLines={1}>
                     {bot.name}
-                  </Heading>
+                  </Text>
                 </HStack>
               </Button>
             ) : (
-              <Heading level={1} maxLines={1}>
+              <Text as="h1" type="body" weight="medium" maxLines={1}>
                 omarchy-bot
-              </Heading>
+              </Text>
             )}
             <StackItem size="fill">
               <Button
