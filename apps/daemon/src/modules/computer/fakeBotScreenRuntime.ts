@@ -1,3 +1,4 @@
+import type { SurfaceId } from "@omarchy-bot/domain";
 import type {
   BotScreenCapture,
   BotScreenInputEvent,
@@ -19,11 +20,22 @@ interface FakeBotScreenRuntimeOptions {
   inputFailureAt?: number;
   releaseDelayMs?: number;
 }
+
+interface FakeRuntimeRecord {
+  provision: BotScreenProvision;
+  runtime: BotScreenRuntime;
+  fail(error: Error): void;
+}
 /** Deterministic in-process platform adapter used by daemon integration tests. */
 export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
   readonly pointerEvents: Array<{ surfaceId: string; runtimeGeneration: number; event: FakePointerEvent }> = [];
   readonly inputEvents: Array<{ surfaceId: string; runtimeGeneration: number; event: BotScreenInputEvent }> = [];
   releaseCount = 0;
+  readonly starts: BotScreenProvision[] = [];
+  readonly stops: Array<{ surfaceId: string; runtimeGeneration: number }> = [];
+  readonly destroyed = new Set<string>();
+  #unreconciled = new Set<string>();
+  #runtimes = new Map<string, FakeRuntimeRecord>();
   #pointerWaiters: Array<{ count: number; resolve: () => void }> = [];
   #inputWaiters: Array<{ count: number; resolve: () => void }> = [];
   #pointerEventWaiters: Array<{
@@ -89,13 +101,45 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     this.#releaseWaiters.push({ count, resolve });
     return promise;
   }
+
+  running(surfaceId: string): { generation: number } | undefined {
+    const record = this.#runtimes.get(surfaceId);
+    return record === undefined ? undefined : { generation: record.provision.generation };
+  }
+
+  crash(surfaceId: string, message: string): void {
+    const record = this.#runtimes.get(surfaceId);
+    if (record === undefined) throw new Error("fake Bot Screen is not running");
+    record.fail(new Error(message));
+  }
+
+  rejectReconciliation(surfaceId: string): void {
+    this.#unreconciled.add(surfaceId);
+  }
+
+
+  async reconcile(provision: BotScreenProvision): Promise<BotScreenRuntime | undefined> {
+    const record = this.#runtimes.get(provision.surfaceId);
+    if (record === undefined || record.provision.generation !== provision.generation) return undefined;
+    if (!this.#unreconciled.delete(provision.surfaceId)) return record.runtime;
+    await record.runtime.stop();
+    return undefined;
+  }
+
+  async destroy(surfaceId: SurfaceId): Promise<void> {
+    await this.#runtimes.get(surfaceId)?.runtime.stop();
+    this.destroyed.add(surfaceId);
+  }
+
   async start(provision: BotScreenProvision): Promise<BotScreenRuntime> {
     await Promise.resolve();
     if (this.failure !== undefined) throw new Error(this.failure);
+    this.starts.push(provision);
     let stopped = false;
     let actionCount = 0;
-    const exited = new Promise<Error>(() => {});
-    return {
+    const failure = Promise.withResolvers<Error>();
+    let record!: FakeRuntimeRecord;
+    const runtime: BotScreenRuntime = {
       capture: async (): Promise<BotScreenCapture> => {
         if (stopped) throw new Error("fake Bot Screen is stopped");
         return { mediaType: "image/png", bytes: FAKE_SCREEN_PNG };
@@ -160,10 +204,16 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
           else this.#releaseWaiters.push(waiter);
         }
       },
-      exited,
+      exited: failure.promise,
       stop: async (): Promise<void> => {
+        if (stopped) return;
         stopped = true;
+        this.stops.push({ surfaceId: provision.surfaceId, runtimeGeneration: provision.generation });
+        if (this.#runtimes.get(provision.surfaceId) === record) this.#runtimes.delete(provision.surfaceId);
       },
     };
+    record = { provision, runtime, fail: failure.resolve };
+    this.#runtimes.set(provision.surfaceId, record);
+    return runtime;
   }
 }

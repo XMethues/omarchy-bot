@@ -11,6 +11,8 @@ export interface WorkerClientOptions {
   name: string;
   script: string;
   args?: string[];
+  /** Optional production application-unit wrapper (for example systemd-run --scope). */
+  commandPrefix?: string[];
   /** Real desktop env (computer worker) or sanitized env (agent workers). */
   env?: Record<string, string>;
   onEvent: (event: any) => void;
@@ -52,7 +54,7 @@ export class WorkerClient {
   async start(timeoutMs = 15_000): Promise<void> {
     this.#stopping = false;
     const proc = Bun.spawn({
-      cmd: [process.execPath, this.opts.script, ...(this.opts.args ?? [])],
+      cmd: [...(this.opts.commandPrefix ?? []), process.execPath, this.opts.script, ...(this.opts.args ?? [])],
       stdin: "pipe",
       stdout: "pipe",
       stderr: "pipe",

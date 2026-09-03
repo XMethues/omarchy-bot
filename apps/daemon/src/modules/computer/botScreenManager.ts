@@ -65,6 +65,10 @@ export interface BotScreenRuntime {
 
 export interface BotScreenRuntimeAdapter {
   start(provision: BotScreenProvision): Promise<BotScreenRuntime>;
+  /** Returns a still-valid supervised runtime after daemon restart, when reconnectable. */
+  reconcile?(provision: BotScreenProvision): Promise<BotScreenRuntime | undefined>;
+  /** Removes retained runtime/profile resources for permanent Bot deletion. */
+  destroy?(surfaceId: SurfaceId): Promise<void>;
 }
 
 export interface BotScreenLifecycle {
@@ -88,6 +92,21 @@ interface RuntimeEntry {
   runtime?: BotScreenRuntime;
 }
 
+interface RecoveryRow extends SurfaceRow {
+  surface_id: SurfaceId;
+  bot_id: string;
+  archived: number;
+}
+
+export interface BotScreenTransition {
+  surfaceId: SurfaceId;
+  state: BotScreenLifecycleState;
+  runtimeGeneration: number;
+  failure?: string;
+}
+
+export type BotScreenTransitionListener = (transition: BotScreenTransition) => void;
+
 /**
  * Deep Bot-owned lifecycle module. Callers can open, capture, and stop a Screen;
  * process trees, sockets, runtime directories, output setup, and child env stay
@@ -96,66 +115,75 @@ interface RuntimeEntry {
 export class BotScreenManager {
   #entries = new Map<SurfaceId, RuntimeEntry>();
   #stops = new Map<SurfaceId, Promise<void>>();
+  #cleanupRuntimes = new Map<SurfaceId, BotScreenRuntime>();
   #operations = new Map<SurfaceId, Promise<void>>();
+  #listeners = new Set<BotScreenTransitionListener>();
 
   constructor(
     private readonly db: Database,
     private readonly adapter: BotScreenRuntimeAdapter,
   ) {}
 
+  subscribe(listener: BotScreenTransitionListener): () => void {
+    this.#listeners.add(listener);
+    return () => this.#listeners.delete(listener);
+  }
+
+  /**
+   * Reconciles Screens which were active, or still cleaning up a failure, when
+   * the daemon stopped. An adapter may reconnect a complete supervised tree;
+   * otherwise the manager removes stale runtime facts and advances active
+   * Screens to a fresh generation.
+   */
+  async recover(): Promise<void> {
+    const rows = this.db
+      .query(
+        `SELECT bot_surfaces.surface_id, bot_surfaces.bot_id, bots.archived,
+                bot_surfaces.lifecycle_state, bot_surfaces.runtime_generation,
+                bot_surfaces.logical_width, bot_surfaces.logical_height,
+                bot_surfaces.scale, bot_surfaces.refresh_rate, bot_surfaces.last_failure
+         FROM bot_surfaces
+         JOIN bots ON bots.id = bot_surfaces.bot_id
+         WHERE bot_surfaces.lifecycle_state IN ('starting', 'ready', 'failed')`,
+      )
+      .all() as RecoveryRow[];
+
+    await Promise.all(rows.map((row) => this.#serialize(row.surface_id, async () => {
+      const provision = this.#provision(row.surface_id, row.runtime_generation, row);
+      const runtime = await this.adapter.reconcile?.(provision).catch(() => undefined);
+      if (row.archived) {
+        await runtime?.releaseInput().catch(() => {});
+        await runtime?.stop().catch(() => {});
+        this.#transition(row.surface_id, "stopped", null);
+        return;
+      }
+      if (row.lifecycle_state === "failed") {
+        await runtime?.releaseInput().catch(() => {});
+        await runtime?.stop().catch(() => {});
+        this.#transition(row.surface_id, "failed", row.last_failure);
+        return;
+      }
+      if (runtime !== undefined) {
+        this.#install(row.surface_id, provision, Promise.resolve(runtime), runtime);
+        return;
+      }
+      this.#transition(row.surface_id, "stopped", null);
+      await this.#start({ botId: row.bot_id, surfaceId: row.surface_id }, this.#row(row.surface_id));
+    })));
+  }
+
   open(owner: ComputerSurfaceOwner): BotScreenLifecycle {
+    if (this.#stops.has(owner.surfaceId)) return { state: "stopped" };
     let row = this.#row(owner.surfaceId);
     const entry = this.#entries.get(owner.surfaceId);
 
-    if (row.lifecycle_state === "ready" && entry === undefined) {
+    if ((row.lifecycle_state === "ready" || row.lifecycle_state === "starting") && entry === undefined) {
       this.#transition(owner.surfaceId, "stopped", null);
       row = this.#row(owner.surfaceId);
     }
     if (row.lifecycle_state !== "stopped") return this.#lifecycle(row);
 
-    const generation = row.runtime_generation + 1;
-    this.db
-      .query(
-        `UPDATE bot_surfaces
-         SET lifecycle_state = 'starting', runtime_generation = ?, last_failure = NULL, transitioned_at = ?
-         WHERE surface_id = ?`,
-      )
-      .run(generation, new Date().toISOString(), owner.surfaceId);
-
-    const provision: BotScreenProvision = {
-      surfaceId: owner.surfaceId,
-      generation,
-      logicalWidth: row.logical_width,
-      logicalHeight: row.logical_height,
-      scale: row.scale,
-      refreshRate: row.refresh_rate,
-    };
-    const entryToStart: RuntimeEntry = {
-      provision,
-      start: Promise.resolve().then(() => this.adapter.start(provision)),
-    };
-    this.#entries.set(owner.surfaceId, entryToStart);
-    void entryToStart.start.then(
-      async (runtime) => {
-        if (this.#entries.get(owner.surfaceId) !== entryToStart) {
-          await runtime.stop();
-          return;
-        }
-        entryToStart.runtime = runtime;
-        this.#transition(owner.surfaceId, "ready", null);
-        void runtime.exited.then(async (error) => {
-          if (this.#entries.get(owner.surfaceId) !== entryToStart) return;
-          this.#entries.delete(owner.surfaceId);
-          this.#transition(owner.surfaceId, "failed", this.#failure(error));
-          await runtime.stop().catch(() => {});
-        });
-      },
-      (error: unknown) => {
-        if (this.#entries.get(owner.surfaceId) !== entryToStart) return;
-        this.#entries.delete(owner.surfaceId);
-        this.#transition(owner.surfaceId, "failed", this.#failure(error));
-      },
-    );
+    void this.#start(owner, row);
     return { state: "starting" };
   }
 
@@ -166,7 +194,9 @@ export class BotScreenManager {
   async capture(owner: ComputerSurfaceOwner): Promise<BotScreenCapture | undefined> {
     return this.#serialize(owner.surfaceId, async () => {
       const runtime = await this.#readyRuntime(owner);
-      return runtime?.capture();
+      const entry = this.#entries.get(owner.surfaceId);
+      if (runtime === undefined || entry?.runtime !== runtime) return undefined;
+      return this.#invoke(owner.surfaceId, entry, () => runtime.capture());
     });
   }
 
@@ -178,7 +208,7 @@ export class BotScreenManager {
       const generation = this.#row(owner.surfaceId).runtime_generation;
       const geometryGeneration = 1;
       const { logicalWidth, logicalHeight, scale } = entry.provision;
-      const currentRuntime = async (): Promise<BotScreenRuntime> => {
+      const currentEntry = (): RuntimeEntry => {
         const row = this.#row(owner.surfaceId);
         if (
           row.lifecycle_state !== "ready"
@@ -188,7 +218,7 @@ export class BotScreenManager {
         ) {
           throw new Error("Screen Projection source is stale");
         }
-        return runtime;
+        return entry;
       };
       return {
         surfaceId: owner.surfaceId,
@@ -200,11 +230,17 @@ export class BotScreenManager {
         videoHeight: Math.round(logicalHeight * scale),
         scale,
         capture: () =>
-          this.#serialize(owner.surfaceId, async () => (await currentRuntime()).capture()),
+          this.#serialize(owner.surfaceId, () =>
+            this.#invoke(owner.surfaceId, currentEntry(), () => runtime.capture())
+          ),
         input: (event) =>
-          this.#serialize(owner.surfaceId, async () => (await currentRuntime()).input(event)),
+          this.#serialize(owner.surfaceId, () =>
+            this.#invoke(owner.surfaceId, currentEntry(), () => runtime.input(event))
+          ),
         releaseInput: () =>
-          this.#serialize(owner.surfaceId, async () => (await currentRuntime()).releaseInput()),
+          this.#serialize(owner.surfaceId, () =>
+            this.#invoke(owner.surfaceId, currentEntry(), () => runtime.releaseInput())
+          ),
       };
     });
   }
@@ -219,8 +255,11 @@ export class BotScreenManager {
     }
     return this.#serialize(owner.surfaceId, async () => {
       const runtime = await this.#readyRuntime(owner);
-      if (runtime === undefined) throw new Error(this.state(owner).failure ?? "Bot Screen is unavailable");
-      return runtime.act(action, lease);
+      const entry = this.#entries.get(owner.surfaceId);
+      if (runtime === undefined || entry?.runtime !== runtime) {
+        throw new Error(this.state(owner).failure ?? "Bot Screen is unavailable");
+      }
+      return this.#invoke(owner.surfaceId, entry, () => runtime.act(action, lease));
     });
   }
 
@@ -240,29 +279,140 @@ export class BotScreenManager {
     }
   }
 
+  async destroy(surfaceId: SurfaceId): Promise<void> {
+    await this.stop(surfaceId);
+    try {
+      await this.adapter.destroy?.(surfaceId);
+    } catch (error) {
+      if (this.#exists(surfaceId)) this.#transition(surfaceId, "failed", this.#failure(error));
+      throw error;
+    }
+  }
   async shutdown(): Promise<void> {
-    const surfaceIds = new Set([...this.#entries.keys(), ...this.#stops.keys(), ...this.#operations.keys()]);
+    const surfaceIds = new Set([
+      ...this.#entries.keys(),
+      ...this.#cleanupRuntimes.keys(),
+      ...this.#stops.keys(),
+      ...this.#operations.keys(),
+    ]);
     await Promise.all([...surfaceIds].map((surfaceId) => this.stop(surfaceId)));
+  }
+
+  /** Leaves supervised runtime trees alive for a replacement daemon to reconcile. */
+  detach(): void {
+    this.#entries.clear();
+    this.#cleanupRuntimes.clear();
+    this.#stops.clear();
+    this.#operations.clear();
+  }
+
+  async #start(owner: ComputerSurfaceOwner, row: SurfaceRow): Promise<void> {
+    if (this.#entries.has(owner.surfaceId)) return;
+    const generation = row.runtime_generation + 1;
+    this.db
+      .query(
+        `UPDATE bot_surfaces
+         SET lifecycle_state = 'starting', runtime_generation = ?, last_failure = NULL, transitioned_at = ?
+         WHERE surface_id = ?`,
+      )
+      .run(generation, new Date().toISOString(), owner.surfaceId);
+
+    const provision = this.#provision(owner.surfaceId, generation, row);
+    const start = Promise.resolve().then(() => this.adapter.start(provision));
+    const entry: RuntimeEntry = { provision, start };
+    this.#entries.set(owner.surfaceId, entry);
+    try {
+      const runtime = await start;
+      if (this.#entries.get(owner.surfaceId) !== entry) {
+        await runtime.releaseInput().catch(() => {});
+        await runtime.stop();
+        return;
+      }
+      this.#install(owner.surfaceId, provision, start, runtime);
+    } catch (error) {
+      if (this.#entries.get(owner.surfaceId) !== entry) return;
+      this.#entries.delete(owner.surfaceId);
+      this.#transition(owner.surfaceId, "failed", this.#failure(error));
+    }
+  }
+
+  #install(
+    surfaceId: SurfaceId,
+    provision: BotScreenProvision,
+    start: Promise<BotScreenRuntime>,
+    runtime: BotScreenRuntime,
+  ): void {
+    const entry: RuntimeEntry = { provision, start, runtime };
+    this.#entries.set(surfaceId, entry);
+    this.#transition(surfaceId, "ready", null);
+    void runtime.exited.then((error) => this.#failRuntime(surfaceId, entry, error));
   }
 
   async #stopSurface(surfaceId: SurfaceId): Promise<void> {
     const entry = this.#entries.get(surfaceId);
     this.#entries.delete(surfaceId);
-    if (entry !== undefined) {
-      const runtime = entry.runtime ?? await entry.start.catch(() => undefined);
-      await runtime?.stop();
+    const activeRuntime = entry === undefined
+      ? undefined
+      : entry.runtime ?? await entry.start.catch(() => undefined);
+    const cleanupRuntime = this.#cleanupRuntimes.get(surfaceId);
+    try {
+      for (const runtime of new Set([activeRuntime, cleanupRuntime])) {
+        if (runtime === undefined) continue;
+        await runtime.releaseInput().catch(() => {});
+        await runtime.stop();
+      }
+      this.#cleanupRuntimes.delete(surfaceId);
+      if (this.#exists(surfaceId)) this.#transition(surfaceId, "stopped", null);
+    } catch (error) {
+      const runtime = cleanupRuntime ?? activeRuntime;
+      if (runtime !== undefined) this.#cleanupRuntimes.set(surfaceId, runtime);
+      if (this.#exists(surfaceId)) this.#transition(surfaceId, "failed", this.#failure(error));
+      throw error;
     }
-    const exists = this.db.query(`SELECT 1 FROM bot_surfaces WHERE surface_id = ?`).get(surfaceId) !== null;
-    if (exists) this.#transition(surfaceId, "stopped", null);
   }
 
   async #readyRuntime(owner: ComputerSurfaceOwner): Promise<BotScreenRuntime | undefined> {
     const lifecycle = this.open(owner);
-    if (lifecycle.state === "failed") return undefined;
+    if (lifecycle.state === "failed" || lifecycle.state === "stopped") return undefined;
     const entry = this.#entries.get(owner.surfaceId);
     if (entry === undefined) return undefined;
     await entry.start.catch(() => undefined);
     return this.#entries.get(owner.surfaceId)?.runtime;
+  }
+
+  async #invoke<T>(surfaceId: SurfaceId, entry: RuntimeEntry, operation: () => Promise<T>): Promise<T> {
+    try {
+      return await operation();
+    } catch (error) {
+      if (this.#entries.get(surfaceId) === entry) await this.#failRuntime(surfaceId, entry, error);
+      throw error;
+    }
+  }
+  async #failRuntime(surfaceId: SurfaceId, entry: RuntimeEntry, error: unknown): Promise<void> {
+    if (this.#entries.get(surfaceId) !== entry) return;
+    this.#entries.delete(surfaceId);
+    if (this.#exists(surfaceId)) this.#transition(surfaceId, "failed", this.#failure(error));
+    const runtime = entry.runtime ?? await entry.start.catch(() => undefined);
+    if (runtime === undefined) return;
+    this.#cleanupRuntimes.set(surfaceId, runtime);
+    await runtime.releaseInput().catch(() => {});
+    try {
+      await runtime.stop();
+      if (this.#cleanupRuntimes.get(surfaceId) === runtime) this.#cleanupRuntimes.delete(surfaceId);
+    } catch {
+      // stop()/destroy() will retry this retained failed-runtime handle.
+    }
+  }
+
+  #provision(surfaceId: SurfaceId, generation: number, row: SurfaceRow): BotScreenProvision {
+    return {
+      surfaceId,
+      generation,
+      logicalWidth: row.logical_width,
+      logicalHeight: row.logical_height,
+      scale: row.scale,
+      refreshRate: row.refresh_rate,
+    };
   }
 
   #row(surfaceId: SurfaceId): SurfaceRow {
@@ -276,6 +426,10 @@ export class BotScreenManager {
     return row;
   }
 
+  #exists(surfaceId: SurfaceId): boolean {
+    return this.db.query(`SELECT 1 FROM bot_surfaces WHERE surface_id = ?`).get(surfaceId) !== null;
+  }
+
   #transition(surfaceId: SurfaceId, state: BotScreenLifecycleState, failure: string | null): void {
     this.db
       .query(
@@ -284,6 +438,14 @@ export class BotScreenManager {
          WHERE surface_id = ?`,
       )
       .run(state, failure, new Date().toISOString(), surfaceId);
+    const runtimeGeneration = this.#row(surfaceId).runtime_generation;
+    const transition: BotScreenTransition = {
+      surfaceId,
+      state,
+      runtimeGeneration,
+      ...(failure === null ? {} : { failure }),
+    };
+    for (const listener of this.#listeners) listener(transition);
   }
 
   #lifecycle(row: SurfaceRow): BotScreenLifecycle {

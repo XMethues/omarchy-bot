@@ -121,11 +121,18 @@ export class ScreenProjectionService {
   #controllers = new Map<SurfaceId, InputController>();
   #controllerEpochs = new Map<SurfaceId, number>();
   #releaseBarriers = new Map<SurfaceId, Promise<void>>();
+  #unsubscribeScreens: () => void;
   constructor(
     private readonly screens: BotScreenManager,
     private readonly diagnostics: InputDiagnostics,
     private readonly canAcceptWebControl: (owner: ComputerSurfaceOwner) => boolean,
-  ) {}
+  ) {
+    this.#unsubscribeScreens = screens.subscribe((transition) => {
+      if (transition.state === "failed" || transition.state === "stopped") {
+        this.closeSurface(transition.surfaceId);
+      }
+    });
+  }
 
   async answer(owner: ComputerSurfaceOwner, offer: ScreenProjectionOfferDto): Promise<ScreenProjectionAnswerDto> {
     if (offer.type !== "offer" || offer.sdp.trim() === "") throw new Error("a WebRTC SDP offer is required");
@@ -240,6 +247,7 @@ export class ScreenProjectionService {
   }
 
   async shutdown(): Promise<void> {
+    this.#unsubscribeScreens();
     for (const session of [...this.#sessions.values()]) this.#close(session, false);
     await Promise.allSettled(this.#releaseBarriers.values());
     this.diagnostics.shutdown();

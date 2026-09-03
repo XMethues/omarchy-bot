@@ -1,12 +1,13 @@
 import { rm } from "node:fs/promises";
 import type { Database } from "bun:sqlite";
-import type { AgentId } from "@omarchy-bot/domain";
+import type { AgentId, SurfaceId } from "@omarchy-bot/domain";
 import type { DeleteBotFailureDto, DeleteBotResultDto } from "@omarchy-bot/protocol";
 import type { AttachmentsService } from "../attachments/attachments.ts";
 import type { AvatarService } from "../avatars/avatarService.ts";
 import type { EventLog } from "../events/eventLog.ts";
 import type { AgentsRegistry } from "../agents/registry.ts";
 import type { Supervisor } from "../../supervision/supervisor.ts";
+import type { BotScreenManager } from "../computer/botScreenManager.ts";
 import { HttpError } from "./bots.ts";
 
 interface DeletionBotRow {
@@ -50,6 +51,7 @@ export class BotDeletionService {
     private readonly avatars: AvatarService,
     private readonly agents: AgentsRegistry,
     private readonly supervisor: Supervisor,
+    private readonly screens: BotScreenManager,
   ) {}
 
   async delete(botId: string, confirmName: string): Promise<DeleteBotResultDto> {
@@ -91,6 +93,12 @@ export class BotDeletionService {
     let avatarRemoved = false;
     let computerArtifactsRemoved = 0;
     const failures: DeleteBotFailureDto[] = [];
+
+    try {
+      await this.screens.destroy(bot.surface_id as SurfaceId);
+    } catch (error) {
+      failures.push({ stage: "surface", resource: bot.surface_id, message: errorMessage(error) });
+    }
 
     if (nativeSessions.length > 0) {
       const capabilities = this.agents.capabilityInventory(bot.agent_id as AgentId);
@@ -209,11 +217,15 @@ export class BotDeletionService {
         this.db.query(`DELETE FROM attachments WHERE bot_id = ?`).run(botId);
         this.db.query(`DELETE FROM thread_sessions WHERE thread_id IN (SELECT id FROM threads WHERE bot_id = ?)`).run(botId);
         this.db.query(`DELETE FROM turns WHERE bot_id = ?`).run(botId);
+        this.db.query(`DELETE FROM artifacts WHERE surface_id = ?`).run(bot.surface_id);
+        this.db.query(`DELETE FROM input_diagnostics WHERE surface_id = ?`).run(bot.surface_id);
+        this.db.query(`DELETE FROM computer_leases WHERE surface_id = ?`).run(bot.surface_id);
         this.db.query(`DELETE FROM computer_leases WHERE holder_bot_id = ?`).run(botId);
         this.db.query(`DELETE FROM threads WHERE bot_id = ?`).run(botId);
         this.db.query(`DELETE FROM bot_state WHERE bot_id = ?`).run(botId);
         this.db.query(`DELETE FROM bot_native_session_deletions WHERE bot_id = ?`).run(botId);
         this.db.query(`DELETE FROM bot_deletions WHERE bot_id = ?`).run(botId);
+        this.db.query(`DELETE FROM bot_surfaces WHERE surface_id = ?`).run(bot.surface_id);
         this.db.query(`DELETE FROM bots WHERE id = ?`).run(botId);
         this.events.append("bot", botId, "bot.deleted", { ...deleted, surfaceId: bot.surface_id });
       });

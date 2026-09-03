@@ -19,7 +19,7 @@ export async function handleBotArchiveRequest(
   if (match === null || req.method !== "POST") return undefined;
 
   const botId = match[1]!;
-  if (match[2] === "restore") return json(bots.restore(botId));
+  if (match[2] === "restore") return json(await bots.restore(botId));
 
   const raw: unknown = await req.json().catch(() => {
     throw new HttpError(400, "invalid JSON body");

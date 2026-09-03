@@ -67,6 +67,7 @@ platformTest("two real nested Hyprland Screens act and capture concurrently with
   const beforeClients = await hostClientAddresses();
   const harness = await startDaemon(undefined, { useProductionBotScreen: true });
   const runtimeSurfaceDirs: string[] = [];
+  const profileSurfaceDirs: string[] = [];
   try {
     const botIds = await Promise.all([
       makeBot(harness, "First real Hyprland screen"),
@@ -82,6 +83,9 @@ platformTest("two real nested Hyprland Screens act and capture concurrently with
     runtimeSurfaceDirs.push(...owners.map((owner) =>
       path.join(harness.svc.cfg.botScreenRuntimeDir, owner.surfaceId)
     ));
+    profileSurfaceDirs.push(...owners.map((owner) =>
+      path.join(harness.svc.cfg.botScreenProfileDir, owner.surfaceId)
+    ));
 
     const openings = await Promise.all(owners.map((owner) =>
       fetch(
@@ -96,6 +100,19 @@ platformTest("two real nested Hyprland Screens act and capture concurrently with
       expect(statSync(path.join(harness.svc.cfg.botScreenRuntimeDir, owner.surfaceId)).mode & 0o777).toBe(0o700);
       for (const profile of ["config", "state", "cache"]) {
         expect(statSync(path.join(harness.svc.cfg.botScreenProfileDir, owner.surfaceId, profile)).mode & 0o777).toBe(0o700);
+      }
+    }
+
+    const userManagerSocket = process.env.XDG_RUNTIME_DIR === undefined
+      ? undefined
+      : path.join(process.env.XDG_RUNTIME_DIR, "systemd", "private");
+    if (Bun.which("systemctl") !== null && userManagerSocket !== undefined && existsSync(userManagerSocket)) {
+      const units = await run(["systemctl", "--user", "list-units", "--all", "--plain", "--no-legend", "omarchy-bot-screen-*"]);
+      for (const owner of owners) {
+        const prefix = `omarchy-bot-screen-${owner.surfaceId.slice("surf_".length)}-g1`;
+        for (const role of ["compositor", "application", "input", "worker"]) {
+          expect(units).toContain(`${prefix}-${role}.service`);
+        }
       }
     }
 
@@ -168,12 +185,57 @@ platformTest("two real nested Hyprland Screens act and capture concurrently with
     for (const [index, owner] of owners.entries()) {
       harness.svc.computer.release(owner, leases[index]!.token!);
     }
+
+    const archivedFirst = await api<{ surfaceId: string; archived: boolean }>(
+      harness,
+      "POST",
+      `/api/bots/${owners[0]!.botId}/archive`,
+      {},
+    );
+    expect(archivedFirst).toMatchObject({ surfaceId: owners[0]!.surfaceId, archived: true });
+    expect(existsSync(runtimeSurfaceDirs[0]!)).toBeFalse();
+    expect(existsSync(profileSurfaceDirs[0]!)).toBeTrue();
+    await expect(firstSource.capture()).rejects.toThrow("stale");
+
+    const restoredFirst = await api<{ surfaceId: string; archived: boolean }>(
+      harness,
+      "POST",
+      `/api/bots/${owners[0]!.botId}/restore`,
+    );
+    expect(restoredFirst).toMatchObject({ surfaceId: owners[0]!.surfaceId, archived: false });
+    await waitUntilReady(harness, owners[0]!.botId, owners[0]!.surfaceId);
+    expect(existsSync(runtimeSurfaceDirs[0]!)).toBeTrue();
+    await expect(firstSource.capture()).rejects.toThrow("stale");
+
+    const names = ["First real Hyprland screen", "Second real Hyprland screen"];
+    for (const [index, owner] of owners.entries()) {
+      await api(harness, "POST", `/api/bots/${owner.botId}/archive`, {});
+      const deleted = await api<{ status: string }>(harness, "DELETE", `/api/bots/${owner.botId}`, {
+        confirmName: names[index]!,
+      });
+      expect(deleted.status).toBe("deleted");
+      expect(existsSync(runtimeSurfaceDirs[index]!)).toBeFalse();
+      expect(existsSync(profileSurfaceDirs[index]!)).toBeFalse();
+    }
   } finally {
     await harness.stop();
   }
 
   expect(runtimeSurfaceDirs).toHaveLength(2);
   expect(runtimeSurfaceDirs.every((runtimeDir) => !existsSync(runtimeDir))).toBeTrue();
+  expect(profileSurfaceDirs).toHaveLength(2);
+  expect(profileSurfaceDirs.every((profileDir) => !existsSync(profileDir))).toBeTrue();
   const processes = await run(["ps", "-eo", "args"]);
   expect(processes.includes(harness.svc.cfg.botScreenRuntimeDir)).toBeFalse();
+  for (const runtimeDir of runtimeSurfaceDirs) {
+    expect(processes).not.toContain(path.basename(runtimeDir));
+  }
+  if (
+    Bun.which("systemctl") !== null
+    && process.env.XDG_RUNTIME_DIR !== undefined
+    && existsSync(path.join(process.env.XDG_RUNTIME_DIR, "systemd", "private"))
+  ) {
+    const units = await run(["systemctl", "--user", "list-units", "--all", "--plain", "--no-legend", "omarchy-bot-screen-*"]);
+    expect(units.trim()).toBe("");
+  }
 }, 90_000);

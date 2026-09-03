@@ -3,15 +3,15 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
-  mkdtempSync,
   readdirSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
-import type { ComputerAction } from "@omarchy-bot/domain";
+import type { ComputerAction, SurfaceId } from "@omarchy-bot/domain";
 import type { SurfaceComputerWorker, Supervisor } from "../../supervision/supervisor.ts";
 import { ensureInputHelper } from "../../../native/pointer-helper/build.ts";
+import { ApplicationUnits } from "../../supervision/applicationUnits.ts";
 import type {
   BotScreenActionResult,
   BotScreenCapture,
@@ -101,12 +101,13 @@ class WaylandVirtualInput {
   static async start(
     binary: string,
     outputName: string,
-    env: Record<string, string>,
+    launcherEnvironment: Record<string, string>,
     logicalWidth: number,
     logicalHeight: number,
+    commandPrefix: string[],
   ): Promise<WaylandVirtualInput> {
-    const process = Bun.spawn([binary, outputName], {
-      env,
+    const process = Bun.spawn([...commandPrefix, binary, outputName], {
+      env: launcherEnvironment,
       stdin: "pipe",
       stdout: "pipe",
       stderr: "pipe",
@@ -246,6 +247,11 @@ function isSocket(candidate: string): boolean {
     return false;
   }
 }
+function socketRuntimeName(surfaceId: SurfaceId): string {
+  const entropy = BigInt(`0x${surfaceId.slice(-11)}`).toString(36).padStart(9, "0");
+  return `.b${entropy}`;
+}
+
 
 function minimalConfig(): string {
   return [
@@ -268,9 +274,15 @@ function minimalConfig(): string {
 
 /** Production nested-Hyprland adapter. It never captures or launches on the host socket. */
 export class HyprlandBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
-  constructor(private readonly options: HyprlandAdapterOptions) {}
+  #units: ApplicationUnits;
+
+  constructor(private readonly options: HyprlandAdapterOptions) {
+    this.#units = new ApplicationUnits(options.hostRuntimeDir);
+  }
 
   async start(provision: BotScreenProvision): Promise<BotScreenRuntime> {
+    await this.#units.stop(provision.surfaceId);
+    this.#removeSocketRuntimeDirs(provision.surfaceId);
     const hyprland = executable(this.options.hyprlandBin, "Hyprland");
     const hyprctl = executable(this.options.hyprctlBin, "hyprctl");
     const grim = executable(this.options.grimBin, "grim");
@@ -299,9 +311,9 @@ export class HyprlandBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter 
     }
     // Hyprland appends its long instance signature and IPC socket names to
     // XDG_RUNTIME_DIR. A short sibling keeps those AF_UNIX paths below 108 bytes.
-    const socketRuntimeDir = mkdtempSync(path.join(hostRuntimeDir, ".ob"));
+    const socketRuntimeDir = path.join(hostRuntimeDir, socketRuntimeName(provision.surfaceId));
+    mkdirSync(socketRuntimeDir, { recursive: false, mode: 0o700 });
     chmodSync(socketRuntimeDir, 0o700);
-
     const configPath = path.join(runtimeDir, "hyprland.conf");
     writeFileSync(configPath, minimalConfig(), { mode: 0o600 });
     const bootstrapEnv = explicitEnvironment({
@@ -311,8 +323,13 @@ export class HyprlandBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter 
       stateHome,
       cacheHome,
     });
-    const compositor = Bun.spawn([hyprland, "--config", configPath], {
-      env: bootstrapEnv,
+    const compositor = Bun.spawn([
+      ...this.#units.command(provision.surfaceId, provision.generation, "compositor", bootstrapEnv),
+      hyprland,
+      "--config",
+      configPath,
+    ], {
+      env: this.#units.launcherEnvironment(bootstrapEnv),
       stdin: "ignore",
       stdout: "ignore",
       stderr: "ignore",
@@ -356,14 +373,18 @@ export class HyprlandBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter 
       const startedVirtualInput = await WaylandVirtualInput.start(
         inputHelper,
         outputName,
-        childEnv,
+        this.#units.launcherEnvironment(childEnv),
         provision.logicalWidth,
         provision.logicalHeight,
+        this.#units.command(provision.surfaceId, provision.generation, "input", childEnv),
       );
       virtualInput = startedVirtualInput;
 
-      applicationProcess = Bun.spawn([application], {
-        env: childEnv,
+      applicationProcess = Bun.spawn([
+        ...this.#units.command(provision.surfaceId, provision.generation, "application", childEnv),
+        application,
+      ], {
+        env: this.#units.launcherEnvironment(childEnv),
         stdin: "ignore",
         stdout: "ignore",
         stderr: "ignore",
@@ -374,6 +395,10 @@ export class HyprlandBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter 
         surfaceId: provision.surfaceId,
         runtimeGeneration: provision.generation,
         env: childEnv,
+        wrapCommand: (targetEnvironment) => ({
+          commandPrefix: this.#units.command(provision.surfaceId, provision.generation, "worker", targetEnvironment),
+          launcherEnvironment: this.#units.launcherEnvironment(targetEnvironment),
+        }),
       });
       computerWorker = startedComputerWorker;
       const exited = Promise.race([
@@ -384,6 +409,8 @@ export class HyprlandBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter 
       ]);
 
       let stopped = false;
+      let cleanupComplete = false;
+      let stopInFlight: Promise<void> | undefined;
       const capture = async (): Promise<BotScreenCapture> => {
         if (stopped || compositor.exitCode !== null) throw new Error("Bot Screen compositor is not running");
         const shot = Bun.spawn([grim, "-o", outputName, "-"], {
@@ -429,16 +456,27 @@ export class HyprlandBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter 
         releaseInput: () => startedVirtualInput.release(),
         exited,
         stop: async () => {
-          if (stopped) return;
           stopped = true;
-          await startedVirtualInput.stop().catch(() => {});
-          await Promise.allSettled([
-            startedComputerWorker.stop(),
-            ...(applicationProcess === undefined ? [] : [terminate(applicationProcess)]),
-            terminate(compositor),
-          ]);
-          rmSync(runtimeSurfaceDir, { recursive: true, force: true });
-          rmSync(socketRuntimeDir, { recursive: true, force: true });
+          if (cleanupComplete) return;
+          if (stopInFlight !== undefined) return stopInFlight;
+          const cleanup = (async (): Promise<void> => {
+            await startedVirtualInput.stop().catch(() => {});
+            await Promise.allSettled([
+              startedComputerWorker.stop(),
+              ...(applicationProcess === undefined ? [] : [terminate(applicationProcess)]),
+              terminate(compositor),
+            ]);
+            await this.#units.stop(provision.surfaceId, provision.generation);
+            rmSync(runtimeSurfaceDir, { recursive: true, force: true });
+            rmSync(socketRuntimeDir, { recursive: true, force: true });
+          })();
+          stopInFlight = cleanup;
+          try {
+            await cleanup;
+            cleanupComplete = true;
+          } finally {
+            stopInFlight = undefined;
+          }
         },
       };
     } catch (error) {
@@ -448,10 +486,34 @@ export class HyprlandBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter 
         ...(applicationProcess === undefined ? [] : [terminate(applicationProcess)]),
         terminate(compositor),
       ]);
+      await this.#units.stop(provision.surfaceId, provision.generation);
       rmSync(runtimeSurfaceDir, { recursive: true, force: true });
       rmSync(socketRuntimeDir, { recursive: true, force: true });
       throw error;
     }
+  }
+
+  async reconcile(provision: BotScreenProvision): Promise<BotScreenRuntime | undefined> {
+    // Worker and helper protocols use daemon-owned stdio and cannot be
+    // reconstructed honestly. Tear down any surviving partial cgroup before
+    // BotScreenManager advances the runtime generation.
+    await this.#units.stop(provision.surfaceId);
+    this.#removeSocketRuntimeDirs(provision.surfaceId);
+    rmSync(path.join(this.options.runtimeRoot, provision.surfaceId), { recursive: true, force: true });
+    return undefined;
+  }
+
+  async destroy(surfaceId: SurfaceId): Promise<void> {
+    await this.#units.stop(surfaceId);
+    rmSync(path.join(this.options.runtimeRoot, surfaceId), { recursive: true, force: true });
+    this.#removeSocketRuntimeDirs(surfaceId);
+    rmSync(path.join(this.options.profileRoot, surfaceId), { recursive: true, force: true });
+  }
+
+  #removeSocketRuntimeDirs(surfaceId: SurfaceId): void {
+    const hostRuntimeDir = this.options.hostRuntimeDir;
+    if (hostRuntimeDir === undefined || !existsSync(hostRuntimeDir)) return;
+    rmSync(path.join(hostRuntimeDir, socketRuntimeName(surfaceId)), { recursive: true, force: true });
   }
 
   async #discover(

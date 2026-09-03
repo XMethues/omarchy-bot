@@ -597,15 +597,10 @@ export function openDb(cfg: Config): Database {
   return db;
 }
 
-/** In-flight ownership and cleanup attempts never survive a daemon restart. */
+/** In-memory authority never survives a daemon restart; supervised Screen state is reconciled by BotScreenManager. */
 export function recoverOnStartup(db: Database): void {
   db.exec("DELETE FROM computer_leases");
   const now = new Date().toISOString();
-  db.query(
-    `UPDATE bot_surfaces
-     SET lifecycle_state='stopped', last_failure=NULL, transitioned_at=?
-     WHERE lifecycle_state <> 'stopped'`,
-  ).run(now);
   db.query(`UPDATE turns SET status='failed', finished_at=?, outcome_reason='daemon restart' WHERE status NOT IN ('completed','cancelled','failed')`).run(now);
   db.query(`UPDATE bot_deletions SET state='failed', failure_json=?, updated_at=? WHERE state='cleaning'`)
     .run(JSON.stringify([{ stage: "database", resource: "daemon", message: "daemon restarted during permanent deletion" }]), now);

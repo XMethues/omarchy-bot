@@ -1,4 +1,3 @@
-import type { SurfaceId } from "@omarchy-bot/domain";
 import { loadConfig } from "./config.ts";
 import { openDb, recoverOnStartup } from "../persistence/db.ts";
 import { EventLog } from "../modules/events/eventLog.ts";
@@ -30,7 +29,12 @@ export interface MainOptions {
   botScreenAdapter?: BotScreenRuntimeAdapter;
 }
 
-export async function main(options: MainOptions = {}): Promise<{ stop: () => Promise<void>; port: number; svc: DaemonServices }> {
+export async function main(options: MainOptions = {}): Promise<{
+  stop: () => Promise<void>;
+  disconnectForRestart: () => Promise<void>;
+  port: number;
+  svc: DaemonServices;
+}> {
   const cfg = loadConfig();
   const db = openDb(cfg);
   recoverOnStartup(db); // leases never survive a restart as bot-held
@@ -76,26 +80,19 @@ export async function main(options: MainOptions = {}): Promise<{ stop: () => Pro
       : { applicationBin: process.env.OMARCHY_BOT_SCREEN_APP_BIN }),
   });
   const screens = new BotScreenManager(db, options.botScreenAdapter ?? productionScreenAdapter);
+  await screens.recover();
   let projections!: ScreenProjectionService;
 
   const events = new EventLog(db);
-  events.subscribe((event) => {
-    if (event.aggregateType !== "bot" || (event.type !== "bot.archived" && event.type !== "bot.deleted")) return;
-    const payload = event.payload as { surfaceId?: unknown } | undefined;
-    if (typeof payload?.surfaceId === "string") {
-      projections.closeSurface(payload.surfaceId as SurfaceId);
-      void screens.stop(payload.surfaceId as SurfaceId);
-    }
-  });
   const dictation = new DictationService(cfg.dictationDir, cfg.voxtypeBin ?? "voxtype", events);
   const agents: AgentsRegistry = new AgentsRegistry(db, events, { conformanceDir: cfg.conformanceDir, workersAgentsDir: agentsDir }, supervisor);
   const threads: ThreadsService = new ThreadsService(db, events, agents);
-  const bots = new BotsService(db, events, agents, threads);
+  const bots = new BotsService(db, events, agents, threads, screens);
   const attachments = new AttachmentsService(db, cfg.attachmentsDir, agents);
   attachments.gcStaged();
   const avatars = new AvatarService(bots, supervisor, cfg.avatarsDir);
-  const botDeletions = new BotDeletionService(db, events, attachments, avatars, agents, supervisor);
   const turns: TurnService = new TurnService(db, events, threads, agents, bots, attachments, supervisor, cfg);
+  const botDeletions = new BotDeletionService(db, events, attachments, avatars, agents, supervisor, screens);
   const computer = new ComputerBroker(
     db,
     events,
@@ -153,9 +150,16 @@ export async function main(options: MainOptions = {}): Promise<{ stop: () => Pro
   console.log(`omarchy-bot daemon listening on http://127.0.0.1:${http.port}`);
 
   let stopping = false;
+  const onInterrupt = (): void => void stop();
+  const onTerminate = (): void => void stop();
+  const removeSignalHandlers = (): void => {
+    process.off("SIGINT", onInterrupt);
+    process.off("SIGTERM", onTerminate);
+  };
   const stop = async (): Promise<void> => {
     if (stopping) return;
     stopping = true;
+    removeSignalHandlers();
     // Safe shutdown order: stop new work before revoking shared resources.
     clearInterval(statusTimer);
     await dictation.shutdown();
@@ -168,10 +172,25 @@ export async function main(options: MainOptions = {}): Promise<{ stop: () => Pro
     console.log("omarchy-bot daemon stopped");
   };
 
-  process.on("SIGINT", () => void stop());
-  process.on("SIGTERM", () => void stop());
+  const disconnectForRestart = async (): Promise<void> => {
+    if (stopping) return;
+    stopping = true;
+    removeSignalHandlers();
+    clearInterval(statusTimer);
+    await dictation.shutdown();
+    computer.shutdown();
+    await projections.shutdown();
+    screens.detach();
+    await supervisor.stopAll();
+    http.stop();
+    db.close();
+    console.log("omarchy-bot daemon disconnected for restart");
+  };
 
-  return { stop, port: http.port, svc };
+  process.on("SIGINT", onInterrupt);
+  process.on("SIGTERM", onTerminate);
+
+  return { stop, disconnectForRestart, port: http.port, svc };
 }
 
 if (import.meta.main) {

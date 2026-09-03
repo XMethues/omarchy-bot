@@ -15,6 +15,7 @@ export interface Harness {
   home: string;
   svc: DaemonServices;
   stop: () => Promise<void>;
+  disconnectForRestart: () => Promise<void>;
 }
 
 export interface HarnessOptions {
@@ -49,8 +50,15 @@ export async function startDaemon(existingHome?: string, options: HarnessOptions
   const daemon = options.useProductionBotScreen
     ? await main()
     : await main({ botScreenAdapter: options.botScreenAdapter ?? new FakeBotScreenRuntimeAdapter(options.botScreenFailure) });
-  const { stop, port, svc } = daemon;
-  const base: Harness = { baseUrl: `http://127.0.0.1:${port}`, port, home, svc, stop };
+  const { stop, disconnectForRestart, port, svc } = daemon;
+  const base: Harness = {
+    baseUrl: `http://127.0.0.1:${port}`,
+    port,
+    home,
+    svc,
+    stop,
+    disconnectForRestart,
+  };
   // Wait until the fake pi agent finishes its probe and reports ready.
   const deadline = Date.now() + 20_000;
   for (;;) {

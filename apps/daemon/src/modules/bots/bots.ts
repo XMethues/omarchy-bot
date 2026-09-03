@@ -5,6 +5,7 @@ import { AVATAR_RENDERER_ID, type AvatarDto, type AvatarRecipeDto, type BotDto, 
 import type { EventLog } from "../events/eventLog.ts";
 import type { AgentsRegistry } from "../agents/registry.ts";
 import type { ThreadsService } from "../threads/threads.ts";
+import type { BotScreenManager } from "../computer/botScreenManager.ts";
 
 interface BotRow {
   surface_id: string;
@@ -45,6 +46,7 @@ export class BotsService {
     private readonly events: EventLog,
     private readonly agents: AgentsRegistry,
     private readonly threads: ThreadsService,
+    private readonly screens: BotScreenManager,
   ) {
     // TurnService already records user/final assistant text. Other Bot and
     // system transcript output has no useful preview, but still needs attention.
@@ -215,18 +217,16 @@ export class BotsService {
       await Promise.all(activeTurns.map((turn) => turns.waitForTerminal(turn.id)));
     }
 
+    await this.screens.stop(row.surface_id as SurfaceId);
+
     const now = new Date().toISOString();
-    const archive = this.db.transaction(() => {
-      this.db.query(`UPDATE bots SET archived = 1, archived_at = ?, updated_at = ? WHERE id = ?`).run(now, now, id);
-      this.db.query(`UPDATE bot_surfaces SET lifecycle_state = 'stopped', transitioned_at = ? WHERE bot_id = ?`).run(now, id);
-    });
-    archive();
+    this.db.query(`UPDATE bots SET archived = 1, archived_at = ?, updated_at = ? WHERE id = ?`).run(now, now, id);
     const archived = this.getDto(id);
     this.events.append("bot", id, "bot.archived", archived);
     return archived;
   }
 
-  restore(id: string): BotDto {
+  async restore(id: string): Promise<BotDto> {
     const row = this.#row(id);
     if (!row) throw new HttpError(404, `unknown bot ${id}`);
     if (this.db.query(`SELECT bot_id FROM bot_deletions WHERE bot_id = ?`).get(id) !== null) {
@@ -235,12 +235,9 @@ export class BotsService {
     if (!row.archived) return this.#toDto(row);
 
     const now = new Date().toISOString();
-    const restore = this.db.transaction(() => {
-      this.db.query(`UPDATE bots SET archived = 0, archived_at = NULL, updated_at = ? WHERE id = ?`).run(now, id);
-      this.db.query(`UPDATE bot_surfaces SET lifecycle_state = 'stopped', transitioned_at = ? WHERE bot_id = ?`).run(now, id);
-    });
-    restore();
+    this.db.query(`UPDATE bots SET archived = 0, archived_at = NULL, updated_at = ? WHERE id = ?`).run(now, id);
     const restored = this.getDto(id);
+    await this.screens.ensureReady({ botId: id, surfaceId: restored.surfaceId });
     this.events.append("bot", id, "bot.restored", restored);
     return restored;
   }

@@ -91,6 +91,7 @@ export class ComputerBroker {
   #snapshotCaches = new Map<SurfaceId, SnapshotCache>();
   #agentOperations = new Map<SurfaceId, Promise<void>>();
   #pendingAgentTools = new Map<SurfaceId, PendingAgentTool>();
+  #unsubscribeScreens: () => void;
 
   constructor(
     private readonly db: Database,
@@ -103,7 +104,16 @@ export class ComputerBroker {
     this.events.subscribe((event) => {
       if (event.aggregateType !== "bot" || (event.type !== "bot.archived" && event.type !== "bot.deleted")) return;
       const payload = event.payload as { surfaceId?: unknown } | undefined;
-      if (typeof payload?.surfaceId === "string") this.#clearSurface(payload.surfaceId as SurfaceId);
+      if (typeof payload?.surfaceId === "string") {
+        this.#clearSurface(payload.surfaceId as SurfaceId, "Computer Surface was removed during pending tool");
+      }
+    });
+    this.#unsubscribeScreens = this.screens.subscribe((transition) => {
+      if (transition.state === "failed") {
+        this.#clearSurface(transition.surfaceId, "Bot Screen became unavailable during pending tool");
+      } else if (transition.state === "stopped") {
+        this.#clearSurface(transition.surfaceId, "Bot Screen stopped during pending tool");
+      }
     });
   }
 
@@ -539,17 +549,18 @@ export class ComputerBroker {
       }
     });
   }
-
   async snapshot(input: ComputerSurfaceOwner): Promise<{ bytes: Uint8Array; mediaType: string } | undefined> {
     const owner = this.#requireOwner(input);
     const cached = this.#snapshotCaches.get(owner.surfaceId);
-    if (cached !== undefined && Date.now() - cached.checkedAt < 400) {
+    if (
+      this.screens.state(owner).state === "ready"
+      && cached !== undefined
+      && Date.now() - cached.checkedAt < 400
+    ) {
       return { mediaType: cached.mediaType, bytes: cached.bytes };
     }
     const result = await this.screens.capture(owner).catch(() => undefined);
-    if (result === undefined) {
-      return cached === undefined ? undefined : { mediaType: cached.mediaType, bytes: cached.bytes };
-    }
+    if (result === undefined) return undefined;
     const checkedAt = Date.now();
     const next = {
       checkedAt,
@@ -565,6 +576,7 @@ export class ComputerBroker {
   }
 
   shutdown(): void {
+    this.#unsubscribeScreens();
     this.db.exec(`DELETE FROM computer_leases`);
     for (const pending of this.#pendingAgentTools.values()) {
       const error = new Error("daemon stopped during pending computer tool");
@@ -580,10 +592,10 @@ export class ComputerBroker {
     this.#snapshotCaches.clear();
   }
 
-  #clearSurface(surfaceId: SurfaceId): void {
+  #clearSurface(surfaceId: SurfaceId, reason: string): void {
     const pending = this.#pendingAgentTools.get(surfaceId);
     if (pending !== undefined) {
-      void this.#cancelPending(pending, new Error("Computer Surface was removed during pending tool"));
+      void this.#cancelPending(pending, new Error(reason));
     }
     this.db.query(`DELETE FROM computer_leases WHERE surface_id = ?`).run(surfaceId);
     this.#queues.delete(surfaceId);

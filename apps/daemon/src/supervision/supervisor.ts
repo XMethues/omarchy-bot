@@ -25,6 +25,10 @@ export interface ComputerWorkerScope {
   surfaceId: SurfaceId;
   runtimeGeneration: number;
   env: Record<string, string>;
+  wrapCommand?: (targetEnvironment: Record<string, string>) => {
+    commandPrefix: string[];
+    launcherEnvironment: Record<string, string>;
+  };
 }
 
 export interface SurfaceComputerWorker {
@@ -117,14 +121,17 @@ export class Supervisor {
     const exited = new Promise<Error>((resolve) => {
       reportExit = resolve;
     });
+    const workerEnvironment = {
+      ...scope.env,
+      OMARCHY_BOT_SURFACE_ID: scope.surfaceId,
+      OMARCHY_BOT_RUNTIME_GENERATION: String(scope.runtimeGeneration),
+    };
+    const wrappedCommand = scope.wrapCommand?.(workerEnvironment);
     const client = new WorkerClient({
       name: `computer:${scope.surfaceId}:${scope.runtimeGeneration}`,
       script: path.join(this.workerDirs.computer, "src", "worker.ts"),
-      env: {
-        ...scope.env,
-        OMARCHY_BOT_SURFACE_ID: scope.surfaceId,
-        OMARCHY_BOT_RUNTIME_GENERATION: String(scope.runtimeGeneration),
-      },
+      env: wrappedCommand?.launcherEnvironment ?? workerEnvironment,
+      ...(wrappedCommand === undefined ? {} : { commandPrefix: wrappedCommand.commandPrefix }),
       onEvent: () => {},
       onExit: (code) => {
         if (this.#computerWorkers.get(scope.surfaceId) === entry) {
