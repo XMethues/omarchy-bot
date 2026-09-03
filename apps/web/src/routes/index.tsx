@@ -19,7 +19,7 @@ import { ConversationHeader } from "../components/ConversationHeader.tsx";
 import { ChatPanel } from "../components/ChatPanel.tsx";
 import { CreateBotDialog } from "../components/CreateBotDialog.tsx";
 import { HistoryDialog } from "../components/HistoryDialog.tsx";
-import { ProfileSheet } from "../components/ProfileSheet.tsx";
+import { ProfileDrawer } from "../components/ProfileDrawer.tsx";
 import { SettingsDialog } from "../components/SettingsDialog.tsx";
 import { ComputerSheet } from "../components/ComputerSheet.tsx";
 import { EmergencyComputerControl } from "../components/EmergencyComputerControl.tsx";
@@ -440,10 +440,16 @@ function HomeScreen(): JSX.Element {
             {...(bot !== undefined ? { bot } : {})}
             {...(thread !== undefined ? { thread } : {})}
             onOpenHistory={() => setHistoryOpen(true)}
-            onOpenProfile={() => setProfileOpen(true)}
+            onOpenProfile={() => {
+              setComputerOpen(false);
+              setProfileOpen(true);
+            }}
             computerState={computer.data?.state ?? "unavailable"}
             computerOpen={computerOpen}
-            onToggleComputer={() => setComputerOpen((open) => !open)}
+            onToggleComputer={() => {
+              setProfileOpen(false);
+              setComputerOpen((open) => !open);
+            }}
             mobileNavigationTriggerRef={mobileNavigationTriggerRef}
             computerTriggerRef={computerTriggerRef}
             profileTriggerRef={profileTriggerRef}
@@ -456,29 +462,40 @@ function HomeScreen(): JSX.Element {
         }
         end={
           bot !== undefined ? (
-            <ComputerSheet
-              bot={bot}
-              view={
-                computer.data
-                  ?? {
-                    state: "unavailable",
-                    activity:
-                      computer.error !== null
-                        ? apiErrorMessage(computer.error, "Computer status could not be loaded.")
-                        : "Computer state is loading.",
-                  }
-              }
-              snapshotUrl={api.computerImageUrl()}
-              open={computerOpen}
-              returnFocusRef={computerTriggerRef}
-              busy={computerAction.isPending}
-              {...(computer.isPending ? { loading: true } : {})}
-              {...(computer.error !== null ? { onRetry: () => void computer.refetch() } : {})}
-              {...(computerError !== undefined ? { error: computerError } : {})}
-              onClose={() => setComputerOpen(false)}
-              onTakeControl={() => computerAction.mutate("take")}
-              onReturnToBot={() => computerAction.mutate("return")}
-            />
+            profileOpen ? (
+              <ProfileDrawer
+                bot={bot}
+                agentDisplayName={selectedAgent?.displayName ?? bot.agentId}
+                open
+                returnFocusRef={profileTriggerRef}
+                onClose={() => setProfileOpen(false)}
+                onUpdated={() => invalidate("bots")}
+              />
+            ) : (
+              <ComputerSheet
+                bot={bot}
+                view={
+                  computer.data
+                    ?? {
+                      state: "unavailable",
+                      activity:
+                        computer.error !== null
+                          ? apiErrorMessage(computer.error, "Computer status could not be loaded.")
+                          : "Computer state is loading.",
+                    }
+                }
+                snapshotUrl={api.computerImageUrl()}
+                open={computerOpen}
+                returnFocusRef={computerTriggerRef}
+                busy={computerAction.isPending}
+                {...(computer.isPending ? { loading: true } : {})}
+                {...(computer.error !== null ? { onRetry: () => void computer.refetch() } : {})}
+                {...(computerError !== undefined ? { error: computerError } : {})}
+                onClose={() => setComputerOpen(false)}
+                onTakeControl={() => computerAction.mutate("take")}
+                onReturnToBot={() => computerAction.mutate("return")}
+              />
+            )
           ) : undefined
         }
       />
@@ -493,23 +510,13 @@ function HomeScreen(): JSX.Element {
         }}
       />
       {bot !== undefined ? (
-        <>
-          <HistoryDialog
-            botId={bot.id}
-            open={historyOpen}
-            onClose={() => setHistoryOpen(false)}
-            onSelectThread={(threadId) => void navigate({ search: { bot: bot.id, thread: threadId } })}
-            onNewConversation={() => void navigate({ search: { bot: bot.id, thread: "blank" } })}
-          />
-          <ProfileSheet
-            bot={bot}
-            agentDisplayName={selectedAgent?.displayName ?? bot.agentId}
-            open={profileOpen}
-            returnFocusRef={profileTriggerRef}
-            onClose={() => setProfileOpen(false)}
-            onUpdated={() => invalidate("bots")}
-          />
-        </>
+        <HistoryDialog
+          botId={bot.id}
+          open={historyOpen}
+          onClose={() => setHistoryOpen(false)}
+          onSelectThread={(threadId) => void navigate({ search: { bot: bot.id, thread: threadId } })}
+          onNewConversation={() => void navigate({ search: { bot: bot.id, thread: "blank" } })}
+        />
       ) : null}
       <SettingsDialog
         open={settingsOpen}

@@ -4,7 +4,11 @@ import * as stylex from "@stylexjs/stylex";
 import { Banner } from "@astryxdesign/core/Banner";
 import { Button } from "@astryxdesign/core/Button";
 import { Heading } from "@astryxdesign/core/Heading";
+import { Icon } from "@astryxdesign/core/Icon";
+import { IconButton } from "@astryxdesign/core/IconButton";
 import { HStack } from "@astryxdesign/core/HStack";
+import { LayoutPanel } from "@astryxdesign/core/Layout";
+import { StackItem } from "@astryxdesign/core/Stack";
 import { Text } from "@astryxdesign/core/Text";
 import { TextArea } from "@astryxdesign/core/TextArea";
 import { TextInput } from "@astryxdesign/core/TextInput";
@@ -13,9 +17,21 @@ import type { BotDto, BotViewDto } from "@omarchy-bot/protocol";
 import { api, apiErrorMessage } from "../lib/api.ts";
 import styles from "../lib/styles.ts";
 import { AvatarView } from "./AvatarView.tsx";
-import { BottomSheetWithReturnFocus } from "./BottomSheetWithReturnFocus.tsx";
 
-export interface ProfileSheetProps {
+const drawerStyles = stylex.create({
+  root: {
+    position: "fixed",
+    insetBlock: 0,
+    insetInlineEnd: 0,
+    height: "100dvh",
+    maxWidth: "100vw",
+    zIndex: 10,
+    backgroundColor: "var(--color-background-surface)",
+    boxShadow: "var(--shadow-high)",
+  },
+});
+
+export interface ProfileDrawerProps {
   bot: BotViewDto;
   open: boolean;
   agentDisplayName: string;
@@ -27,15 +43,15 @@ export interface ProfileSheetProps {
 type BusyAction = "save" | "variation" | "upload" | "recipe";
 type InvalidField = "name" | "avatarDescription";
 
-/** Profile sheet for one bot. Its backing agent remains fixed. */
-export function ProfileSheet({
+/** Right-side profile drawer for one bot. Its backing agent remains fixed. */
+export function ProfileDrawer({
   bot,
   agentDisplayName,
   open,
   returnFocusRef,
   onClose,
   onUpdated,
-}: ProfileSheetProps): JSX.Element {
+}: ProfileDrawerProps): JSX.Element | null {
   const [current, setCurrent] = useState<BotDto>(bot);
   const [name, setName] = useState(bot.name);
   const [instructions, setInstructions] = useState(bot.instructions);
@@ -57,6 +73,20 @@ export function ProfileSheet({
     setError(undefined);
     setInvalidField(undefined);
   }, [bot, open]);
+
+  const closeDrawer = useCallback((): void => {
+    onClose();
+    requestAnimationFrame(() => returnFocusRef.current?.focus());
+  }, [onClose, returnFocusRef]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === "Escape") closeDrawer();
+    };
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => window.removeEventListener("keydown", onKeyDown, true);
+  }, [closeDrawer, open]);
 
   const acceptUpdate = useCallback(
     (updated: BotDto): void => {
@@ -149,16 +179,34 @@ export function ProfileSheet({
   }, [acceptUpdate, bot.id, prompt]);
 
   const disabled = busy !== undefined;
+  if (!open) return null;
 
   return (
-    <BottomSheetWithReturnFocus
+    <LayoutPanel
+      width="min(440px, 100vw)"
+      padding={0}
+      hasDivider
+      isScrollable
       label="Bot profile"
-      returnFocusRef={returnFocusRef}
-      isOpen={open}
-      onOpenChange={(isOpen) => !isOpen && onClose()}
-      height="tall"
-      purpose="form"
+      role="complementary"
+      xstyle={drawerStyles.root}
     >
+      <HStack gap={2} padding={4} vAlign="center">
+        <StackItem size="fill">
+          <VStack gap={0.5}>
+            <Heading level={2}>Bot profile</Heading>
+            <Text color="secondary">Update this teammate’s name, job, and avatar.</Text>
+          </VStack>
+        </StackItem>
+        <IconButton
+          label="Close profile drawer"
+          tooltip="Close profile drawer"
+          icon={<Icon icon="close" size="md" />}
+          variant="ghost"
+          onClick={closeDrawer}
+          data-testid="profile-drawer-close"
+        />
+      </HStack>
       <form
         noValidate
         onSubmit={(event) => {
@@ -166,11 +214,7 @@ export function ProfileSheet({
           void save();
         }}
       >
-        <VStack padding={4} gap={4} aria-busy={disabled || undefined}>
-          <VStack gap={0.5} data-testid="profile-sheet">
-            <Heading level={2}>Bot profile</Heading>
-            <Text color="secondary">Update this teammate’s name, job, and avatar.</Text>
-          </VStack>
+        <VStack padding={4} paddingBlockStart={0} gap={4} aria-busy={disabled || undefined} data-testid="profile-drawer">
           {error !== undefined ? <Banner status="error" title={error} /> : null}
           <HStack gap={3} align="center" wrap="wrap">
             <AvatarView avatar={current.avatar} name={current.name} size="lg" activity="selected" />
@@ -275,6 +319,6 @@ export function ProfileSheet({
           </VStack>
         </VStack>
       </form>
-    </BottomSheetWithReturnFocus>
+    </LayoutPanel>
   );
 }

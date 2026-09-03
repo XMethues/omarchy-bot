@@ -11,7 +11,7 @@
 - [x] Theme follows Omarchy/system preference and maintains WCAG AA contrast.
 - [x] Desktop uses Sidebar plus conversation layout with no global TopNav; narrow windows use an accessible Sidebar drawer.
 - [x] Every interactive control is keyboard reachable, visibly focused, semantically labelled, and returns focus appropriately after Dialogs and BottomSheets close; meaningful Bot avatars are labelled from the Bot name.
-- [x] Transcript streaming, History Dialog/BottomSheet, drafts, attachment previews, dictation, Profile BottomSheet, archived Bots, and Computer drawer/BottomSheet remain usable at target breakpoints.
+- [x] Transcript streaming, History Dialog/BottomSheet, drafts, attachment previews, dictation, right-side Profile drawer, archived Bots, and Computer drawer/BottomSheet remain usable at target breakpoints.
 - [x] Reduced-motion mode disables internal avatar movement and nonessential transitions while preserving static state meaning.
 - [x] Loading, empty, error, offline, unavailable Agent, failed upload, failed dictation, and Computer-unavailable states are contextual and include plain-language guidance where action is possible; Agent unavailability appears once above the conversation rather than repeating below the Composer.
 - [x] Browser E2E follows a role-first policy: accessible roles and visible names are the default seam, test ids are reserved for surfaces without semantic selectors, and CSS/component internals are not test contracts.
@@ -19,6 +19,6 @@
 
 ## Answer
 
-Completed the Astryx workspace as a responsive Sidebar and conversation surface. Create and History use desktop Dialogs and narrow BottomSheets; Profile uses a BottomSheet opened by the combined Bot avatar and name; Computer uses a toggled desktop drawer and narrow BottomSheet with a modal expanded preview. The Profile identifies the immutable Agent, Settings → Appearance reports system-following theme state, unavailable integrations include one contextual guidance banner, and meaningful Bot avatars expose labels derived from the Bot name.
+Completed the Astryx workspace as a responsive Sidebar and conversation surface. Create and History use desktop Dialogs and narrow BottomSheets; Profile uses a right-side drawer at every width opened by the combined Bot avatar and name; Computer uses a toggled desktop drawer and narrow BottomSheet with a modal expanded preview. The Profile identifies the immutable Agent, Settings → Appearance reports system-following theme state, unavailable integrations include one contextual guidance banner, and meaningful Bot avatars expose labels derived from the Bot name.
 
 Generated avatars use the sole current renderer `dicebear-core@10.7.0+styles@10.6.0` with native reduced-motion-safe `animationVariant`. Unsupported persisted recipes migrate to deterministic current defaults instead of retaining a browser compatibility renderer. Emergency control is absent while idle and immediately accessible while computer input is active or stopped.

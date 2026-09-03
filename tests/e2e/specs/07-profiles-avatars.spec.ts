@@ -16,8 +16,8 @@ async function createBot(page: Page, name: string): Promise<string> {
 
 async function openProfile(page: Page, botName: string): Promise<void> {
   await page.getByRole("button", { name: `Open profile for ${botName}` }).click();
-  const profile = page.getByRole("dialog", { name: "Bot profile" });
-  await expect(profile.getByTestId("profile-sheet")).toBeVisible();
+  const profile = page.getByRole("complementary", { name: "Bot profile" });
+  await expect(profile.getByTestId("profile-drawer")).toBeVisible();
 }
 
 const onePixelPng = Buffer.from(
@@ -37,7 +37,7 @@ test.describe("Bot profiles and avatars", () => {
     const botId = await createBot(page, "Profile Bot");
     await openProfile(page, "Profile Bot");
 
-    const profile = page.getByRole("dialog", { name: "Bot profile" });
+    const profile = page.getByRole("complementary", { name: "Bot profile" });
     await expect(profile.getByText("Backing Agent", { exact: true })).toBeVisible();
     await expect(profile.getByText("Pi", { exact: true })).toBeVisible();
     await expect(profile.getByText("Fixed for this bot.", { exact: true })).toBeVisible();
@@ -84,7 +84,7 @@ test.describe("Bot profiles and avatars", () => {
     await openProfile(page, "Recipe UI Bot");
     await page.getByRole("textbox", { name: "Describe avatar" }).fill("A friendly teammate with round glasses");
     await page.getByRole("button", { name: "Create from description" }).click();
-    await expect(page.getByRole("dialog", { name: "Bot profile" }).getByTestId("avatar-thumbs")).toBeVisible();
+    await expect(page.getByRole("complementary", { name: "Bot profile" }).getByTestId("avatar-thumbs")).toBeVisible();
   });
 
 
@@ -120,7 +120,7 @@ test.describe("Bot profiles and avatars", () => {
     await createBot(page, "Reduced Motion Bot");
     await openProfile(page, "Reduced Motion Bot");
 
-    const avatar = page.getByRole("dialog", { name: "Bot profile" }).getByTestId("avatar-view");
+    const avatar = page.getByRole("complementary", { name: "Bot profile" }).getByTestId("avatar-view");
     await expect(avatar).toHaveAttribute("data-avatar-activity", "selected");
     const svg = await avatarSvg(avatar);
     expect(svg).toContain("@keyframes");

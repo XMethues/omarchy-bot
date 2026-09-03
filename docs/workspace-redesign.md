@@ -86,7 +86,7 @@ The Agent picker lists every supported Agent. An unavailable Agent remains visib
 
 ### Profile editing
 
-The Bot avatar and name form one Conversation Header button that opens an Astryx BottomSheet. The profile surface identifies the Bot's immutable Agent as read-only context. The user may edit the Bot's name, Instructions, and avatar. Changing execution backend means creating another Bot.
+The Bot avatar and name form one Conversation Header button that opens a right-side drawer at every window width. The profile surface identifies the Bot's immutable Agent as read-only context. The user may edit the Bot's name, Instructions, and avatar. Changing execution backend means creating another Bot.
 
 ### Archive and delete
 

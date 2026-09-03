@@ -7,8 +7,8 @@ import { HStack } from "@astryxdesign/core/HStack";
 import { Icon } from "@astryxdesign/core/Icon";
 import { IconButton } from "@astryxdesign/core/IconButton";
 import { LayoutHeader } from "@astryxdesign/core/Layout";
+import { Text } from "@astryxdesign/core/Text";
 import { StackItem } from "@astryxdesign/core/Stack";
-import { VStack } from "@astryxdesign/core/VStack";
 import type { BotViewDto, ComputerViewDto, ThreadDto } from "@omarchy-bot/protocol";
 import { AvatarView } from "./AvatarView.tsx";
 
@@ -88,37 +88,35 @@ export function ConversationHeader({
       >
         <MobileSidebarTrigger triggerRef={mobileNavigationTriggerRef} />
         <StackItem size="fill">
-          <VStack gap={0.5}>
+          <HStack gap={1} vAlign="center">
             {bot !== undefined ? (
-              <HStack>
-                <Button
-                  ref={profileTriggerRef}
-                  label={`Open profile for ${bot.name}`}
-                  variant="ghost"
-                  size="sm"
-                  onClick={onOpenProfile}
-                  data-testid="profile-open"
-                >
-                  <HStack gap={2} vAlign="center">
-                    <AvatarView
-                      avatar={bot.avatar}
-                      name={bot.name}
-                      size="sm"
-                      activity={bot.status === "working" ? "working" : "selected"}
-                      decorative
-                    />
-                    <Heading level={1} maxLines={1}>
-                      {bot.name}
-                    </Heading>
-                  </HStack>
-                </Button>
-              </HStack>
+              <Button
+                ref={profileTriggerRef}
+                label={`Open profile for ${bot.name}`}
+                variant="ghost"
+                size="sm"
+                onClick={onOpenProfile}
+                data-testid="profile-open"
+              >
+                <HStack gap={2} vAlign="center">
+                  <AvatarView
+                    avatar={bot.avatar}
+                    name={bot.name}
+                    size="sm"
+                    activity={bot.status === "working" ? "working" : "selected"}
+                    decorative
+                  />
+                  <Heading level={1} maxLines={1}>
+                    {bot.name}
+                  </Heading>
+                </HStack>
+              </Button>
             ) : (
               <Heading level={1} maxLines={1}>
                 omarchy-bot
               </Heading>
             )}
-            <HStack>
+            <StackItem size="fill">
               <Button
                 label="Open conversation history"
                 variant="ghost"
@@ -127,10 +125,12 @@ export function ConversationHeader({
                 onClick={onOpenHistory}
                 data-testid="thread-history-trigger"
               >
-                {thread?.title ?? "New conversation"}
+                <Text type="supporting" color="secondary" maxLines={1}>
+                  {thread?.title ?? "New conversation"}
+                </Text>
               </Button>
-            </HStack>
-          </VStack>
+            </StackItem>
+          </HStack>
         </StackItem>
         <IconButton
           ref={computerTriggerRef}
