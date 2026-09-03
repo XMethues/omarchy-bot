@@ -5,7 +5,7 @@ const PNG = Buffer.from(
   "base64",
 );
 
-type ComputerState = "idle" | "bot-using" | "waiting" | "needs-you" | "user-control" | "emergency-stopped" | "unavailable";
+type ComputerState = "starting" | "ready" | "bot-using" | "waiting" | "needs-you" | "user-control" | "emergency-stopped" | "unavailable";
 
 async function createBot(page: Page, name: string): Promise<string> {
   await page.getByRole("navigation", { name: "Bot navigation" }).getByRole("button", { name: "New bot" }).click();
@@ -26,7 +26,7 @@ async function fulfillJson(route: Route, body: unknown): Promise<void> {
 
 test.describe("contextual computer sheet", () => {
   test("shows selected-bot state, takeover handoff, preview, and no arbitration jargon", async ({ page }) => {
-    let state: ComputerState = "idle";
+    let state: ComputerState = "ready";
     let activeBotId: string | undefined;
     await page.route("**/api/computer/**", async (route) => {
       const request = route.request();
@@ -36,11 +36,11 @@ test.describe("contextual computer sheet", () => {
         return;
       }
       if (url.pathname === "/api/computer/take-control") state = "user-control";
-      if (url.pathname === "/api/computer/return-to-bot") state = "idle";
+      if (url.pathname === "/api/computer/return-to-bot") state = "ready";
       const selectedBotId = url.searchParams.get("botId") ?? undefined;
       const surfaceId = url.searchParams.get("surfaceId") ?? undefined;
       const selectedState: ComputerState =
-        state === "bot-using" && selectedBotId !== activeBotId ? "idle" : state;
+        state === "bot-using" && selectedBotId !== activeBotId ? "ready" : state;
       await fulfillJson(route, {
         state: selectedState,
         botId: selectedBotId,
@@ -50,7 +50,7 @@ test.describe("contextual computer sheet", () => {
             ? "This bot is using the computer."
             : selectedState === "user-control"
               ? "You are using the computer."
-              : "The computer is ready.",
+              : "Screen ready.",
         previewAt: "2026-09-02T12:00:00.000Z",
       });
     });
@@ -162,8 +162,8 @@ test.describe("contextual computer sheet", () => {
       return fulfillJson(route, {
         botId: url.searchParams.get("botId"),
         surfaceId: url.searchParams.get("surfaceId"),
-        state: "idle",
-        activity: "The computer is ready.",
+        state: "ready",
+        activity: "Screen ready.",
       });
     });
     await page.route("**/api/computer/snapshot**", (route) => route.fulfill({ status: 200, contentType: "image/png", body: PNG }));

@@ -35,7 +35,8 @@ export interface ComputerSheetProps {
 }
 
 const STATE_LABELS: Record<ComputerViewDto["state"], string> = {
-  idle: "Computer ready",
+  starting: "Screen starting",
+  ready: "Screen ready",
   "bot-using": "Using computer",
   waiting: "Waiting for computer",
   "needs-you": "Needs you",

@@ -186,7 +186,7 @@ export type DictationResultDto = z.infer<typeof DictationResultDto>;
 export const ComputerViewDto = z.object({
   surfaceId: SurfaceIdDto,
   botId: z.string(),
-  state: z.enum(["idle", "bot-using", "waiting", "needs-you", "user-control", "emergency-stopped", "unavailable"]),
+  state: z.enum(["starting", "ready", "bot-using", "waiting", "needs-you", "user-control", "emergency-stopped", "unavailable"]),
   activity: z.string().optional(),
   previewAt: z.string().optional(),
 });

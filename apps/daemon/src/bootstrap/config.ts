@@ -11,6 +11,9 @@ export interface Config {
   avatarsDir: string;
   /** Voxtype transcript targets live here; runtime dir preferred, state dir fallback. */
   dictationDir: string;
+  /** Transient child sockets and retained Bot-owned application profiles. */
+  botScreenRuntimeDir: string;
+  botScreenProfileDir: string;
   conformanceDir: string;
   statusPath: string;
   /** Voxtype binary override (defaults to `voxtype` on PATH). */
@@ -34,6 +37,10 @@ export function loadConfig(): Config {
     attachmentsDir: path.join(dataDir, "attachments"),
     avatarsDir: path.join(dataDir, "avatars"),
     dictationDir: runtimeDir ? path.join(runtimeDir, "omarchy-bot", "dictation") : path.join(stateDir, "dictation"),
+    botScreenRuntimeDir: runtimeDir
+      ? path.join(runtimeDir, "omarchy-bot", "screens")
+      : path.join(stateDir, "screen-runtime"),
+    botScreenProfileDir: path.join(dataDir, "screens"),
     conformanceDir: path.join(dataDir, "conformance"),
     statusPath: path.join(stateDir, "status.json"),
     ...(voxtypeBin !== undefined ? { voxtypeBin } : {}),
@@ -47,6 +54,7 @@ export function loadConfig(): Config {
   mkdirSync(cfg.attachmentsDir, { recursive: true });
   mkdirSync(cfg.avatarsDir, { recursive: true });
   mkdirSync(cfg.dictationDir, { recursive: true });
+  mkdirSync(cfg.botScreenProfileDir, { recursive: true });
   mkdirSync(cfg.conformanceDir, { recursive: true });
   return cfg;
 }

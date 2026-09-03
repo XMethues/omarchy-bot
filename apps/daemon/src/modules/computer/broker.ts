@@ -5,7 +5,7 @@ import type { Database } from "bun:sqlite";
 import { isInputAction, type ComputerAction, type ComputerLease, type SurfaceId } from "@omarchy-bot/domain";
 import type { EventLog } from "../events/eventLog.ts";
 import type { TurnService } from "../turns/turns.ts";
-import type { Supervisor } from "../../supervision/supervisor.ts";
+import type { BotScreenManager } from "./botScreenManager.ts";
 import type { Config } from "../../bootstrap/config.ts";
 
 interface LeaseRow {
@@ -42,9 +42,8 @@ export interface ComputerSurfaceOwner {
 
 
 /**
- * Surface-scoped coordination boundary. Ticket 01 keeps the physical worker
- * behind this interface while every caller, cache, lease and event is bound
- * to the owning Bot's durable Computer Surface.
+ * Surface-scoped input coordination. BotScreenManager owns runtime lifecycle
+ * and execution; this module keeps leases, queues, and artifacts Bot-scoped.
  */
 export class ComputerBroker {
   #queues = new Map<SurfaceId, ParkedBot[]>();
@@ -57,7 +56,7 @@ export class ComputerBroker {
     private readonly db: Database,
     private readonly events: EventLog,
     private readonly turns: TurnService,
-    private readonly supervisor: Supervisor,
+    private readonly screens: BotScreenManager,
     private readonly cfg: Config,
   ) {
     this.events.subscribe((event) => {
@@ -265,10 +264,7 @@ export class ComputerBroker {
     const owner = this.#requireOwner(input);
     const lease = this.#lease(owner.surfaceId);
     if (lease === undefined || !lease.holder_is_human) return {};
-    const result = (await this.supervisor.computerCommand(
-      { type: "act", surfaceId: owner.surfaceId, action: { name: "observe", args: {} } },
-      15_000,
-    )) as { text?: string } | undefined;
+    const result = await this.act(owner, undefined, { name: "observe", args: {} }, "human");
     const parked = this.#parkedForHuman.get(owner.surfaceId);
     this.#parkedForHuman.delete(owner.surfaceId);
     this.#writeLease(owner, undefined);
@@ -310,10 +306,7 @@ export class ComputerBroker {
     if (!this.#emergencyStopped.has(owner.surfaceId)) return;
     const parked = this.#parkedForEmergency.get(owner.surfaceId);
     if (parked !== undefined || this.#queue(owner.surfaceId).length > 0) {
-      await this.supervisor.computerCommand(
-        { type: "act", surfaceId: owner.surfaceId, action: { name: "observe", args: {} } },
-        15_000,
-      );
+      await this.act(owner, undefined, { name: "observe", args: {} });
     }
     this.#parkedForEmergency.delete(owner.surfaceId);
     this.#emergencyStopped.delete(owner.surfaceId);
@@ -346,40 +339,15 @@ export class ComputerBroker {
       }
     }
 
-    const command: {
-      type: "act";
-      surfaceId: SurfaceId;
-      action: ComputerAction;
-      lease?: {
-        surfaceId: SurfaceId;
-        holder: { botId: string } | "human";
-        turnId?: string;
-        token: string;
-      };
-    } = { type: "act", surfaceId: owner.surfaceId, action };
-    if (lease !== undefined && isInputAction(action.name)) {
-      command.lease = {
-        surfaceId: owner.surfaceId,
-        holder: lease.holder_is_human ? "human" : { botId: owner.botId },
-        ...(lease.turn_id !== null ? { turnId: lease.turn_id } : {}),
-        token: lease.token,
-      };
-    }
-    const result = (await this.supervisor.computerCommand(command, 30_000)) as
-      | {
-          text?: string;
-          image?: { mediaType: "image/png" | "image/jpeg"; base64: string };
-          windowList?: unknown;
-        }
-      | undefined;
+    const result = await this.screens.act(owner, action);
 
     let imageRef: string | undefined;
-    if (result?.image?.base64) {
+    if (result.image !== undefined) {
       const id = randomUUID();
       const extension = result.image.mediaType === "image/png" ? "png" : "jpg";
       const artifactPath = path.join(this.cfg.artifactsDir, `snapshot-${id}.${extension}`);
       const observedAt = new Date().toISOString();
-      await writeFile(artifactPath, Buffer.from(result.image.base64, "base64"));
+      await writeFile(artifactPath, result.image.bytes);
       this.db
         .query(`INSERT INTO artifacts (id, kind, media_type, path, created_at, surface_id) VALUES (?, 'snapshot', ?, ?, ?, ?)`)
         .run(id, result.image.mediaType, artifactPath, observedAt, owner.surfaceId);
@@ -400,20 +368,15 @@ export class ComputerBroker {
     if (cached !== undefined && Date.now() - cached.checkedAt < 400) {
       return { mediaType: cached.mediaType, bytes: cached.bytes };
     }
-    const result = (await this.supervisor
-      .computerCommand(
-        { type: "act", surfaceId: owner.surfaceId, action: { name: "screenshot", args: {} } },
-        15_000,
-      )
-      .catch(() => undefined)) as { image?: { mediaType: string; base64: string } } | undefined;
-    if (!result?.image?.base64) {
+    const result = await this.screens.capture(owner).catch(() => undefined);
+    if (result === undefined) {
       return cached === undefined ? undefined : { mediaType: cached.mediaType, bytes: cached.bytes };
     }
     const checkedAt = Date.now();
     const next = {
       checkedAt,
-      mediaType: result.image.mediaType,
-      bytes: Buffer.from(result.image.base64, "base64"),
+      mediaType: result.mediaType,
+      bytes: result.bytes,
     };
     this.#snapshotCaches.set(owner.surfaceId, next);
     this.db

@@ -8,6 +8,7 @@ import type { BotDeletionService } from "../modules/bots/botDeletion.ts";
 import type { ThreadsService } from "../modules/threads/threads.ts";
 import type { TurnService } from "../modules/turns/turns.ts";
 import type { ComputerBroker } from "../modules/computer/broker.ts";
+import type { BotScreenManager } from "../modules/computer/botScreenManager.ts";
 import type { AvatarService } from "../modules/avatars/avatarService.ts";
 import type { DictationService } from "../modules/dictation/dictationService.ts";
 import type { AttachmentsService } from "../modules/attachments/attachments.ts";
@@ -38,6 +39,7 @@ export interface DaemonServices {
   attachments: AttachmentsService;
   dictation: DictationService;
   computer: ComputerBroker;
+  screens: BotScreenManager;
   /** Exposed for the conformance suite and advanced embedders; not used by HTTP handlers. */
   supervisor: Supervisor;
 }
@@ -166,7 +168,7 @@ export function startHttp(svc: DaemonServices): { stop: () => Promise<void>; por
     const dictationResponse = await handleDictationRequest(req, svc.dictation, pathname);
     if (dictationResponse) return dictationResponse;
 
-    const computerResponse = await handleComputerRequest(req, svc.computer);
+    const computerResponse = await handleComputerRequest(req, svc.computer, svc.screens);
     if (computerResponse) return computerResponse;
 
     // Release: serve the built web UI if present.

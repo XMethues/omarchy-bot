@@ -56,6 +56,25 @@ async function waitForTurnStatus(h: Harness, turnId: string, status: string): Pr
   }
 }
 
+async function waitForComputerState(
+  h: Harness,
+  owner: SurfaceOwner,
+  expected: string,
+): Promise<{ botId: string; surfaceId: string; state: string; activity?: string; previewAt?: string }> {
+  const deadline = Date.now() + 5_000;
+  for (;;) {
+    const result = await computerRequest<{ botId: string; surfaceId: string; state: string; activity?: string; previewAt?: string }>(
+      h,
+      "GET",
+      computerPath("/api/computer/state", owner),
+    );
+    if (result.body.state === expected) return result.body;
+    if (Date.now() >= deadline) {
+      throw new Error(`Computer Surface did not reach ${expected}; current=${result.body.state}`);
+    }
+  }
+}
+
 
 describe("contextual computer control", () => {
   let h: Harness;
@@ -109,6 +128,71 @@ describe("contextual computer control", () => {
     );
     expect(response.status).toBe(404);
   });
+
+  test("opening Computer lazily reports actual Bot Screen startup and readiness", async () => {
+    const owner = await ownerFor(h, await makeBot(h, "Lazy screen"));
+
+    const opening = await computerRequest<{ state: string; activity?: string }>(
+      h,
+      "GET",
+      computerPath("/api/computer/state", owner),
+    );
+    expect(opening.body).toMatchObject({
+      state: "starting",
+      activity: "Screen starting.",
+    });
+
+    expect(await waitForComputerState(h, owner, "ready")).toMatchObject({
+      state: "ready",
+      activity: "Screen ready.",
+    });
+  });
+
+  test("missing Hyprland reports Screen unavailable without falling back to the host", async () => {
+    const previousHyprlandBin = process.env.OMARCHY_BOT_HYPRLAND_BIN;
+    process.env.OMARCHY_BOT_HYPRLAND_BIN = "/definitely/missing/Hyprland";
+    await h.stop();
+    try {
+      h = await startDaemon(undefined, { useProductionBotScreen: true });
+    } finally {
+      if (previousHyprlandBin === undefined) delete process.env.OMARCHY_BOT_HYPRLAND_BIN;
+      else process.env.OMARCHY_BOT_HYPRLAND_BIN = previousHyprlandBin;
+    }
+    const owner = await ownerFor(h, await makeBot(h, "Unavailable screen"));
+
+    const opening = await computerRequest<{ state: string }>(
+      h,
+      "GET",
+      computerPath("/api/computer/state", owner),
+    );
+    expect(opening.body.state).toBe("starting");
+
+    expect(await waitForComputerState(h, owner, "unavailable")).toEqual({
+      ...owner,
+      state: "unavailable",
+      activity: "Screen unavailable.",
+    });
+  }, 15_000);
+
+  test("opening preview captures directly from the assigned Bot Screen", async () => {
+    const owner = await ownerFor(h, await makeBot(h, "Preview screen"));
+
+    const snapshot = await computerRequest<ArrayBuffer>(
+      h,
+      "GET",
+      computerPath("/api/computer/snapshot", owner),
+    );
+
+    expect(snapshot.response.status).toBe(200);
+    expect(snapshot.response.headers.get("content-type")).toBe("image/png");
+    expect(Buffer.from(snapshot.body).toString("base64")).toBe(
+      "iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAYAAAD0In+KAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAADklEQVQImWMQMgn7D8IAC5MDN627upEAAAAASUVORK5CYII=",
+    );
+    expect(await waitForComputerState(h, owner, "ready")).toMatchObject({
+      ...owner,
+      previewAt: expect.any(String),
+    });
+  });
   test("preview observations and cached state remain scoped to their Surface", async () => {
     const first = await ownerFor(h, await makeBot(h, "Observer"));
     const second = await ownerFor(h, await makeBot(h, "Other observer"));
@@ -121,21 +205,13 @@ describe("contextual computer control", () => {
     expect(snapshot.response.headers.get("content-type")).toBe("image/png");
     expect(snapshot.body.byteLength).toBeGreaterThan(0);
 
-    const firstState = await computerRequest<{ botId: string; surfaceId: string; state: string; activity?: string; previewAt?: string }>(
-      h,
-      "GET",
-      computerPath("/api/computer/state", first),
-    );
-    const secondState = await computerRequest<{ botId: string; surfaceId: string; state: string; activity?: string; previewAt?: string }>(
-      h,
-      "GET",
-      computerPath("/api/computer/state", second),
-    );
-    expect(firstState.body).toMatchObject({ ...first, state: "idle", previewAt: expect.any(String) });
-    expect(secondState.body).toEqual({
+    const firstState = await waitForComputerState(h, first, "ready");
+    const secondState = await waitForComputerState(h, second, "ready");
+    expect(firstState).toMatchObject({ ...first, state: "ready", previewAt: expect.any(String) });
+    expect(secondState).toEqual({
       ...second,
-      state: "idle",
-      activity: "The computer is ready.",
+      state: "ready",
+      activity: "Screen ready.",
     });
   });
 
@@ -223,6 +299,9 @@ describe("contextual computer control", () => {
 
   test("archive and restore retain Surface identity while permanent deletion removes it", async () => {
     const owner = await ownerFor(h, await makeBot(h, "Archived screen"));
+    expect((
+      await computerRequest(h, "GET", computerPath("/api/computer/snapshot", owner))
+    ).response.status).toBe(200);
     const archived = await api<{ surfaceId: string }>(h, "POST", `/api/bots/${owner.botId}/archive`, {});
     expect(archived.surfaceId).toBe(owner.surfaceId);
     expect((await fetch(`${h.baseUrl}${computerPath("/api/computer/state", owner)}`)).status).toBe(404);
@@ -241,7 +320,13 @@ describe("contextual computer control", () => {
   });
 
   test("non-computer requests are left to the parent router", async () => {
-    expect(await handleComputerRequest(new Request(`${h.baseUrl}/api/health`), h.svc.computer)).toBeUndefined();
+    expect(
+      await handleComputerRequest(
+        new Request(`${h.baseUrl}/api/health`),
+        h.svc.computer,
+        h.svc.screens,
+      ),
+    ).toBeUndefined();
     expect(await api<{ ok: boolean }>(h, "GET", "/api/health")).toMatchObject({ ok: true });
   });
 });

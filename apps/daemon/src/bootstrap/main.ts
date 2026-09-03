@@ -1,3 +1,4 @@
+import type { SurfaceId } from "@omarchy-bot/domain";
 import { loadConfig } from "./config.ts";
 import { openDb, recoverOnStartup } from "../persistence/db.ts";
 import { EventLog } from "../modules/events/eventLog.ts";
@@ -7,6 +8,8 @@ import { BotsService } from "../modules/bots/bots.ts";
 import { BotDeletionService } from "../modules/bots/botDeletion.ts";
 import { TurnService } from "../modules/turns/turns.ts";
 import { ComputerBroker } from "../modules/computer/broker.ts";
+import { BotScreenManager, type BotScreenRuntimeAdapter } from "../modules/computer/botScreenManager.ts";
+import { HyprlandBotScreenRuntimeAdapter } from "../modules/computer/hyprlandBotScreenRuntime.ts";
 import { AvatarService } from "../modules/avatars/avatarService.ts";
 import { DictationService } from "../modules/dictation/dictationService.ts";
 import { AttachmentsService } from "../modules/attachments/attachments.ts";
@@ -21,12 +24,42 @@ function writeStatusAtomic(statusPath: string, data: unknown): void {
   renameSync(tmp, statusPath);
 }
 
-export async function main(): Promise<{ stop: () => Promise<void>; port: number; svc: DaemonServices }> {
+export interface MainOptions {
+  botScreenAdapter?: BotScreenRuntimeAdapter;
+}
+
+export async function main(options: MainOptions = {}): Promise<{ stop: () => Promise<void>; port: number; svc: DaemonServices }> {
   const cfg = loadConfig();
   const db = openDb(cfg);
   recoverOnStartup(db); // leases never survive a restart as bot-held
+  const runtimeDir = process.env.XDG_RUNTIME_DIR;
+  const hostWaylandDisplay = process.env.WAYLAND_DISPLAY;
+  const productionScreenAdapter = new HyprlandBotScreenRuntimeAdapter({
+    runtimeRoot: cfg.botScreenRuntimeDir,
+    profileRoot: cfg.botScreenProfileDir,
+    ...(runtimeDir === undefined ? {} : { hostRuntimeDir: runtimeDir }),
+    ...(hostWaylandDisplay === undefined ? {} : { hostWaylandDisplay }),
+    ...(process.env.OMARCHY_BOT_HYPRLAND_BIN === undefined
+      ? {}
+      : { hyprlandBin: process.env.OMARCHY_BOT_HYPRLAND_BIN }),
+    ...(process.env.OMARCHY_BOT_HYPRCTL_BIN === undefined
+      ? {}
+      : { hyprctlBin: process.env.OMARCHY_BOT_HYPRCTL_BIN }),
+    ...(process.env.OMARCHY_BOT_GRIM_BIN === undefined
+      ? {}
+      : { grimBin: process.env.OMARCHY_BOT_GRIM_BIN }),
+    ...(process.env.OMARCHY_BOT_SCREEN_APP_BIN === undefined
+      ? {}
+      : { applicationBin: process.env.OMARCHY_BOT_SCREEN_APP_BIN }),
+  });
+  const screens = new BotScreenManager(db, options.botScreenAdapter ?? productionScreenAdapter);
 
   const events = new EventLog(db);
+  events.subscribe((event) => {
+    if (event.aggregateType !== "bot" || (event.type !== "bot.archived" && event.type !== "bot.deleted")) return;
+    const payload = event.payload as { surfaceId?: unknown } | undefined;
+    if (typeof payload?.surfaceId === "string") void screens.stop(payload.surfaceId as SurfaceId);
+  });
   const dictation = new DictationService(cfg.dictationDir, cfg.voxtypeBin ?? "voxtype", events);
   const workersDir = process.env.OMARCHY_BOT_WORKERS_DIR ?? path.resolve(import.meta.dir, "../../../../workers");
   const agentsDir = path.resolve(workersDir);
@@ -53,7 +86,7 @@ export async function main(): Promise<{ stop: () => Promise<void>; port: number;
   const avatars = new AvatarService(bots, supervisor, cfg.avatarsDir);
   const botDeletions = new BotDeletionService(db, events, attachments, avatars, agents, supervisor);
   const turns = new TurnService(db, events, threads, agents, bots, attachments, supervisor, cfg);
-  const computer = new ComputerBroker(db, events, turns, supervisor, cfg);
+  const computer = new ComputerBroker(db, events, turns, screens, cfg);
 
   agents.init();
 
@@ -62,7 +95,22 @@ export async function main(): Promise<{ stop: () => Promise<void>; port: number;
     void agents.recheck(a.id).catch(() => {});
   }
 
-  const svc: DaemonServices = { cfg, db, events, agents, bots, botDeletions, threads, turns, avatars, attachments, dictation, computer, supervisor };
+  const svc: DaemonServices = {
+    cfg,
+    db,
+    events,
+    agents,
+    bots,
+    botDeletions,
+    threads,
+    turns,
+    avatars,
+    attachments,
+    dictation,
+    computer,
+    screens,
+    supervisor,
+  };
   const http = startHttp(svc);
 
   // Periodic status file for the future bar widget (decoupled pattern from research.md §3).
@@ -89,6 +137,7 @@ export async function main(): Promise<{ stop: () => Promise<void>; port: number;
     clearInterval(statusTimer);
     await dictation.shutdown();
     computer.shutdown();
+    await screens.shutdown();
     await supervisor.stopAll(); // close workers
     http.stop(); // close listeners
     db.close(); // flush WAL

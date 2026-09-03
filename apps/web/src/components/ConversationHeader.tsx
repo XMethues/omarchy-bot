@@ -13,7 +13,8 @@ import type { BotViewDto, ComputerViewDto, ThreadDto } from "@omarchy-bot/protoc
 import { AvatarView } from "./AvatarView.tsx";
 
 const COMPUTER_TOOLTIPS: Record<ComputerViewDto["state"], string> = {
-  idle: "Open computer",
+  starting: "Open computer, screen is starting",
+  ready: "Open computer",
   "bot-using": "Open computer, this bot is using it",
   waiting: "Open computer, this bot is waiting",
   "needs-you": "Open computer, this bot needs you",
@@ -139,7 +140,7 @@ export function ConversationHeader({
           isDisabled={bot === undefined}
           icon={<Icon icon={Monitor} size="md" />}
           variant={
-            computerOpen || (computerState !== "idle" && computerState !== "unavailable") ? "secondary" : "ghost"
+            computerOpen || (computerState !== "ready" && computerState !== "unavailable") ? "secondary" : "ghost"
           }
           onClick={onToggleComputer}
           aria-expanded={computerOpen}

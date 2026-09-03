@@ -6,6 +6,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { DaemonServices } from "../../../apps/daemon/src/api/http.ts";
+import { FakeBotScreenRuntimeAdapter } from "../../../apps/daemon/src/modules/computer/fakeBotScreenRuntime.ts";
 
 export interface Harness {
   baseUrl: string;
@@ -15,7 +16,12 @@ export interface Harness {
   stop: () => Promise<void>;
 }
 
-export async function startDaemon(existingHome?: string): Promise<Harness> {
+export interface HarnessOptions {
+  botScreenFailure?: string;
+  useProductionBotScreen?: boolean;
+}
+
+export async function startDaemon(existingHome?: string, options: HarnessOptions = {}): Promise<Harness> {
   const home = existingHome ?? path.join(os.tmpdir(), `omarchy-bot-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   const state = path.join(os.tmpdir(), `omarchy-bot-test-state-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   mkdirSync(home, { recursive: true });
@@ -35,7 +41,10 @@ export async function startDaemon(existingHome?: string): Promise<Harness> {
 
   // Dynamic import keeps the harness the single boot seam for fresh and legacy homes.
   const { main } = await import("../../../apps/daemon/src/bootstrap/main.ts");
-  const { stop, port, svc } = await main();
+  const daemon = options.useProductionBotScreen
+    ? await main()
+    : await main({ botScreenAdapter: new FakeBotScreenRuntimeAdapter(options.botScreenFailure) });
+  const { stop, port, svc } = daemon;
   const base: Harness = { baseUrl: `http://127.0.0.1:${port}`, port, home, svc, stop };
   // Wait until the fake pi agent finishes its probe and reports ready.
   const deadline = Date.now() + 20_000;

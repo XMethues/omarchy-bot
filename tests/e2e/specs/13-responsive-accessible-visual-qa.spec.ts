@@ -16,7 +16,7 @@ const reducedMotionViewport = { width: 1024, height: 768 };
 const narrowViewport = { width: 390, height: 780 };
 
 type BotStatus = "idle" | "working";
-type ComputerState = "idle" | "bot-using" | "unavailable";
+type ComputerState = "ready" | "bot-using" | "unavailable";
 
 interface SeedOptions {
   empty?: boolean;
@@ -156,7 +156,7 @@ async function seedWorkspaceApi(page: Page, options: SeedOptions = {}): Promise<
   });
   await page.route("**/api/dictation", (route) => fulfillJson(route, { state: "idle" }));
   await page.route("**/api/computer/state**", (route) => {
-    const state = options.computerState ?? "idle";
+    const state = options.computerState ?? "ready";
     return fulfillJson(route, {
       state,
       ...(state === "bot-using" ? { botId: PRIMARY_BOT_ID } : {}),
@@ -165,7 +165,7 @@ async function seedWorkspaceApi(page: Page, options: SeedOptions = {}): Promise<
           ? "The computer is not connected for this bot."
           : state === "bot-using"
             ? "This bot is using the computer."
-            : "The computer is ready.",
+            : "Screen ready.",
     });
   });
   await page.route("**/api/computer/snapshot**", (route) =>
