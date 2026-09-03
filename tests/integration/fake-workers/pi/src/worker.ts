@@ -433,6 +433,7 @@ readJsonl(Bun.stdin.stream(), (raw) => {
     case "message.steer": {
       recordCommand("message.steer");
       const { sessionId, text } = msg as unknown as { sessionId: string; text: string };
+      if (text === "crash-agent") process.exit(17);
       const s = sessions.get(sessionId);
       if (!s || !s.streaming) {
         respondError(msg.requestId!, "cannot steer: session is not streaming");

@@ -32,11 +32,32 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
   }> = [];
   #inputAttempts = 0;
   #releaseWaiters: Array<{ count: number; resolve: () => void }> = [];
+  #blockActions = false;
+  #actionsStarted = 0;
+  #actionWaiters: Array<{ count: number; resolve: () => void }> = [];
+  #actionGate = Promise.withResolvers<void>();
 
   constructor(
     private readonly failure?: string,
     private readonly options: FakeBotScreenRuntimeOptions = {},
   ) {}
+
+  blockActions(): void {
+    this.#blockActions = true;
+    this.#actionGate = Promise.withResolvers<void>();
+  }
+
+  waitForActions(count: number): Promise<void> {
+    if (this.#actionsStarted >= count) return Promise.resolve();
+    const { promise, resolve } = Promise.withResolvers<void>();
+    this.#actionWaiters.push({ count, resolve });
+    return promise;
+  }
+
+  releaseActions(): void {
+    this.#blockActions = false;
+    this.#actionGate.resolve();
+  }
 
 
   waitForInputEvents(count: number): Promise<void> {
@@ -82,6 +103,12 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
       act: async (action) => {
         if (stopped) throw new Error("fake Bot Screen is stopped");
         actionCount += 1;
+        this.#actionsStarted += 1;
+        for (const waiter of this.#actionWaiters.splice(0)) {
+          if (this.#actionsStarted >= waiter.count) waiter.resolve();
+          else this.#actionWaiters.push(waiter);
+        }
+        if (this.#blockActions) await this.#actionGate.promise;
         return {
           text: `fake-${action.name}#${actionCount}`,
           ...(action.name === "list_windows" ? { windowList: [] } : {}),

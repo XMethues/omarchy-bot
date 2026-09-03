@@ -47,6 +47,59 @@ describe("Pi SDK Omarchy computer tool", () => {
     expect(result.content).toEqual([{ type: "text", text: "owned screen observed" }]);
   });
 
+  test("keeps the native tool execution pending until Takeover returns a fresh observation", async () => {
+    const requested = Promise.withResolvers<void>();
+    const returned = Promise.withResolvers<{
+      text: string;
+      imageRef: string;
+      windowList: Array<{ title: string; focused: boolean }>;
+    }>();
+    let completionCount = 0;
+    const tool = createComputerTool(
+      () => binding,
+      {
+        request: async () => {
+          requested.resolve();
+          return returned.promise;
+        },
+      },
+    );
+
+    const execution = tool.execute(
+      "takeover-tool-call",
+      { action: "click", args: { x: 10, y: 20 } },
+      undefined,
+      undefined,
+      undefined as never,
+    ).then((result) => {
+      completionCount += 1;
+      return result;
+    });
+    await requested.promise;
+    expect(completionCount).toBe(0);
+
+    returned.resolve({
+      text: "fresh desktop observation",
+      imageRef: "fresh-snapshot",
+      windowList: [{ title: "Verification", focused: true }],
+    });
+    const result = await execution;
+    expect(completionCount).toBe(1);
+    expect(result.content).toEqual([{
+      type: "text",
+      text: [
+        "fresh desktop observation",
+        "Bot Screen snapshot artifact: fresh-snapshot",
+        'Windows: [{\"title\":\"Verification\",\"focused\":true}]',
+      ].join("\n"),
+    }]);
+    expect(result.details).toEqual({
+      text: "fresh desktop observation",
+      imageRef: "fresh-snapshot",
+      windowList: [{ title: "Verification", focused: true }],
+    });
+  });
+
   test("returns a Broker-owned screenshot as Pi image content without exposing its path", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "pi-computer-tool-"));
     const imagePath = path.join(dir, "screen.png");

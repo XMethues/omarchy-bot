@@ -25,13 +25,52 @@ interface SnapshotCache {
   mediaType: string;
   bytes: Uint8Array;
 }
+
+type AgentToolOutput = {
+  text?: string;
+  imageRef?: string;
+  imageFile?: { mediaType: "image/png" | "image/jpeg"; path: string };
+  windowList?: unknown;
+};
+
+type TakeoverPhase = "running" | "takeover-requested" | "held" | "completing" | "settled";
+type Deferred<T> = {
+  promise: Promise<T>;
+  resolve: (value: T | PromiseLike<T>) => void;
+  reject: (reason?: unknown) => void;
+};
+
+function deferred<T>(): Deferred<T> {
+  let resolve!: Deferred<T>["resolve"];
+  let reject!: Deferred<T>["reject"];
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+
+interface PendingAgentTool {
+  owner: ComputerSurfaceOwner;
+  turnId: string;
+  toolCallId: string;
+  phase: TakeoverPhase;
+  actionDone: Deferred<void>;
+  activated: Deferred<void>;
+  completion: Deferred<AgentToolOutput>;
+  actionError?: unknown;
+  cancellation?: Error;
+}
+
+export type WebControlRevoker = (surfaceId: SurfaceId) => Promise<void>;
 export interface ComputerBrokerState {
   botId: string;
   surfaceId: SurfaceId;
   lease: ComputerLease | null;
   queuedTurnIds: string[];
-  needsHuman: boolean;
   emergencyStopped: boolean;
+  takeover: "unavailable" | "available" | "active";
   lastImageAt?: string;
 }
 
@@ -47,11 +86,11 @@ export interface ComputerSurfaceOwner {
  */
 export class ComputerBroker {
   #queues = new Map<SurfaceId, ParkedBot[]>();
-  #parkedForHuman = new Map<SurfaceId, ParkedBot>();
   #parkedForEmergency = new Map<SurfaceId, ParkedBot>();
   #emergencyStopped = new Set<SurfaceId>();
   #snapshotCaches = new Map<SurfaceId, SnapshotCache>();
   #agentOperations = new Map<SurfaceId, Promise<void>>();
+  #pendingAgentTools = new Map<SurfaceId, PendingAgentTool>();
 
   constructor(
     private readonly db: Database,
@@ -59,6 +98,7 @@ export class ComputerBroker {
     private readonly turns: TurnService,
     private readonly screens: BotScreenManager,
     private readonly cfg: Config,
+    private readonly revokeWebControl: WebControlRevoker,
   ) {
     this.events.subscribe((event) => {
       if (event.aggregateType !== "bot" || (event.type !== "bot.archived" && event.type !== "bot.deleted")) return;
@@ -151,8 +191,13 @@ export class ComputerBroker {
     const surface = this.db
       .query(`SELECT last_image_at FROM bot_surfaces WHERE surface_id = ?`)
       .get(owner.surfaceId) as { last_image_at: string | null };
-    const needsHuman =
-      this.db.query(`SELECT 1 FROM turns WHERE bot_id = ? AND status = 'waiting_for_input' LIMIT 1`).get(owner.botId) !== null;
+    const pending = this.#pendingAgentTools.get(owner.surfaceId);
+    const takeover =
+      pending?.phase === "held" || pending?.phase === "completing"
+        ? "active" as const
+        : pending?.phase === "running" || pending?.phase === "takeover-requested"
+          ? "available" as const
+          : "unavailable" as const;
     return {
       ...owner,
       lease:
@@ -168,7 +213,7 @@ export class ComputerBroker {
       queuedTurnIds: this.#queue(owner.surfaceId).flatMap((entry) =>
         entry.turnId === undefined ? [] : [entry.turnId]
       ),
-      needsHuman,
+      takeover,
       emergencyStopped: this.#emergencyStopped.has(owner.surfaceId),
       ...(surface.last_image_at !== null ? { lastImageAt: surface.last_image_at } : {}),
     };
@@ -236,47 +281,85 @@ export class ComputerBroker {
     void this.#grantNext(owner);
   }
 
-  takeOver(input: ComputerSurfaceOwner): { ok: boolean; lease: ComputerLease | null } {
+  async takeOver(input: ComputerSurfaceOwner): Promise<{ ok: boolean }> {
     const owner = this.#requireOwner(input);
-    const lease = this.#lease(owner.surfaceId);
-    if (lease?.holder_is_human) return { ok: true, lease: this.state(owner).lease };
-    if (lease !== undefined) {
-      const parkedTurn = lease.turn_id ?? undefined;
-      this.#parkedForHuman.set(owner.surfaceId, parkedTurn === undefined ? {} : { turnId: parkedTurn });
-      this.turns.parkForHuman(parkedTurn);
-    } else {
-      this.#parkedForHuman.delete(owner.surfaceId);
+    const pending = this.#pendingAgentTools.get(owner.surfaceId);
+    if (pending === undefined) return { ok: false };
+    if (pending.phase === "held" || pending.phase === "completing") return { ok: true };
+    if (pending.phase === "settled") return { ok: false };
+    if (pending.phase === "running") {
+      pending.phase = "takeover-requested";
+      this.#event(owner);
     }
-    const now = new Date();
-    this.#writeLease(owner, {
-      surface_id: owner.surfaceId,
-      holder_is_human: 1,
-      holder_bot_id: owner.botId,
-      turn_id: null,
-      token: randomUUID(),
-      acquired_at: now.toISOString(),
-      expires_at: new Date(now.getTime() + 24 * 3600_000).toISOString(),
-    });
-    this.#event(owner);
-    return { ok: true, lease: this.state(owner).lease };
+
+    await pending.actionDone.promise;
+    const current = this.#pendingAgentTools.get(owner.surfaceId);
+    if (
+      current?.phase === "settled"
+      || current !== pending
+      || pending.cancellation !== undefined
+      || pending.actionError !== undefined
+    ) {
+      return { ok: false };
+    }
+    if (pending.phase === "takeover-requested") {
+      const now = new Date();
+      this.#writeLease(owner, {
+        surface_id: owner.surfaceId,
+        holder_is_human: 1,
+        holder_bot_id: owner.botId,
+        turn_id: pending.turnId,
+        token: randomUUID(),
+        acquired_at: now.toISOString(),
+        expires_at: new Date(now.getTime() + 24 * 3600_000).toISOString(),
+      });
+      pending.phase = "held";
+      pending.activated.resolve();
+      this.#event(owner);
+    }
+    return { ok: pending.phase === "held" || pending.phase === "completing" };
   }
 
-  async imDone(input: ComputerSurfaceOwner): Promise<{ observation?: string | null }> {
+  async imDone(input: ComputerSurfaceOwner): Promise<{ observation?: string }> {
     const owner = this.#requireOwner(input);
-    const lease = this.#lease(owner.surfaceId);
-    if (lease === undefined || !lease.holder_is_human) return {};
-    const result = await this.act(owner, undefined, { name: "observe", args: {} }, "human");
-    const parked = this.#parkedForHuman.get(owner.surfaceId);
-    this.#parkedForHuman.delete(owner.surfaceId);
-    this.#writeLease(owner, undefined);
-    if (parked !== undefined) {
-      const restored = await this.acquire(owner, parked.turnId);
-      if (restored.granted) this.turns.resumeAfterHuman(parked.turnId);
-    } else {
-      await this.#grantNext(owner);
+    const pending = this.#pendingAgentTools.get(owner.surfaceId);
+    if (pending === undefined || pending.phase !== "held") {
+      throw new Error("Takeover is not active");
     }
+    pending.phase = "completing";
     this.#event(owner);
-    return result?.text === undefined ? {} : { observation: result.text };
+    try {
+      await this.revokeWebControl(owner.surfaceId);
+      if (pending.cancellation !== undefined) throw pending.cancellation;
+      const context = await this.act(owner, pending.turnId, { name: "observe", args: {} }, "human");
+      if (pending.cancellation !== undefined) throw pending.cancellation;
+      const screenshot = await this.act(owner, pending.turnId, { name: "screenshot", args: {} }, "human");
+      if (pending.cancellation !== undefined) throw pending.cancellation;
+      const result = await this.#withImageFile(owner, {
+        ...context,
+        ...screenshot,
+        ...(context.text === undefined ? {} : { text: context.text }),
+        ...(context.windowList === undefined ? {} : { windowList: context.windowList }),
+      });
+      pending.phase = "settled";
+      this.#releaseHumanLease(pending);
+      pending.completion.resolve(result);
+      this.#event(owner);
+      return result.text === undefined ? {} : { observation: result.text };
+    } catch (error) {
+      if (pending.cancellation === undefined) {
+        pending.phase = "held";
+        this.#event(owner);
+      }
+      throw error;
+    }
+  }
+  canAcceptWebControl(input: ComputerSurfaceOwner): boolean {
+    const owner = this.resolveOwner(input.botId, input.surfaceId);
+    if (owner === undefined) return false;
+    const pending = this.#pendingAgentTools.get(owner.surfaceId);
+    if (pending !== undefined) return pending.phase === "held";
+    return this.#lease(owner.surfaceId) === undefined;
   }
 
   async #grantNext(owner: ComputerSurfaceOwner): Promise<void> {
@@ -297,7 +380,6 @@ export class ComputerBroker {
     } else {
       this.#parkedForEmergency.delete(owner.surfaceId);
     }
-    this.#parkedForHuman.delete(owner.surfaceId);
     this.#writeLease(owner, undefined);
     this.#event(owner);
   }
@@ -378,14 +460,10 @@ export class ComputerBroker {
   async agentToolAct(
     input: ComputerSurfaceOwner,
     turnId: string,
+    toolCallId: string,
     action: ComputerAction,
     signal: AbortSignal,
-  ): Promise<{
-    text?: string;
-    imageRef?: string;
-    imageFile?: { mediaType: "image/png" | "image/jpeg"; path: string };
-    windowList?: unknown;
-  }> {
+  ): Promise<AgentToolOutput> {
     const owner = this.#requireOwner(input);
     return this.#serializeAgentOperation(owner.surfaceId, async () => {
       signal.throwIfAborted();
@@ -412,32 +490,52 @@ export class ComputerBroker {
         }
       }
 
+      const pending: PendingAgentTool = {
+        owner,
+        turnId,
+        toolCallId,
+        phase: "running",
+        actionDone: deferred<void>(),
+        activated: deferred<void>(),
+        completion: deferred<AgentToolOutput>(),
+      };
+      pending.activated.promise.catch(() => {});
+      pending.completion.promise.catch(() => {});
+      this.#pendingAgentTools.set(owner.surfaceId, pending);
+      this.#event(owner);
+      const cancel = (): void => {
+        const reason = signal.reason instanceof Error
+          ? signal.reason
+          : new Error("computer tool call cancelled");
+        void this.#cancelPending(pending, reason);
+      };
+      signal.addEventListener("abort", cancel, { once: true });
+
       try {
-        signal.throwIfAborted();
-        const result = await this.act(owner, turnId, action);
-        signal.throwIfAborted();
-        if (result.imageRef === undefined) return result;
-        const artifact = this.db
-          .query(`SELECT media_type, path FROM artifacts WHERE id = ? AND surface_id = ?`)
-          .get(result.imageRef, owner.surfaceId) as {
-            media_type: string;
-            path: string;
-          } | null;
-        if (
-          artifact === null
-          || (artifact.media_type !== "image/png" && artifact.media_type !== "image/jpeg")
-        ) {
-          throw new Error("Bot Screen observation artifact is unavailable");
+        let initial: AgentToolOutput;
+        try {
+          await this.revokeWebControl(owner.surfaceId);
+          signal.throwIfAborted();
+          initial = await this.#withImageFile(owner, await this.act(owner, turnId, action));
+          signal.throwIfAborted();
+        } catch (error) {
+          pending.actionError = error;
+          throw error;
+        } finally {
+          pending.actionDone.resolve();
         }
-        return {
-          ...result,
-          imageFile: {
-            mediaType: artifact.media_type,
-            path: artifact.path,
-          },
-        };
+
+        if (pending.phase === "running") return initial;
+        if (pending.phase === "takeover-requested") await pending.activated.promise;
+        if (pending.cancellation !== undefined) throw pending.cancellation;
+        return await pending.completion.promise;
       } finally {
+        signal.removeEventListener("abort", cancel);
+        if (this.#pendingAgentTools.get(owner.surfaceId) === pending) {
+          this.#pendingAgentTools.delete(owner.surfaceId);
+        }
         if (acquiredToken !== undefined) this.release(owner, acquiredToken);
+        this.#event(owner);
       }
     });
   }
@@ -468,21 +566,75 @@ export class ComputerBroker {
 
   shutdown(): void {
     this.db.exec(`DELETE FROM computer_leases`);
+    for (const pending of this.#pendingAgentTools.values()) {
+      const error = new Error("daemon stopped during pending computer tool");
+      pending.cancellation = error;
+      pending.phase = "settled";
+      pending.activated.reject(error);
+      pending.completion.reject(error);
+    }
+    this.#pendingAgentTools.clear();
     this.#queues.clear();
-    this.#parkedForHuman.clear();
     this.#parkedForEmergency.clear();
     this.#emergencyStopped.clear();
     this.#snapshotCaches.clear();
   }
 
   #clearSurface(surfaceId: SurfaceId): void {
+    const pending = this.#pendingAgentTools.get(surfaceId);
+    if (pending !== undefined) {
+      void this.#cancelPending(pending, new Error("Computer Surface was removed during pending tool"));
+    }
     this.db.query(`DELETE FROM computer_leases WHERE surface_id = ?`).run(surfaceId);
     this.#queues.delete(surfaceId);
-    this.#parkedForHuman.delete(surfaceId);
     this.#parkedForEmergency.delete(surfaceId);
     this.#emergencyStopped.delete(surfaceId);
     this.#snapshotCaches.delete(surfaceId);
   }
+  async #withImageFile(
+    owner: ComputerSurfaceOwner,
+    result: { text?: string; imageRef?: string; windowList?: unknown },
+  ): Promise<AgentToolOutput> {
+    if (result.imageRef === undefined) return result;
+    const artifact = this.db
+      .query(`SELECT media_type, path FROM artifacts WHERE id = ? AND surface_id = ?`)
+      .get(result.imageRef, owner.surfaceId) as { media_type: string; path: string } | null;
+    if (
+      artifact === null
+      || (artifact.media_type !== "image/png" && artifact.media_type !== "image/jpeg")
+    ) {
+      throw new Error("Bot Screen observation artifact is unavailable");
+    }
+    return {
+      ...result,
+      imageFile: { mediaType: artifact.media_type, path: artifact.path },
+    };
+  }
+
+  async #cancelPending(pending: PendingAgentTool, error: Error): Promise<void> {
+    if (pending.cancellation !== undefined || pending.phase === "settled") return;
+    pending.cancellation = error;
+    const held = pending.phase === "held" || pending.phase === "completing";
+    pending.phase = "settled";
+    if (held) {
+      await this.revokeWebControl(pending.owner.surfaceId).catch(() => {});
+      this.#releaseHumanLease(pending);
+    }
+    pending.activated.reject(error);
+    pending.completion.reject(error);
+    this.#event(pending.owner);
+  }
+
+  #releaseHumanLease(pending: PendingAgentTool): void {
+    const lease = this.#lease(pending.owner.surfaceId);
+    if (
+      lease?.holder_is_human
+      && lease.turn_id === pending.turnId
+    ) {
+      this.#writeLease(pending.owner, undefined);
+    }
+  }
+
   async #serializeAgentOperation<T>(
     surfaceId: SurfaceId,
     operation: () => Promise<T>,

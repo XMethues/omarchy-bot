@@ -55,6 +55,7 @@ interface ProjectionSession {
   timer?: Timer | undefined;
   framesSent: number;
   captureInFlight: boolean;
+  inputSuspended: boolean;
 }
 
 interface InputController {
@@ -123,6 +124,7 @@ export class ScreenProjectionService {
   constructor(
     private readonly screens: BotScreenManager,
     private readonly diagnostics: InputDiagnostics,
+    private readonly canAcceptWebControl: (owner: ComputerSurfaceOwner) => boolean,
   ) {}
 
   async answer(owner: ComputerSurfaceOwner, offer: ScreenProjectionOfferDto): Promise<ScreenProjectionAnswerDto> {
@@ -144,6 +146,7 @@ export class ScreenProjectionService {
       state: "connecting",
       mode: "idle",
       sequence: 0,
+      inputSuspended: false,
       captureInFlight: false,
       framesSent: 0,
     };
@@ -228,6 +231,14 @@ export class ScreenProjectionService {
     }
   }
 
+  async revokeControl(surfaceId: SurfaceId): Promise<void> {
+    for (const session of this.#sessions.values()) {
+      if (session.source.surfaceId === surfaceId) session.inputSuspended = true;
+    }
+    const controller = this.#controllers.get(surfaceId);
+    if (controller !== undefined) await this.#revokeInput(controller);
+  }
+
   async shutdown(): Promise<void> {
     for (const session of [...this.#sessions.values()]) this.#close(session, false);
     await Promise.allSettled(this.#releaseBarriers.values());
@@ -283,6 +294,7 @@ export class ScreenProjectionService {
     session.timer = undefined;
     if (session.mode === "expanded" && mode !== "expanded") this.#revokeInputFor(session);
     const changed = session.mode !== mode;
+    if (mode !== "expanded" || changed) session.inputSuspended = false;
     session.mode = mode;
     session.state = mode;
     if (mode === "expanded" && (changed || !this.#isInputController(session))) this.#claimInput(session);
@@ -362,6 +374,10 @@ export class ScreenProjectionService {
       || typeof raw !== "string"
     ) {
       this.#rejectInput(session);
+      return;
+    }
+    if (!this.canAcceptWebControl(session.owner)) {
+      void this.#revokeInput(controller).catch(() => this.#close(session, true));
       return;
     }
     let parsed: unknown;
@@ -534,7 +550,9 @@ export class ScreenProjectionService {
       || session.mode !== "expanded"
       || session.input === undefined
       || !session.input.isOpen()
+      || !this.canAcceptWebControl(session.owner)
       || this.#isInputController(session)
+      || session.inputSuspended
     ) return;
     const surfaceId = session.source.surfaceId;
     const previous = this.#controllers.get(surfaceId);

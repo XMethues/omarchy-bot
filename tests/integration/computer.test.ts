@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import nodePath from "node:path";
-import type { EventEnvelope } from "../../packages/protocol/src/index.ts";
 import { handleComputerRequest } from "../../apps/daemon/src/api/computerRoutes.ts";
 import type { ComputerSurfaceOwner } from "../../apps/daemon/src/modules/computer/broker.ts";
 import type {
@@ -33,26 +32,6 @@ function computerPath(path: string, owner: SurfaceOwner): string {
   return `${path}${separator}botId=${encodeURIComponent(owner.botId)}&surfaceId=${encodeURIComponent(owner.surfaceId)}`;
 }
 
-function isResumeEvent(event: EventEnvelope, turnId: string): boolean {
-  const payload = event.payload;
-  return event.type === "turn.status"
-    && payload !== null
-    && typeof payload === "object"
-    && "turnId" in payload
-    && payload.turnId === turnId
-    && "to" in payload
-    && payload.to === "working";
-}
-
-function hasContextualComputerPayload(event: EventEnvelope): boolean {
-  const payload = event.payload;
-  return payload !== null
-    && typeof payload === "object"
-    && "botId" in payload
-    && "surfaceId" in payload
-    && typeof payload.botId === "string"
-    && typeof payload.surfaceId === "string";
-}
 
 async function waitForTurnStatus(h: Harness, turnId: string, status: string): Promise<void> {
   const deadline = Date.now() + 5_000;
@@ -68,10 +47,24 @@ async function waitForComputerState(
   h: Harness,
   owner: SurfaceOwner,
   expected: string,
-): Promise<{ botId: string; surfaceId: string; state: string; activity?: string; previewAt?: string }> {
+): Promise<{
+  botId: string;
+  surfaceId: string;
+  state: string;
+  takeover: "unavailable" | "available" | "active";
+  activity?: string;
+  previewAt?: string;
+}> {
   const deadline = Date.now() + 5_000;
   for (;;) {
-    const result = await computerRequest<{ botId: string; surfaceId: string; state: string; activity?: string; previewAt?: string }>(
+    const result = await computerRequest<{
+      botId: string;
+      surfaceId: string;
+      state: string;
+      takeover: "unavailable" | "available" | "active";
+      activity?: string;
+      previewAt?: string;
+    }>(
       h,
       "GET",
       computerPath("/api/computer/state", owner),
@@ -313,6 +306,7 @@ describe("contextual computer control", () => {
       ...owner,
       state: "unavailable",
       activity: "Screen unavailable.",
+      takeover: "unavailable",
     });
   }, 15_000);
 
@@ -354,6 +348,7 @@ describe("contextual computer control", () => {
       ...second,
       state: "ready",
       activity: "Screen ready.",
+      takeover: "unavailable",
     });
   });
 
@@ -528,39 +523,21 @@ describe("contextual computer control", () => {
       .toMatchObject({ ...second, state: "bot-using" });
   });
 
-  test("takeover parks and resumes only the owning Surface's active turn", async () => {
+  test("a nominal Bot lease cannot be converted into a turn-status Takeover", async () => {
     const botId = await makeBot(h, "Driver");
     const owner = await ownerFor(h, botId);
     const turn = await sendToBot(h, botId, "hang");
     await waitForTurnStatus(h, turn.turnId, "working");
     expect((await h.svc.computer.acquire(owner, turn.turnId)).granted).toBeTrue();
 
-    const taken = await computerRequest<{ state: string }>(
+    const taken = await computerRequest<{ error: string }>(
       h,
       "POST",
       computerPath("/api/computer/take-control", owner),
     );
-    expect(taken.body.state).toBe("user-control");
-    await waitForTurnStatus(h, turn.turnId, "waiting_for_input");
-
-    const returned = await computerRequest<{ state: string; botId: string; surfaceId: string }>(
-      h,
-      "POST",
-      computerPath("/api/computer/return-to-bot", owner),
-    );
-    expect(returned.body).toMatchObject({ ...owner, state: "bot-using" });
-    await waitForTurnStatus(h, turn.turnId, "working");
-
-    const events = h.svc.events.replay(0, h.svc.events.oldestCursor()).events;
-    const resumed = events.find((event) => isResumeEvent(event, turn.turnId));
-    const stateChanges = events.filter((event) => event.aggregateType === "computer");
-    expect(resumed).toBeDefined();
-    expect(stateChanges.length).toBeGreaterThan(0);
-    expect(stateChanges.every((event) =>
-      event.aggregateId === owner.surfaceId && event.type === "computer.state.changed"
-    )).toBeTrue();
-    expect(stateChanges.every(hasContextualComputerPayload)).toBeTrue();
-    expect(stateChanges.some((event) => event.cursor < resumed!.cursor)).toBeTrue();
+    expect(taken.response.status).toBe(409);
+    expect(taken.body.error).toBe("Takeover requires a pending computer tool.");
+    expect(h.svc.threads.turnRow(turn.turnId)?.status).toBe("working");
   });
 
   test("Surface-scoped emergency stop leaves another Bot Surface usable", async () => {

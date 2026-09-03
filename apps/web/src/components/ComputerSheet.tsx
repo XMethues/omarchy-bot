@@ -42,8 +42,8 @@ export interface ComputerSheetProps {
   loading?: boolean;
   onRetry?: () => void;
   onClose: () => void;
-  onTakeControl: () => void;
-  onReturnToBot: () => void;
+  onTakeControl: () => Promise<boolean>;
+  onReturnToBot: () => Promise<boolean>;
 }
 
 const STATE_LABELS: Record<ComputerViewDto["state"], string> = {
@@ -96,12 +96,17 @@ const localStyles = stylex.create({
   },
 });
 
-interface ComputerSheetContentProps extends Omit<ComputerSheetProps, "onClose" | "projectionUrl"> {
+interface ComputerSheetContentProps extends Omit<
+  ComputerSheetProps,
+  "onClose" | "projectionUrl" | "onTakeControl" | "onReturnToBot"
+> {
   compactHeading: boolean;
   projectionState: ScreenProjectionState;
   frameUrl?: string;
   onProjectionRetry: () => void;
   onExpandPreview?: () => void;
+  onTakeControl: () => void;
+  onContinueTakeover: () => void;
 }
 
 function ComputerSheetContent({
@@ -112,14 +117,14 @@ function ComputerSheetContent({
   loading = false,
   onRetry,
   onTakeControl,
-  onReturnToBot,
+  onContinueTakeover,
   compactHeading,
   projectionState,
   frameUrl,
   onProjectionRetry,
   onExpandPreview,
 }: ComputerSheetContentProps): JSX.Element {
-  const canTakeControl = view.state === "bot-using" || view.state === "needs-you";
+  const canTakeControl = view.takeover === "available";
   const projectionUnavailable = projectionState === "unavailable";
   const projectionWaiting = frameUrl === undefined && !projectionUnavailable;
 
@@ -207,13 +212,12 @@ function ComputerSheetContent({
             data-testid="computer-take-control"
           />
         ) : null}
-        {view.state === "user-control" && !loading ? (
+        {view.takeover === "active" && !loading ? (
           <Button
-            label="Return to bot"
+            label="Continue takeover"
             variant="primary"
             isLoading={busy}
-            onClick={onReturnToBot}
-            data-testid="computer-return-to-bot"
+            onClick={onContinueTakeover}
           />
         ) : null}
       </HStack>
@@ -229,6 +233,8 @@ export function ComputerSheet({
   projectionUrl,
   bot,
   view,
+  onTakeControl,
+  onReturnToBot,
   ...contentProps
 }: ComputerSheetProps): JSX.Element | null {
   const { isMobile: isSmallScreen } = useAppShellMobile();
@@ -396,11 +402,28 @@ export function ComputerSheet({
     if (event.target instanceof Element && event.target.closest("button") !== null) return;
     if (connectionRef.current?.paste(event.clipboardData.getData("text/plain")) === true) event.preventDefault();
   };
+  const beginTakeover = useCallback((): void => {
+    void onTakeControl()
+      .then((taken) => {
+        if (taken) setPreviewExpanded(true);
+      })
+      .catch(() => {});
+  }, [onTakeControl]);
+  const finishTakeover = useCallback((): void => {
+    void onReturnToBot()
+      .then((returned) => {
+        if (returned) setPreviewExpanded(false);
+      })
+      .catch(() => {});
+  }, [onReturnToBot]);
+
   const content = (
     <ComputerSheetContent
       {...contentProps}
       bot={bot}
       view={view}
+      onTakeControl={beginTakeover}
+      onContinueTakeover={() => setPreviewExpanded(true)}
       open={open}
       compactHeading={isSmallScreen}
       projectionState={projectionState}
@@ -417,7 +440,21 @@ export function ComputerSheet({
       media={{
         src: frameUrl,
         alt: `Expanded computer preview for ${bot.name}`,
-        caption: `${bot.name} computer — Web Control`,
+        caption:
+          view.takeover === "active" ? (
+            <HStack gap={2} vAlign="center">
+              <Text>{bot.name} computer — Web Control</Text>
+              <Button
+                label="I'm done"
+                variant="primary"
+                isLoading={contentProps.busy}
+                onClick={finishTakeover}
+                data-testid="computer-im-done"
+              />
+            </HStack>
+          ) : (
+            `${bot.name} computer — Web Control`
+          ),
       }}
       {...(previewExpanded
         ? {

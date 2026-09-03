@@ -187,6 +187,7 @@ export const ComputerViewDto = z.object({
   surfaceId: SurfaceIdDto,
   botId: z.string(),
   state: z.enum(["starting", "ready", "bot-using", "waiting", "needs-you", "user-control", "emergency-stopped", "unavailable"]),
+  takeover: z.enum(["unavailable", "available", "active"]),
   activity: z.string().optional(),
   previewAt: z.string().optional(),
 });

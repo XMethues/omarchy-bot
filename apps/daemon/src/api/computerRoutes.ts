@@ -10,7 +10,7 @@ function json(data: unknown, status = 200): Response {
 
 /** Maps lifecycle first, then one owning Bot's arbitration state. */
 export function computerView(state: ComputerBrokerState, lifecycle: BotScreenLifecycle): ComputerViewDto {
-  const identity = { botId: state.botId, surfaceId: state.surfaceId };
+  const identity = { botId: state.botId, surfaceId: state.surfaceId, takeover: state.takeover };
   const preview = state.lastImageAt === undefined ? {} : { previewAt: state.lastImageAt };
   if (lifecycle.state === "starting" || lifecycle.state === "stopped") {
     return { ...identity, state: "starting", activity: "Screen starting.", ...preview };
@@ -29,9 +29,6 @@ export function computerView(state: ComputerBrokerState, lifecycle: BotScreenLif
   }
   if (state.queuedTurnIds.length > 0) {
     return { ...identity, state: "waiting", activity: "Waiting for computer.", ...preview };
-  }
-  if (state.needsHuman) {
-    return { ...identity, state: "needs-you", activity: "This bot needs you at the computer.", ...preview };
   }
   return { ...identity, state: "ready", activity: "Screen ready.", ...preview };
 }
@@ -63,7 +60,8 @@ export async function handleComputerRequest(
   if (url.pathname === "/api/computer/state" && req.method === "GET") return json(currentView());
   if (url.pathname === "/api/computer/take-control" && req.method === "POST") {
     if (!await screens.ensureReady(owner)) return json(currentView(), 503);
-    computer.takeOver(owner);
+    const takeover = await computer.takeOver(owner);
+    if (!takeover.ok) return json({ error: "Takeover requires a pending computer tool." }, 409);
     return json(currentView());
   }
   if (url.pathname === "/api/computer/return-to-bot" && req.method === "POST") {
@@ -71,7 +69,10 @@ export async function handleComputerRequest(
     try {
       await computer.imDone(owner);
       return json(currentView());
-    } catch {
+    } catch (error) {
+      if (error instanceof Error && error.message === "Takeover is not active") {
+        return json({ error: "Takeover is not active." }, 409);
+      }
       return json({ error: "The computer could not be observed. You still have control." }, 502);
     }
   }

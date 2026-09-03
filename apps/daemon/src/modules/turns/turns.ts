@@ -362,7 +362,7 @@ export class TurnService {
       throw new Error("computer tool call was already dispatched");
     }
     active.computerToolSurfaces.set(context.toolCallId, owner.surfaceId);
-    return computer.agentToolAct(owner, context.turnId, request.action, signal);
+    return computer.agentToolAct(owner, context.turnId, context.toolCallId, request.action, signal);
   }
 
   /** Central agent-event router: worker events become transcript activity and turn transitions. */
@@ -594,7 +594,7 @@ export class TurnService {
   }
 
 
-  /** Computer lease handover: Take over parks the driving turn in waiting_for_input. */
+  /** Legacy Emergency Control status handoff; Takeover stays inside its pending tool RPC. */
   parkForHuman(turnId: string | undefined): void {
     if (turnId !== undefined) this.#setTurnStatus(turnId, "waiting_for_input");
   }

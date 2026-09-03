@@ -76,7 +76,7 @@ export async function main(options: MainOptions = {}): Promise<{ stop: () => Pro
       : { applicationBin: process.env.OMARCHY_BOT_SCREEN_APP_BIN }),
   });
   const screens = new BotScreenManager(db, options.botScreenAdapter ?? productionScreenAdapter);
-  const projections = new ScreenProjectionService(screens, new InputDiagnostics(db));
+  let projections!: ScreenProjectionService;
 
   const events = new EventLog(db);
   events.subscribe((event) => {
@@ -96,7 +96,19 @@ export async function main(options: MainOptions = {}): Promise<{ stop: () => Pro
   const avatars = new AvatarService(bots, supervisor, cfg.avatarsDir);
   const botDeletions = new BotDeletionService(db, events, attachments, avatars, agents, supervisor);
   const turns: TurnService = new TurnService(db, events, threads, agents, bots, attachments, supervisor, cfg);
-  const computer = new ComputerBroker(db, events, turns, screens, cfg);
+  const computer = new ComputerBroker(
+    db,
+    events,
+    turns,
+    screens,
+    cfg,
+    (surfaceId) => projections.revokeControl(surfaceId),
+  );
+  projections = new ScreenProjectionService(
+    screens,
+    new InputDiagnostics(db),
+    (owner) => computer.canAcceptWebControl(owner),
+  );
 
   agents.init();
 

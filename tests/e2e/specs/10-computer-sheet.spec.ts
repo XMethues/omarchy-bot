@@ -223,11 +223,12 @@ async function fulfillProjection(route: Route): Promise<boolean> {
   });
   return true;
 }
-
 test.describe("contextual computer sheet", () => {
-  test("shows selected-bot state, takeover handoff, preview, and no arbitration jargon", async ({ page }) => {
+  test("offers tool-scoped Takeover while close and reconnect leave the same tool waiting", async ({ page }) => {
     await installProjectionPeer(page);
     let state: ComputerState = "ready";
+    let takeover: "unavailable" | "available" | "active" = "available";
+    let returnCalls = 0;
     let activeBotId: string | undefined;
     await page.route("**/api/computer/**", async (route) => {
       const request = route.request();
@@ -237,8 +238,15 @@ test.describe("contextual computer sheet", () => {
         await route.fulfill({ status: 200, contentType: "image/png", body: PNG });
         return;
       }
-      if (url.pathname === "/api/computer/take-control") state = "user-control";
-      if (url.pathname === "/api/computer/return-to-bot") state = "ready";
+      if (url.pathname === "/api/computer/take-control") {
+        state = "user-control";
+        takeover = "active";
+      }
+      if (url.pathname === "/api/computer/return-to-bot") {
+        returnCalls += 1;
+        state = "ready";
+        takeover = "unavailable";
+      }
       const selectedBotId = url.searchParams.get("botId") ?? undefined;
       const surfaceId = url.searchParams.get("surfaceId") ?? undefined;
       const selectedState: ComputerState =
@@ -246,6 +254,7 @@ test.describe("contextual computer sheet", () => {
       await fulfillJson(route, {
         state: selectedState,
         botId: selectedBotId,
+        takeover,
         surfaceId,
         activity:
           selectedState === "bot-using"
@@ -290,15 +299,26 @@ test.describe("contextual computer sheet", () => {
     await expect(page.getByAltText("Expanded computer preview for Computer Bot")).toBeHidden();
     await expect(drawer).toBeVisible();
     await expect(sheet.getByRole("button", { name: "Take control" })).toBeVisible();
-    await expect(sheet.getByRole("button", { name: "Return to bot" })).toHaveCount(0);
+    await expect(sheet.getByRole("button", { name: "Continue takeover" })).toHaveCount(0);
 
     await sheet.getByRole("button", { name: "Take control" }).click();
-    await expect(sheet.getByRole("button", { name: "Return to bot" })).toBeVisible();
-    await expect(sheet.getByRole("button", { name: "Take control" })).toHaveCount(0);
+    await expect(page.getByTestId("expanded-web-control")).toBeVisible();
+    await expect(page.getByRole("button", { name: "I'm done" })).toBeVisible();
+    await page.getByTestId("expanded-web-control").getByRole("button", { name: "Close", exact: true }).click();
+    await expect(page.getByTestId("expanded-web-control")).toBeHidden();
+    expect(returnCalls).toBe(0);
+    await expect(sheet.getByRole("button", { name: "Continue takeover" })).toBeVisible();
+    await page.reload();
+    expect(returnCalls).toBe(0);
+    await page.getByRole("button", { name: "Open computer", exact: true }).click();
+    await expect(sheet.getByRole("button", { name: "Continue takeover" })).toBeVisible();
 
-    await sheet.getByRole("button", { name: "Return to bot" }).click();
+    await sheet.getByRole("button", { name: "Continue takeover" }).click();
+    await expect(page.getByRole("button", { name: "I'm done" })).toBeVisible();
+    await page.getByRole("button", { name: "I'm done" }).click();
     await expect(sheet).toContainText("Screen ready");
-    await expect(sheet.getByRole("button", { name: "Return to bot" })).toHaveCount(0);
+    expect(returnCalls).toBe(1);
+    await expect(sheet.getByRole("button", { name: "Continue takeover" })).toHaveCount(0);
     await page.getByRole("button", { name: "Close computer drawer" }).click();
     await expect(drawer).toBeHidden();
     await expect(trigger).toBeFocused();

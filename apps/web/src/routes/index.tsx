@@ -410,7 +410,7 @@ function HomeScreen(): JSX.Element {
         ? {
             safetyControl: (
               <EmergencyComputerControl
-                view={computer.data ?? { botId: bot.id, surfaceId: bot.surfaceId, state: "unavailable" }}
+                view={computer.data ?? { botId: bot.id, surfaceId: bot.surfaceId, state: "unavailable", takeover: "unavailable" }}
                 busy={computerAction.isPending}
                 onEmergencyStop={() => computerAction.mutate("stop")}
                 onResume={() => computerAction.mutate("resume")}
@@ -467,6 +467,7 @@ function HomeScreen(): JSX.Element {
                     botId: bot.id,
                     surfaceId: bot.surfaceId,
                     state: "unavailable",
+                    takeover: "unavailable",
                     activity:
                       computer.error !== null
                         ? apiErrorMessage(computer.error, "Computer status could not be loaded.")
@@ -481,8 +482,8 @@ function HomeScreen(): JSX.Element {
               {...(computer.error !== null ? { onRetry: () => void computer.refetch() } : {})}
               {...(computerError !== undefined ? { error: computerError } : {})}
               onClose={() => setComputerOpen(false)}
-              onTakeControl={() => computerAction.mutate("take")}
-              onReturnToBot={() => computerAction.mutate("return")}
+              onTakeControl={() => computerAction.mutateAsync("take").then(() => true, () => false)}
+              onReturnToBot={() => computerAction.mutateAsync("return").then(() => true, () => false)}
             />
           ) : undefined
         }

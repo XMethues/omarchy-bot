@@ -4,7 +4,7 @@ import path from "node:path";
 import rtc, { type DataChannel, type PeerConnection } from "node-datachannel";
 import type { ComputerSurfaceOwner } from "../../apps/daemon/src/modules/computer/broker.ts";
 import { FakeBotScreenRuntimeAdapter } from "../../apps/daemon/src/modules/computer/fakeBotScreenRuntime.ts";
-import { api, makeBot, startDaemon, type Harness } from "./helpers/harness.ts";
+import { api, makeBot, sendToBot, startDaemon, waitThreadIdle, type Harness } from "./helpers/harness.ts";
 
 const EXPECTED_PNG_BASE64 =
   "iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAYAAAD0In+KAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAADklEQVQImWMQMgn7D8IAC5MDN627upEAAAAASUVORK5CYII=";
@@ -117,7 +117,8 @@ async function connectProjection(
   return { peer, control, input, answer };
 }
 
-function authority(input: DataChannel): Promise<{
+function authority(input: DataChannel, active = true): Promise<{
+  active: boolean;
   surfaceId: string;
   runtimeGeneration: number;
   geometryGeneration: number;
@@ -127,7 +128,9 @@ function authority(input: DataChannel): Promise<{
     input.onMessage((raw) => {
       if (typeof raw !== "string") return;
       const message = JSON.parse(raw) as { type?: string };
-      if (message.type === "input-authority") resolve(message as never);
+      if (message.type === "input-authority" && "active" in message && message.active === active) {
+        resolve(message as never);
+      }
     });
   });
 }
@@ -273,6 +276,81 @@ describe("expanded pointer Web Control", () => {
     for (const connectedPeer of peers) connectedPeer.close();
     await h.stop();
   });
+
+  test("excludes browser input during a pending Bot action and grants it only for the held Takeover", async () => {
+    const runtime = new FakeBotScreenRuntimeAdapter();
+    runtime.blockActions();
+    h = await startDaemon(undefined, { botScreenAdapter: runtime });
+    const botId = await makeBot(h, "Takeover controlled screen");
+    const owner = await ownerFor(h, botId);
+    const projection = await connectProjection(h, owner, "takeover-browser");
+    peers.push(projection.peer);
+
+    const standaloneAuthority = authority(projection.input);
+    projection.control.sendMessage(JSON.stringify({
+      version: 1,
+      type: "view",
+      surfaceId: owner.surfaceId,
+      runtimeGeneration: 1,
+      mode: "expanded",
+    }));
+    await standaloneAuthority;
+
+    const revokedForBot = authority(projection.input, false);
+    const turn = await sendToBot(h, botId, "computer:click:takeover");
+    await revokedForBot;
+    await runtime.waitForReleases(1);
+    await runtime.waitForActions(1);
+    expect(runtime.inputEvents).toHaveLength(0);
+
+    const path = `botId=${encodeURIComponent(owner.botId)}&surfaceId=${encodeURIComponent(owner.surfaceId)}`;
+    const available = await fetch(`${h.baseUrl}/api/computer/state?${path}`).then((response) => response.json());
+    expect(available).toMatchObject({ takeover: "available", state: "bot-using" });
+    const takeover = fetch(`${h.baseUrl}/api/computer/take-control?${path}`, { method: "POST" });
+    await fetch(`${h.baseUrl}/api/computer/state?${path}`);
+    runtime.releaseActions();
+    const taken = await takeover;
+    expect(taken.status).toBe(200);
+    expect(await taken.json()).toMatchObject({ takeover: "active", state: "user-control" });
+
+    projection.control.sendMessage(JSON.stringify({
+      version: 1,
+      type: "view",
+      surfaceId: owner.surfaceId,
+      runtimeGeneration: 1,
+      mode: "preview",
+    }));
+    const takeoverAuthority = authority(projection.input);
+    projection.control.sendMessage(JSON.stringify({
+      version: 1,
+      type: "view",
+      surfaceId: owner.surfaceId,
+      runtimeGeneration: 1,
+      mode: "expanded",
+    }));
+    const grant = await takeoverAuthority;
+    projection.input.sendMessage(JSON.stringify({
+      version: 1,
+      type: "pointer-motion",
+      surfaceId: owner.surfaceId,
+      runtimeGeneration: 1,
+      geometryGeneration: 1,
+      controllerEpoch: grant.controllerEpoch,
+      sequence: 1,
+      x: 100,
+      y: 120,
+    }));
+    await runtime.waitForInputEvents(1);
+
+    const revokedWhenDone = authority(projection.input, false);
+    const returned = await fetch(`${h.baseUrl}/api/computer/return-to-bot?${path}`, { method: "POST" });
+    await revokedWhenDone;
+    expect(returned.status).toBe(200);
+    expect(await returned.json()).toMatchObject({ takeover: "unavailable" });
+    await waitThreadIdle(h, turn.threadId);
+    expect(runtime.releaseCount).toBeGreaterThanOrEqual(2);
+    expect(runtime.inputEvents).toHaveLength(1);
+  }, 20_000);
 
   test("binds ordered pointer input to the current Surface, runtime, geometry, controller, and sequence", async () => {
     const runtime = new FakeBotScreenRuntimeAdapter(undefined, { pointerDelayMs: 20 });
