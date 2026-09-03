@@ -88,9 +88,9 @@ test.describe("Bot profiles and avatars", () => {
 
 
   test("shows selected and streaming activity without moving transcript content", async ({ page }) => {
-    await createBot(page, "Activity Avatar Bot");
+    const botId = await createBot(page, "Activity Avatar Bot");
     await page.emulateMedia({ reducedMotion: "no-preference" });
-    const selectedAvatar = page.getByRole("button", { name: "Activity Avatar Bot", exact: true }).getByTestId("avatar-view");
+    const selectedAvatar = page.getByTestId(`sidebar-bot-${botId}`).getByTestId("avatar-view");
     await expect(selectedAvatar).toHaveAttribute("data-avatar-activity", "selected");
     await expect(selectedAvatar.locator('[role="presentation"][aria-hidden="true"]')).toBeVisible();
     const selectedSvg = await avatarSvg(selectedAvatar);

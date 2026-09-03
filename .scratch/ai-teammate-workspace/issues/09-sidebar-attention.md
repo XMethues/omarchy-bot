@@ -8,7 +8,7 @@
 
 - [x] Unpinned Bots sort by latest activity and pinned Bots remain above them.
 - [x] Pin and unpin actions persist without changing Thread recency.
-- [x] Each row shows avatar, name, latest useful preview, relative time, and relevant working/waiting/action-needed/error state.
+- [x] Each heading-free row shows a large avatar, Bot name, latest Agent-output excerpt, and relevant working/waiting/action-needed/error state.
 - [x] Archived Bots do not appear in the active list.
 - [x] A Bot becomes unread when new background output arrives.
 - [x] Unread clears only after the user opens that Bot and reaches its latest message.
@@ -19,5 +19,5 @@
 
 ## Answer
 
-Implemented deterministic pinned/recent ordering, previews and relative activity, persisted pin/read state, precise latest-message unread clearing, jump-to-latest behavior, replay-safe desktop notifications, and most-recent startup selection.
+Implemented deterministic pinned/recent ordering, two-line Bot summaries backed only by the latest Agent output, persisted pin/read state, precise latest-message unread clearing, jump-to-latest behavior, replay-safe desktop notifications, and most-recent startup selection.
 

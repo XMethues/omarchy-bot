@@ -53,11 +53,10 @@ There is no persistent global TopNav.
 
 ## 3. Sidebar
 
-Each row represents one persistent Bot—user-created or conservatively preserved from legacy data—and never an enabled Agent-inventory entry. It shows:
+The list has no visible section heading: the surrounding navigation already establishes the context. Each row represents one persistent Bot—user-created or conservatively preserved from legacy data—and never an enabled Agent-inventory entry. It shows:
 
-- avatar and name;
-- recent-message preview;
-- relative time;
+- a large avatar with the Bot's display name;
+- a one-line excerpt of that Bot's latest Agent output;
 - unread state;
 - working, waiting, action-needed, or error state when relevant.
 

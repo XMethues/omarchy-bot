@@ -278,10 +278,10 @@ export class BotsService {
       .run(kind, recipe === undefined ? "" : JSON.stringify(recipe), avatarFile, now, id);
   }
 
-  recordActivity(botId: string, threadId: string, previewText: string, assistantMessage: boolean): void {
+  recordActivity(botId: string, threadId: string, text: string, assistantMessage: boolean): void {
     const now = new Date().toISOString();
-    const preview = previewText.replace(/\s+/g, " ").trim().slice(0, 120);
     if (assistantMessage) {
+      const preview = text.replace(/\s+/g, " ").trim().slice(0, 120);
       this.db
         .query(`INSERT INTO bot_state (bot_id, last_activity_at, preview_text, preview_at, unread_count, unread_thread_id)
                 VALUES (?, ?, ?, ?, 1, ?)
@@ -292,19 +292,18 @@ export class BotsService {
                   unread_count = bot_state.unread_count + 1,
                   unread_thread_id = excluded.unread_thread_id`)
         .run(botId, now, preview, now, threadId);
-    } else {
-      // User activity updates recency/preview without stealing the boundary
-      // from unread output that may belong to another Thread.
-      this.db
-        .query(`INSERT INTO bot_state (bot_id, last_activity_at, preview_text, preview_at)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(bot_id) DO UPDATE SET
-                  last_activity_at = excluded.last_activity_at,
-                  preview_text = excluded.preview_text,
-                  preview_at = excluded.preview_at`)
-        .run(botId, now, preview, now);
+      this.events.append("bot", botId, "bot.activity", { threadId, preview, at: now });
+      return;
     }
-    this.events.append("bot", botId, "bot.activity", { threadId, preview, at: now });
+
+    // User input changes recency without replacing the latest Agent output.
+    this.db
+      .query(`INSERT INTO bot_state (bot_id, last_activity_at)
+              VALUES (?, ?)
+              ON CONFLICT(bot_id) DO UPDATE SET
+                last_activity_at = excluded.last_activity_at`)
+      .run(botId, now);
+    this.events.append("bot", botId, "bot.activity", { threadId, at: now });
   }
 
   #recordUnreadOutput(botId: string, threadId: string): void {

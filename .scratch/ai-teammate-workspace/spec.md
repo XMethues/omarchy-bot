@@ -38,7 +38,7 @@ The product uses Astryx primitives, local managed storage for attachments and av
 16. As an Omarchy user, I want deleting a Bot to leave the referenced Agent installation untouched, so that other Bots remain usable.
 17. As an existing user, I want legacy rows with user-owned conversation, profile, or configuration data preserved as Bots while Agent inventory remains only Agents, so that redesigning the model neither erases my work nor invents teammates.
 18. As an Omarchy user, I want the Sidebar to contain only user-created or conservatively preserved Bots, so that it represents my team rather than an Agent inventory.
-19. As an Omarchy user, I want each Bot row to show avatar, name, recent preview, time, unread state, and relevant activity, so that I can scan my team quickly.
+19. As an Omarchy user, I want each heading-free Bot row to show a large avatar, Bot name, latest Agent-output excerpt, unread state, and relevant activity, so that I can scan my team quickly.
 20. As an Omarchy user, I want Bots ordered by recent activity, so that current work stays easy to reach.
 21. As an Omarchy user, I want to pin important Bots above recency ordering, so that stable teammates remain accessible.
 22. As an Omarchy user, I want opening the application to select the most recently active Bot, so that I return to current work.
@@ -155,7 +155,7 @@ The product uses Astryx primitives, local managed storage for attachments and av
 - API integration tests extend the existing daemon harness and fake worker prior art. Fakes model public worker/subprocess protocols, not daemon internals.
 - Browser E2E is the user seam for Sidebar ordering/pinning/unread, Bot creation and editing, responsive History, blank Thread, window-local drafts, attachment staging, dictation states, streaming scroll behavior, collapsed Activity, responsive Computer and preview Lightbox, navigation drawer, keyboard navigation, focus restoration, Appearance/system theme, accessible avatars, and reduced motion.
 - Browser E2E is role-first: interact through accessible roles and visible names, use test ids only when no semantic seam exists, and never depend on CSS classes or component implementation names. Accessibility checks include automated axe coverage plus focused keyboard scenarios.
-- Visual regression covers representative light/dark desktop and narrow-window states, selected/working current and legacy DiceBear avatar states, reduced motion, long transcript, errors, the docked Computer drawer, expanded preview modal, and contextual Takeover.
+- Visual regression covers representative light/dark desktop and narrow-window states, selected and working current DiceBear avatar states, reduced motion, long transcript, errors, the docked Computer drawer, expanded preview modal, and contextual Takeover.
 - Agent worker conformance is the adapter seam. It verifies the exact installed version's session lifecycle, stream boundaries, attachments, native cancellation, steering where claimed, native events, capability inventory evidence, restart recovery, and truthful unsupported modalities such as Pi image input.
 - Unsupported capability entries are tested as truthful absence, not as mocked emulation.
 - Computer tests verify that observation remains available without input ownership, input cannot interleave, Takeover parks Bot input, Return to Bot re-observes, waiting state is scoped to the affected Bot, and emergency stop revokes input.

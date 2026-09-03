@@ -62,11 +62,13 @@ test.describe("Sidebar attention", () => {
     await sendAndWait(page, "say: older useful preview");
     const pinnedThreadId = await currentThreadId(page);
 
-    await page.getByRole("navigation", { name: "Bot navigation" })
-      .getByRole("button", { name: `Actions for ${pinnedBotName}` })
-      .click();
+    const navigation = page.getByRole("navigation", { name: "Bot navigation" });
+    const pinnedBotActions = navigation.getByRole("button", { name: `Actions for ${pinnedBotName}` });
+    await pinnedBotActions.click();
     await page.getByRole("menuitem", { name: /^Pin/ }).click();
-    await expect(page.getByRole("navigation", { name: "Bot navigation" }).getByText("Pinned", { exact: true })).toBeVisible();
+    await pinnedBotActions.click();
+    await expect(page.getByRole("menuitem", { name: /^Unpin/ })).toBeVisible();
+    await page.keyboard.press("Escape");
     await expect(page.getByRole("button", { name: pinnedBotName, exact: true })).toBeVisible();
 
     const recentBotName = `Recent unpinned ${Date.now()}`;

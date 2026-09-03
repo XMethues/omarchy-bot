@@ -296,9 +296,21 @@ test.describe("ticket 13 responsive, accessible, and visual QA", () => {
     await seedWorkspaceApi(page);
     await gotoSeededWorkspace(page);
 
-    const selectedAvatar = page
-      .getByRole("button", { name: "Release Partner", exact: true })
-      .getByTestId("avatar-view");
+    const selectedRow = page.getByTestId(`sidebar-bot-${PRIMARY_BOT_ID}`);
+    const selectedButton = selectedRow.getByRole("button", { name: "Release Partner", exact: true });
+    const selectedPreview = selectedButton.getByText("The release checklist is ready.", { exact: true });
+    await expect(selectedPreview).toBeVisible();
+
+    const selectedAvatar = selectedRow.getByTestId("avatar-view");
+    const selectedAvatarBox = await selectedAvatar.boundingBox();
+    const selectedNameBox = await selectedButton.getByText("Release Partner", { exact: true }).boundingBox();
+    const selectedPreviewBox = await selectedPreview.boundingBox();
+    if (!selectedAvatarBox || !selectedNameBox || !selectedPreviewBox) {
+      throw new Error("Sidebar Bot summary geometry is unavailable");
+    }
+    expect(selectedAvatarBox.width).toBeGreaterThanOrEqual(48);
+    expect(selectedPreviewBox.y).toBeGreaterThan(selectedNameBox.y);
+
     const selectedImage = selectedAvatar.getByTestId("avatar-shapes").locator("img");
     const selectedSrc = await selectedImage.getAttribute("src");
     expect(selectedSrc).toMatch(/^data:image\/svg\+xml/);
@@ -306,9 +318,7 @@ test.describe("ticket 13 responsive, accessible, and visual QA", () => {
     expect(selectedSvg).toContain("@keyframes");
     expect(selectedSvg).toContain("prefers-reduced-motion");
 
-    const idleAvatar = page
-      .getByRole("button", { name: "Offline Researcher", exact: true })
-      .getByTestId("avatar-view");
+    const idleAvatar = page.getByTestId(`sidebar-bot-${SECONDARY_BOT_ID}`).getByTestId("avatar-view");
     const idleSrc = await idleAvatar.getByTestId("avatar-shapes").locator("img").getAttribute("src");
     const idleSvg = decodeURIComponent(idleSrc!.slice(idleSrc!.indexOf(",") + 1));
     expect(idleSvg).not.toContain("@keyframes");
@@ -523,9 +533,7 @@ test.describe("ticket 13 responsive, accessible, and visual QA", () => {
     await seedWorkspaceApi(page, { primaryStatus: "working" });
     await gotoSeededWorkspace(page);
 
-    const workingAvatar = page
-      .getByRole("button", { name: "Release Partner", exact: true })
-      .getByTestId("avatar-view");
+    const workingAvatar = page.getByTestId(`sidebar-bot-${PRIMARY_BOT_ID}`).getByTestId("avatar-view");
     await expect(workingAvatar).toHaveCSS("animation-name", "none");
     await captureWorkspace(page, "ticket-13-workspace-reduced-motion-dark.png");
   });

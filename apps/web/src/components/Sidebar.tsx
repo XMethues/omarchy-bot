@@ -9,11 +9,11 @@ import {
 import { Plus } from "lucide-react";
 import { AlertDialog } from "@astryxdesign/core/AlertDialog";
 import { DropdownMenu } from "@astryxdesign/core/DropdownMenu";
+import { Item } from "@astryxdesign/core/Item";
 import { Badge } from "@astryxdesign/core/Badge";
 import { Icon } from "@astryxdesign/core/Icon";
 import { StatusDot } from "@astryxdesign/core/StatusDot";
 import { IconButton } from "@astryxdesign/core/IconButton";
-import { Timestamp } from "@astryxdesign/core/Timestamp";
 import { VStack } from "@astryxdesign/core/VStack";
 import { HStack } from "@astryxdesign/core/HStack";
 import { Text } from "@astryxdesign/core/Text";
@@ -177,7 +177,7 @@ export function Sidebar({
             </HStack>
           }
         >
-          <SideNavSection title="Bots">
+          <SideNavSection title="Bots" isHeaderHidden>
             {pinError !== undefined ? (
               <Text role="alert">{pinError}</Text>
             ) : null}
@@ -187,25 +187,49 @@ export function Sidebar({
               </VStack>
             ) : (
               ordered.map((bot) => (
-                <VStack key={bot.id} gap={0.5}>
-                  <SideNavItem
-                    onClick={() => {
-                      onSelectBot(bot.id);
-                      if (isMobile) closeMobileNav();
-                    }}
-                    isSelected={bot.id === selectedBotId}
-                    icon={
-                      <AvatarView
-                        avatar={bot.avatar}
-                        name={bot.name}
-                        size="sm"
-                        activity={bot.status === "working" ? "working" : bot.id === selectedBotId ? "selected" : "idle"}
-                        decorative
-                      />
-                    }
-                    label={bot.name}
-                    aria-label={bot.name}
-                    actions={
+                <Item
+                  key={bot.id}
+                  startContent={
+                    <AvatarView
+                      avatar={bot.avatar}
+                      name={bot.name}
+                      size="lg"
+                      activity={bot.status === "working" ? "working" : bot.id === selectedBotId ? "selected" : "idle"}
+                      decorative
+                    />
+                  }
+                  label={bot.name}
+                  labelLines={1}
+                  description={
+                    <Text aria-hidden="true" type="supporting" color="secondary" maxLines={1}>
+                      {bot.previewText ?? "No output yet"}
+                    </Text>
+                  }
+                  descriptionLines={1}
+                  density="compact"
+                  isSelected={bot.id === selectedBotId}
+                  onClick={() => {
+                    onSelectBot(bot.id);
+                    if (isMobile) closeMobileNav();
+                  }}
+                  aria-label={bot.name}
+                  endContent={
+                    <HStack gap={1} vAlign="center">
+                      {bot.status !== "idle" ? (
+                        <StatusDot
+                          variant={STATUS_VARIANT[bot.status]}
+                          label={STATUS_LABEL[bot.status]}
+                          tooltip={STATUS_LABEL[bot.status]}
+                        />
+                      ) : null}
+                      {bot.unreadCount > 0 ? (
+                        <Badge
+                          variant="blue"
+                          label={bot.unreadCount}
+                          aria-label={`${bot.unreadCount} unread ${bot.unreadCount === 1 ? "message" : "messages"}`}
+                          data-testid={`sidebar-unread-${bot.id}`}
+                        />
+                      ) : null}
                       <DropdownMenu
                         button={{
                           label: `Actions for ${bot.name}`,
@@ -232,49 +256,10 @@ export function Sidebar({
                         alignment="end"
                         hasChevron={false}
                       />
-                    }
-                    data-testid={`sidebar-bot-${bot.id}`}
-                  />
-                  <VStack gap={0.5} paddingInline={3}>
-                    <Text type="supporting" color="secondary" maxLines={1}>
-                      {bot.previewText ?? "No messages yet"}
-                    </Text>
-                    <HStack gap={1} vAlign="center" wrap="wrap">
-                      {bot.previewAt !== undefined ? (
-                        <Timestamp value={bot.previewAt} format="relative_short" isLive />
-                      ) : null}
-                      {bot.status !== "idle" ? (
-                        <>
-                          <StatusDot
-                            variant={STATUS_VARIANT[bot.status]}
-                            label={STATUS_LABEL[bot.status]}
-                            tooltip={STATUS_LABEL[bot.status]}
-                          />
-                          <Text type="supporting" color="secondary">
-                            {STATUS_LABEL[bot.status]}
-                          </Text>
-                        </>
-                      ) : null}
-                      {bot.unreadCount > 0 ? (
-                        <Badge
-                          variant="blue"
-                          label={bot.unreadCount}
-                          aria-label={`${bot.unreadCount} unread ${bot.unreadCount === 1 ? "message" : "messages"}`}
-                          data-testid={`sidebar-unread-${bot.id}`}
-                        />
-                      ) : null}
-                      {bot.pinned ? (
-                        <Text
-                          type="supporting"
-                          color="secondary"
-                          data-testid={`sidebar-pinned-${bot.id}`}
-                        >
-                          Pinned
-                        </Text>
-                      ) : null}
                     </HStack>
-                  </VStack>
-                </VStack>
+                  }
+                  data-testid={`sidebar-bot-${bot.id}`}
+                />
               ))
             )}
           </SideNavSection>

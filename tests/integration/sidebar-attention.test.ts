@@ -32,6 +32,15 @@ describe("Sidebar attention", () => {
     expect(active[0]?.previewText?.length).toBe(120);
   });
 
+  test("keeps the latest Agent output while a user follow-up is in flight", async () => {
+    const botId = await makeBot(h, "Output preview");
+    h.svc.bots.recordActivity(botId, "thread-preview", "Agent result remains visible", true);
+    h.svc.bots.recordActivity(botId, "thread-preview", "User follow-up must not replace output", false);
+
+    const bot = await api<BotViewDto>(h, "GET", `/api/bots/${botId}`);
+    expect(bot.previewText).toBe("Agent result remains visible");
+  });
+
   test("persists pin and unpin without mutating Thread recency", async () => {
     const botId = await makeBot(h, "Pin target");
     const sent = await sendToBot(h, botId, "say: preserve thread recency");
