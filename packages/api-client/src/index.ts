@@ -236,8 +236,8 @@ export class ApiClient {
   resumeComputer(owner: ComputerSurfaceOwner): Promise<ComputerViewDto> {
     return this.req(this.computerPath("/api/computer/resume", owner), { method: "POST" });
   }
-  computerImageUrl(owner: ComputerSurfaceOwner): string {
-    return `${this.base}${this.computerPath("/api/computer/snapshot", owner)}&t=${Date.now()}`;
+  computerProjectionUrl(owner: ComputerSurfaceOwner): string {
+    return `${this.base}${this.computerPath("/api/computer/projection", owner)}`;
   }
 
   private computerPath(path: string, owner: ComputerSurfaceOwner): string {

@@ -473,7 +473,7 @@ function HomeScreen(): JSX.Element {
                         : "Computer state is loading.",
                   }
               }
-              snapshotUrl={api.computerImageUrl({ botId: bot.id, surfaceId: bot.surfaceId })}
+              projectionUrl={api.computerProjectionUrl({ botId: bot.id, surfaceId: bot.surfaceId })}
               open={computerOpen}
               returnFocusRef={computerTriggerRef}
               busy={computerAction.isPending}

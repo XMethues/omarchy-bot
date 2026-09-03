@@ -192,6 +192,64 @@ export const ComputerViewDto = z.object({
 });
 export type ComputerViewDto = z.infer<typeof ComputerViewDto>;
 
+export const SCREEN_PROJECTION_PROTOCOL_VERSION = 1 as const;
+export const SCREEN_FRAME_CHANNEL = "screen.frames.v1" as const;
+export const SCREEN_CONTROL_CHANNEL = "screen.control.v1" as const;
+export const SCREEN_INPUT_CHANNEL = "screen.input.v1" as const;
+
+export const ScreenProjectionModeDto = z.enum(["idle", "preview", "expanded"]);
+export type ScreenProjectionModeDto = z.infer<typeof ScreenProjectionModeDto>;
+
+export const ScreenProjectionOfferDto = z.object({
+  type: z.literal("offer"),
+  sdp: z.string().min(1),
+});
+export type ScreenProjectionOfferDto = z.infer<typeof ScreenProjectionOfferDto>;
+
+export const ScreenProjectionAnswerDto = z.object({
+  type: z.literal("answer"),
+  sdp: z.string().min(1),
+  sessionId: z.string().min(1),
+  surfaceId: SurfaceIdDto,
+  runtimeGeneration: z.number().int().positive(),
+  state: z.literal("connecting"),
+  transport: z.literal("webrtc-data-channel-frames-v1"),
+  channels: z.object({
+    frames: z.literal(SCREEN_FRAME_CHANNEL),
+    control: z.literal(SCREEN_CONTROL_CHANNEL),
+    input: z.literal(SCREEN_INPUT_CHANNEL),
+  }),
+  security: z.object({
+    authentication: z.literal("none"),
+    httpsRequired: z.literal(false),
+  }),
+  candidates: z.array(z.object({ candidate: z.string(), sdpMid: z.string() })),
+});
+export type ScreenProjectionAnswerDto = z.infer<typeof ScreenProjectionAnswerDto>;
+
+export const ScreenProjectionControlMessageDto = z.object({
+  version: z.literal(SCREEN_PROJECTION_PROTOCOL_VERSION),
+  type: z.literal("view"),
+  surfaceId: SurfaceIdDto,
+  runtimeGeneration: z.number().int().positive(),
+  mode: ScreenProjectionModeDto,
+});
+export type ScreenProjectionControlMessageDto = z.infer<typeof ScreenProjectionControlMessageDto>;
+
+export const ScreenProjectionFrameHeaderDto = z.object({
+  version: z.literal(SCREEN_PROJECTION_PROTOCOL_VERSION),
+  type: z.literal("frame"),
+  surfaceId: SurfaceIdDto,
+  runtimeGeneration: z.number().int().positive(),
+  sequence: z.number().int().positive(),
+  mediaType: z.enum(["image/png", "image/jpeg"]),
+  capturedAt: z.string().optional(),
+  mode: z.enum(["preview", "expanded"]),
+  byteLength: z.number().int().positive(),
+  chunkCount: z.number().int().positive(),
+});
+export type ScreenProjectionFrameHeaderDto = z.infer<typeof ScreenProjectionFrameHeaderDto>;
+
 // ----- command bodies -----
 
 export const CreateBotBody = z.object({

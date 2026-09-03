@@ -31,6 +31,12 @@ export interface BotScreenProvision {
   refreshRate: number;
 }
 
+export interface BotScreenProjectionSource {
+  surfaceId: SurfaceId;
+  runtimeGeneration: number;
+  capture(): Promise<BotScreenCapture>;
+}
+
 /** Internal platform seam. Runtime handles keep process and socket facts private. */
 export interface BotScreenRuntime {
   capture(): Promise<BotScreenCapture>;
@@ -142,6 +148,31 @@ export class BotScreenManager {
     return this.#serialize(owner.surfaceId, async () => {
       const runtime = await this.#readyRuntime(owner);
       return runtime?.capture();
+    });
+  }
+
+  async projectionSource(owner: ComputerSurfaceOwner): Promise<BotScreenProjectionSource | undefined> {
+    return this.#serialize(owner.surfaceId, async () => {
+      const runtime = await this.#readyRuntime(owner);
+      const entry = this.#entries.get(owner.surfaceId);
+      if (runtime === undefined || entry?.runtime !== runtime) return undefined;
+      const generation = this.#row(owner.surfaceId).runtime_generation;
+      return {
+        surfaceId: owner.surfaceId,
+        runtimeGeneration: generation,
+        capture: () =>
+          this.#serialize(owner.surfaceId, async () => {
+            const row = this.#row(owner.surfaceId);
+            if (
+              row.lifecycle_state !== "ready"
+              || row.runtime_generation !== generation
+              || this.#entries.get(owner.surfaceId) !== entry
+            ) {
+              throw new Error("Screen Projection source is stale");
+            }
+            return runtime.capture();
+          }),
+      };
     });
   }
 

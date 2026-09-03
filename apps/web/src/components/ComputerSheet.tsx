@@ -1,5 +1,5 @@
 import type { JSX, RefObject } from "react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import * as stylex from "@stylexjs/stylex";
 import { Maximize2 } from "lucide-react";
 import { AspectRatio } from "@astryxdesign/core/AspectRatio";
@@ -17,12 +17,16 @@ import { Text } from "@astryxdesign/core/Text";
 import { StackItem } from "@astryxdesign/core/Stack";
 import { VStack } from "@astryxdesign/core/VStack";
 import type { BotViewDto, ComputerViewDto } from "@omarchy-bot/protocol";
+import {
+  ScreenProjectionConnection,
+  type ScreenProjectionState,
+} from "../lib/screenProjection.ts";
 import { BottomSheetWithReturnFocus } from "./BottomSheetWithReturnFocus.tsx";
 
 export interface ComputerSheetProps {
   bot: Pick<BotViewDto, "id" | "name">;
   view: ComputerViewDto;
-  snapshotUrl: string;
+  projectionUrl: string;
   open: boolean;
   returnFocusRef: RefObject<HTMLButtonElement | null>;
   busy?: boolean;
@@ -45,6 +49,15 @@ const STATE_LABELS: Record<ComputerViewDto["state"], string> = {
   unavailable: "Computer unavailable",
 };
 
+const PROJECTION_LABELS: Record<ScreenProjectionState, string> = {
+  connecting: "Connecting Screen Projection",
+  preview: "Screen Projection live",
+  expanded: "Screen Projection live",
+  reconnecting: "Reconnecting Screen Projection",
+  unavailable: "Screen Projection unavailable",
+  closed: "Screen Projection idle",
+};
+
 const localStyles = stylex.create({
   preview: {
     borderRadius: "var(--radius-container)",
@@ -60,9 +73,6 @@ const localStyles = stylex.create({
     height: "100%",
     objectFit: "contain",
   },
-  imageLoading: {
-    visibility: "hidden",
-  },
   previewState: {
     position: "absolute",
     inset: 0,
@@ -77,16 +87,18 @@ const localStyles = stylex.create({
     insetInlineEnd: "var(--spacing-2)",
   },
 });
-interface ComputerSheetContentProps extends Omit<ComputerSheetProps, "onClose"> {
+
+interface ComputerSheetContentProps extends Omit<ComputerSheetProps, "onClose" | "projectionUrl"> {
   compactHeading: boolean;
+  projectionState: ScreenProjectionState;
+  frameUrl?: string;
+  onProjectionRetry: () => void;
   onExpandPreview?: () => void;
 }
 
 function ComputerSheetContent({
   bot,
-  open,
   view,
-  snapshotUrl,
   busy = false,
   error,
   loading = false,
@@ -94,34 +106,22 @@ function ComputerSheetContent({
   onTakeControl,
   onReturnToBot,
   compactHeading,
+  projectionState,
+  frameUrl,
+  onProjectionRetry,
   onExpandPreview,
 }: ComputerSheetContentProps): JSX.Element {
-  const [previewLoading, setPreviewLoading] = useState(true);
-  const [previewError, setPreviewError] = useState(false);
-  const [previewKey, setPreviewKey] = useState(0);
-  const canShowPreview = !loading && view.state !== "unavailable";
   const canTakeControl = view.state === "bot-using" || view.state === "needs-you";
-
-  useEffect(() => {
-    if (!canShowPreview || !open) return;
-    setPreviewLoading(true);
-    setPreviewError(false);
-  }, [snapshotUrl, canShowPreview, open]);
-
-  const retry = (): void => {
-    setPreviewError(false);
-    setPreviewLoading(true);
-    setPreviewKey((key) => key + 1);
-    onRetry?.();
-  };
+  const projectionUnavailable = projectionState === "unavailable";
+  const projectionWaiting = frameUrl === undefined && !projectionUnavailable;
 
   return (
-    <VStack gap={4} padding={4} aria-busy={loading || busy || undefined} data-testid="computer-sheet">
+    <VStack gap={4} padding={4} aria-busy={loading || busy || projectionWaiting || undefined} data-testid="computer-sheet">
       {compactHeading ? <Heading level={2}>Computer</Heading> : null}
       {!loading && view.state !== "unavailable" ? (
         <VStack gap={1}>
           <Heading level={3}>{STATE_LABELS[view.state]}</Heading>
-          <Text color="secondary">{view.activity ?? `${bot.name}’s shared computer view.`}</Text>
+          <Text color="secondary">{view.activity ?? `${bot.name}’s computer.`}</Text>
         </VStack>
       ) : null}
       {error !== undefined ? <Banner status="error" title={error} /> : null}
@@ -138,53 +138,56 @@ function ComputerSheetContent({
           title="Computer unavailable"
           description={view.activity ?? "This bot’s computer isn’t available right now."}
           {...(onRetry !== undefined
-            ? { actions: <Button label="Check again" variant="secondary" onClick={retry} /> }
+            ? { actions: <Button label="Check again" variant="secondary" onClick={onRetry} /> }
             : {})}
           isCompact
         />
       ) : (
-        <AspectRatio ratio={16 / 9} fit="contain" xstyle={localStyles.preview}>
-          <img
-            key={previewKey}
-            src={snapshotUrl}
-            alt={`Latest computer preview for ${bot.name}`}
-            onLoad={() => {
-              setPreviewLoading(false);
-              setPreviewError(false);
-            }}
-            onError={() => {
-              setPreviewLoading(false);
-              setPreviewError(true);
-            }}
-            {...stylex.props(localStyles.image, previewLoading && localStyles.imageLoading)}
-            data-testid="computer-preview"
-          />
-          {onExpandPreview !== undefined && !previewLoading && !previewError ? (
-            <div {...stylex.props(localStyles.previewAction)}>
-              <IconButton
-                label="Expand desktop preview"
-                tooltip="Expand desktop preview"
-                icon={<Icon icon={Maximize2} size="sm" />}
-                variant="secondary"
-                onClick={onExpandPreview}
-                data-testid="computer-preview-expand"
+        <>
+          <VStack gap={1}>
+            <Text>{PROJECTION_LABELS[projectionState]}</Text>
+            <Text color="secondary">Read-only WebRTC projection. Signaling is unauthenticated; HTTPS is not required.</Text>
+          </VStack>
+          <AspectRatio ratio={16 / 9} fit="contain" xstyle={localStyles.preview}>
+            {frameUrl === undefined ? null : (
+              <img
+                src={frameUrl}
+                alt={`Latest computer preview for ${bot.name}`}
+                {...stylex.props(localStyles.image)}
+                data-testid="computer-preview"
               />
-            </div>
-          ) : null}
-          {previewLoading || previewError ? (
-            <div {...stylex.props(localStyles.previewState)}>
-              <EmptyState
-                icon={<Icon icon={previewError ? "warning" : "clock"} size="lg" />}
-                title={previewError ? "Preview couldn’t load" : "Loading preview"}
-                description={previewError ? "The computer may still be available. Try loading the preview again." : "Fetching the latest computer image."}
-                {...(previewError
-                  ? { actions: <Button label="Try preview again" variant="secondary" onClick={retry} /> }
-                  : {})}
-                isCompact
-              />
-            </div>
-          ) : null}
-        </AspectRatio>
+            )}
+            {onExpandPreview !== undefined && frameUrl !== undefined ? (
+              <div {...stylex.props(localStyles.previewAction)}>
+                <IconButton
+                  label="Expand desktop preview"
+                  tooltip="Expand desktop preview"
+                  icon={<Icon icon={Maximize2} size="sm" />}
+                  variant="secondary"
+                  onClick={onExpandPreview}
+                  data-testid="computer-preview-expand"
+                />
+              </div>
+            ) : null}
+            {frameUrl === undefined ? (
+              <div {...stylex.props(localStyles.previewState)}>
+                <EmptyState
+                  icon={<Icon icon={projectionUnavailable ? "warning" : "clock"} size="lg" />}
+                  title={projectionUnavailable ? "Projection unavailable" : PROJECTION_LABELS[projectionState]}
+                  description={
+                    projectionUnavailable
+                      ? "The Computer Surface may still be available. Try the Screen Projection again."
+                      : "Waiting for a direct frame from this Computer Surface."
+                  }
+                  {...(projectionUnavailable
+                    ? { actions: <Button label="Try projection again" variant="secondary" onClick={onProjectionRetry} /> }
+                    : {})}
+                  isCompact
+                />
+              </div>
+            ) : null}
+          </AspectRatio>
+        </>
       )}
       <HStack gap={2} justify="end" wrap="wrap">
         {canTakeControl && !loading ? (
@@ -210,39 +213,63 @@ function ComputerSheetContent({
   );
 }
 
-/** Docked desktop drawer with a native bottom sheet on narrow screens. */
+/** Docked desktop drawer with a preview-only mobile sheet and expanded desktop viewer. */
 export function ComputerSheet({
   open,
   onClose,
   returnFocusRef,
+  projectionUrl,
+  bot,
+  view,
   ...contentProps
 }: ComputerSheetProps): JSX.Element | null {
   const { isMobile: isSmallScreen } = useAppShellMobile();
   const [previewExpanded, setPreviewExpanded] = useState(false);
+  const [projectionState, setProjectionState] = useState<ScreenProjectionState>("closed");
+  const [frameUrl, setFrameUrl] = useState<string>();
+  const [projectionAttempt, setProjectionAttempt] = useState(0);
+  const connectionRef = useRef<ScreenProjectionConnection | undefined>(undefined);
+  const frameUrlRef = useRef<string | undefined>(undefined);
+
+  const replaceFrame = useCallback((frame: Blob | undefined): void => {
+    if (frameUrlRef.current !== undefined) URL.revokeObjectURL(frameUrlRef.current);
+    const nextUrl = frame === undefined ? undefined : URL.createObjectURL(frame);
+    frameUrlRef.current = nextUrl;
+    setFrameUrl(nextUrl);
+  }, []);
   const closePanel = useCallback((): void => {
+    setPreviewExpanded(false);
     onClose();
     requestAnimationFrame(() => returnFocusRef.current?.focus());
   }, [onClose, returnFocusRef]);
-  const content = (
-    <ComputerSheetContent
-      {...contentProps}
-      open={open}
-      compactHeading={isSmallScreen}
-      onExpandPreview={() => setPreviewExpanded(true)}
-    />
-  );
-  const lightbox = (
-    <Lightbox
-      isOpen={previewExpanded}
-      onOpenChange={setPreviewExpanded}
-      media={{
-        src: contentProps.snapshotUrl,
-        alt: `Expanded computer preview for ${contentProps.bot.name}`,
-        caption: `${contentProps.bot.name} computer`,
-      }}
-      hasZoom
-    />
-  );
+
+  useEffect(() => {
+    if (!open || view.state === "unavailable") {
+      connectionRef.current?.close();
+      connectionRef.current = undefined;
+      replaceFrame(undefined);
+      setProjectionState("closed");
+      return;
+    }
+    const connection = new ScreenProjectionConnection(
+      projectionUrl,
+      { botId: bot.id, surfaceId: view.surfaceId },
+      { onState: setProjectionState, onFrame: replaceFrame },
+    );
+    connectionRef.current = connection;
+    connection.setMode(previewExpanded && !isSmallScreen ? "expanded" : "preview");
+    void connection.connect();
+    return () => {
+      if (connectionRef.current === connection) connectionRef.current = undefined;
+      connection.close();
+      replaceFrame(undefined);
+    };
+  }, [bot.id, open, projectionAttempt, projectionUrl, replaceFrame, view.state === "unavailable", view.surfaceId]);
+
+  useEffect(() => {
+    if (isSmallScreen && previewExpanded) setPreviewExpanded(false);
+    connectionRef.current?.setMode(previewExpanded && !isSmallScreen ? "expanded" : "preview");
+  }, [isSmallScreen, previewExpanded]);
 
   useEffect(() => {
     if (!open || isSmallScreen) return;
@@ -253,20 +280,43 @@ export function ComputerSheet({
     return () => window.removeEventListener("keydown", onKeyDown, true);
   }, [closePanel, isSmallScreen, open, previewExpanded]);
 
+  const content = (
+    <ComputerSheetContent
+      {...contentProps}
+      bot={bot}
+      view={view}
+      open={open}
+      compactHeading={isSmallScreen}
+      projectionState={projectionState}
+      {...(frameUrl === undefined ? {} : { frameUrl })}
+      onProjectionRetry={() => setProjectionAttempt((attempt) => attempt + 1)}
+      {...(!isSmallScreen && frameUrl !== undefined ? { onExpandPreview: () => setPreviewExpanded(true) } : {})}
+    />
+  );
+  const lightbox = frameUrl === undefined ? null : (
+    <Lightbox
+      isOpen={!isSmallScreen && previewExpanded}
+      onOpenChange={setPreviewExpanded}
+      media={{
+        src: frameUrl,
+        alt: `Expanded computer preview for ${bot.name}`,
+        caption: `${bot.name} computer — read-only Screen Projection`,
+      }}
+      hasZoom
+    />
+  );
+
   if (isSmallScreen) {
     return (
-      <>
-        <BottomSheetWithReturnFocus
-          label="Computer"
-          returnFocusRef={returnFocusRef}
-          isOpen={open}
-          onOpenChange={(nextOpen) => !nextOpen && onClose()}
-          height="tall"
-        >
-          {content}
-        </BottomSheetWithReturnFocus>
-        {lightbox}
-      </>
+      <BottomSheetWithReturnFocus
+        label="Computer"
+        returnFocusRef={returnFocusRef}
+        isOpen={open}
+        onOpenChange={(nextOpen) => !nextOpen && onClose()}
+        height="tall"
+      >
+        {content}
+      </BottomSheetWithReturnFocus>
     );
   }
   if (!open) return null;

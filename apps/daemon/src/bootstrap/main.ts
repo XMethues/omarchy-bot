@@ -10,6 +10,7 @@ import { TurnService } from "../modules/turns/turns.ts";
 import { ComputerBroker } from "../modules/computer/broker.ts";
 import { BotScreenManager, type BotScreenRuntimeAdapter } from "../modules/computer/botScreenManager.ts";
 import { HyprlandBotScreenRuntimeAdapter } from "../modules/computer/hyprlandBotScreenRuntime.ts";
+import { ScreenProjectionService } from "../modules/computer/screenProjection.ts";
 import { AvatarService } from "../modules/avatars/avatarService.ts";
 import { DictationService } from "../modules/dictation/dictationService.ts";
 import { AttachmentsService } from "../modules/attachments/attachments.ts";
@@ -71,12 +72,16 @@ export async function main(options: MainOptions = {}): Promise<{ stop: () => Pro
       : { applicationBin: process.env.OMARCHY_BOT_SCREEN_APP_BIN }),
   });
   const screens = new BotScreenManager(db, options.botScreenAdapter ?? productionScreenAdapter);
+  const projections = new ScreenProjectionService(screens);
 
   const events = new EventLog(db);
   events.subscribe((event) => {
     if (event.aggregateType !== "bot" || (event.type !== "bot.archived" && event.type !== "bot.deleted")) return;
     const payload = event.payload as { surfaceId?: unknown } | undefined;
-    if (typeof payload?.surfaceId === "string") void screens.stop(payload.surfaceId as SurfaceId);
+    if (typeof payload?.surfaceId === "string") {
+      projections.closeSurface(payload.surfaceId as SurfaceId);
+      void screens.stop(payload.surfaceId as SurfaceId);
+    }
   });
   const dictation = new DictationService(cfg.dictationDir, cfg.voxtypeBin ?? "voxtype", events);
   const agents = new AgentsRegistry(db, events, { conformanceDir: cfg.conformanceDir, workersAgentsDir: agentsDir }, supervisor);
@@ -110,6 +115,7 @@ export async function main(options: MainOptions = {}): Promise<{ stop: () => Pro
     dictation,
     computer,
     screens,
+    projections,
     supervisor,
   };
   const http = startHttp(svc);
@@ -138,6 +144,7 @@ export async function main(options: MainOptions = {}): Promise<{ stop: () => Pro
     clearInterval(statusTimer);
     await dictation.shutdown();
     computer.shutdown();
+    projections.shutdown();
     await screens.shutdown();
     await supervisor.stopAll(); // close workers
     http.stop(); // close listeners

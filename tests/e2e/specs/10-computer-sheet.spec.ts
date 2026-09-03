@@ -24,13 +24,160 @@ async function fulfillJson(route: Route, body: unknown): Promise<void> {
   await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
 }
 
+async function installProjectionPeer(page: Page): Promise<void> {
+  await page.addInitScript(({ pngBase64 }) => {
+    const png = Uint8Array.from(atob(pngBase64), (character) => character.charCodeAt(0)).buffer;
+    class FakeDataChannel extends EventTarget {
+      readonly label: string;
+      readonly ordered = true;
+      readonly protocol = "";
+      readonly id = null;
+      readonly negotiated = false;
+      readonly maxPacketLifeTime = null;
+      readonly maxRetransmits = null;
+      binaryType: BinaryType = "arraybuffer";
+      bufferedAmount = 0;
+      bufferedAmountLowThreshold = 0;
+      readyState: RTCDataChannelState = "open";
+      onbufferedamountlow = null;
+      onclose = null;
+      onclosing = null;
+      onerror = null;
+      onmessage = null;
+      onopen = null;
+
+      constructor(label: string, private readonly sendToPeer: (label: string, data: string) => void) {
+        super();
+        this.label = label;
+      }
+
+      send(data: string | Blob | ArrayBuffer | ArrayBufferView): void {
+        if (typeof data === "string") this.sendToPeer(this.label, data);
+      }
+
+      close(): void {
+        if (this.readyState === "closed") return;
+        this.readyState = "closed";
+        this.dispatchEvent(new Event("close"));
+      }
+    }
+
+    class FakePeerConnection extends EventTarget {
+      localDescription: RTCSessionDescription | null = null;
+      remoteDescription: RTCSessionDescription | null = null;
+      currentLocalDescription = null;
+      currentRemoteDescription = null;
+      pendingLocalDescription = null;
+      pendingRemoteDescription = null;
+      signalingState: RTCSignalingState = "stable";
+      iceGatheringState: RTCIceGatheringState = "complete";
+      iceConnectionState: RTCIceConnectionState = "connected";
+      connectionState: RTCPeerConnectionState = "connected";
+      canTrickleIceCandidates = false;
+      sctp = null;
+      onconnectionstatechange = null;
+      ondatachannel = null;
+      onicecandidate = null;
+      onicecandidateerror = null;
+      oniceconnectionstatechange = null;
+      onicegatheringstatechange = null;
+      onnegotiationneeded = null;
+      onsignalingstatechange = null;
+      private readonly channels = new Map<string, FakeDataChannel>();
+      private surfaceId = "";
+      private sequence = 0;
+
+      createDataChannel(label: string): RTCDataChannel {
+        const channel = new FakeDataChannel(label, (sentLabel, raw) => {
+          if (sentLabel !== "screen.control.v1") return;
+          const message = JSON.parse(raw) as { mode?: string };
+          if (message.mode !== "preview" && message.mode !== "expanded") return;
+          const frames = this.channels.get("screen.frames.v1");
+          if (frames === undefined) return;
+          this.sequence += 1;
+          queueMicrotask(() => {
+            frames.dispatchEvent(new MessageEvent("message", {
+              data: JSON.stringify({
+                version: 1,
+                type: "frame",
+                surfaceId: this.surfaceId,
+                runtimeGeneration: 1,
+                sequence: this.sequence,
+                mediaType: "image/png",
+                mode: message.mode,
+                byteLength: png.byteLength,
+                chunkCount: 1,
+              }),
+            }));
+            frames.dispatchEvent(new MessageEvent("message", { data: png.slice(0) }));
+          });
+        });
+        this.channels.set(label, channel);
+        return channel as unknown as RTCDataChannel;
+      }
+
+      async createOffer(): Promise<RTCSessionDescriptionInit> {
+        return { type: "offer", sdp: "fake-browser-offer" };
+      }
+
+      async setLocalDescription(description?: RTCLocalSessionDescriptionInit): Promise<void> {
+        this.localDescription = { type: description?.type ?? "offer", sdp: description?.sdp ?? "fake-browser-offer", toJSON() { return this; } };
+      }
+
+      async setRemoteDescription(description: RTCSessionDescriptionInit): Promise<void> {
+        this.surfaceId = description.sdp?.replace(/^fake-answer:/, "") ?? "";
+        this.remoteDescription = { type: description.type, sdp: description.sdp ?? "", toJSON() { return this; } };
+      }
+
+      async addIceCandidate(): Promise<void> {}
+
+      close(): void {
+        this.connectionState = "closed";
+        for (const channel of this.channels.values()) channel.close();
+        this.dispatchEvent(new Event("connectionstatechange"));
+      }
+    }
+
+    Object.defineProperty(window, "RTCPeerConnection", { configurable: true, value: FakePeerConnection });
+  }, { pngBase64: PNG.toString("base64") });
+}
+
+async function fulfillProjection(route: Route): Promise<boolean> {
+  const url = new URL(route.request().url());
+  if (url.pathname !== "/api/computer/projection") return false;
+  if (route.request().method() === "DELETE") {
+    await route.fulfill({ status: 204, body: "" });
+    return true;
+  }
+  const surfaceId = url.searchParams.get("surfaceId") ?? "";
+  await route.fulfill({
+    status: 201,
+    contentType: "application/json",
+    body: JSON.stringify({
+      type: "answer",
+      sdp: `fake-answer:${surfaceId}`,
+      sessionId: `session-${surfaceId}`,
+      surfaceId,
+      runtimeGeneration: 1,
+      state: "connecting",
+      transport: "webrtc-data-channel-frames-v1",
+      channels: { frames: "screen.frames.v1", control: "screen.control.v1", input: "screen.input.v1" },
+      security: { authentication: "none", httpsRequired: false },
+      candidates: [],
+    }),
+  });
+  return true;
+}
+
 test.describe("contextual computer sheet", () => {
   test("shows selected-bot state, takeover handoff, preview, and no arbitration jargon", async ({ page }) => {
+    await installProjectionPeer(page);
     let state: ComputerState = "ready";
     let activeBotId: string | undefined;
     await page.route("**/api/computer/**", async (route) => {
       const request = route.request();
       const url = new URL(request.url());
+      if (await fulfillProjection(route)) return;
       if (url.pathname === "/api/computer/snapshot") {
         await route.fulfill({ status: 200, contentType: "image/png", body: PNG });
         return;
@@ -78,6 +225,8 @@ test.describe("contextual computer sheet", () => {
 
     const sheet = drawer;
     await expect(sheet.getByAltText("Latest computer preview for Computer Bot")).toBeVisible();
+    await expect(sheet).toContainText("Screen Projection live");
+    await expect(sheet).toContainText("Signaling is unauthenticated");
     await expect(sheet).toContainText("This bot is using the computer.");
     await expect(sheet).not.toContainText(/lease|TTL|token|queue depth/i);
     await sheet.getByRole("button", { name: "Expand desktop preview" }).click();
@@ -93,7 +242,7 @@ test.describe("contextual computer sheet", () => {
     await expect(sheet.getByRole("button", { name: "Take control" })).toHaveCount(0);
 
     await sheet.getByRole("button", { name: "Return to bot" }).click();
-    await expect(sheet).toContainText("Computer ready");
+    await expect(sheet).toContainText("Screen ready");
     await expect(sheet.getByRole("button", { name: "Return to bot" })).toHaveCount(0);
     await page.getByRole("button", { name: "Close computer drawer" }).click();
     await expect(drawer).toBeHidden();
@@ -101,9 +250,15 @@ test.describe("contextual computer sheet", () => {
   });
 
   test("switching Bots clears old preview state and keeps emergency state Surface-scoped", async ({ page }) => {
+    await installProjectionPeer(page);
+    let closedProjectionCount = 0;
     let waitingBotId: string | undefined;
     const emergencyStopped = new Set<string>();
     await page.route("**/api/computer/**", async (route) => {
+      if (new URL(route.request().url()).pathname === "/api/computer/projection" && route.request().method() === "DELETE") {
+        closedProjectionCount += 1;
+      }
+      if (await fulfillProjection(route)) return;
       const url = new URL(route.request().url());
       const selectedBotId = url.searchParams.get("botId") ?? undefined;
       const surfaceId = url.searchParams.get("surfaceId") ?? undefined;
@@ -144,6 +299,7 @@ test.describe("contextual computer sheet", () => {
     await expect(computer.getByAltText("Latest computer preview for Waiting Bot")).toBeVisible();
 
     await page.getByRole("button", { name: "Other Bot", exact: true }).click();
+    await expect.poll(() => closedProjectionCount).toBeGreaterThan(0);
     await expect(computer.getByAltText("Latest computer preview for Waiting Bot")).toHaveCount(0);
     await expect(computer.getByAltText("Latest computer preview for Other Bot")).toBeVisible();
     const emergency = page.getByRole("complementary", { name: "Bot Screen safety" });
@@ -157,6 +313,10 @@ test.describe("contextual computer sheet", () => {
   });
 
   test("uses a bottom sheet on a narrow screen", async ({ page }) => {
+    await installProjectionPeer(page);
+    await page.route("**/api/computer/projection**", async (route) => {
+      await fulfillProjection(route);
+    });
     await page.route("**/api/computer/state**", (route) => {
       const url = new URL(route.request().url());
       return fulfillJson(route, {
@@ -172,5 +332,6 @@ test.describe("contextual computer sheet", () => {
     await page.setViewportSize({ width: 390, height: 780 });
     await page.getByRole("button", { name: "Open computer", exact: true }).click();
     await expect(page.getByRole("dialog", { name: "Computer" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Expand desktop preview" })).toHaveCount(0);
   });
 });
