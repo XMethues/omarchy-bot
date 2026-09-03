@@ -169,6 +169,16 @@ describe("contextual computer control", () => {
       .toMatchObject({ state: "bot-using", botId });
   });
 
+  test("a human takeover is not stolen after its stored expiry time", async () => {
+    const botId = await makeBot(h, "Patient");
+    expect((await h.svc.computer.takeOver()).ok).toBeTrue();
+    h.svc.db.query(`UPDATE computer_leases SET expires_at = ? WHERE id = 1`).run("2000-01-01T00:00:00.000Z");
+
+    expect((await h.svc.computer.acquire({ botId }, undefined)).granted).toBeFalse();
+    expect((await computerRequest<{ state: string }>(h, "GET", `/api/computer/state?botId=${botId}`)).body.state).toBe("user-control");
+    await expect(h.svc.computer.act({ botId }, undefined, { name: "type", args: { text: "nope" } })).rejects.toThrow(/human/);
+  });
+
   test("emergency stop revokes input globally while leaving observation available until resume", async () => {
     const botId = await makeBot(h, "Emergency Bot");
     expect((await h.svc.computer.acquire({ botId }, undefined)).granted).toBeTrue();

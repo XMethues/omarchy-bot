@@ -5,6 +5,7 @@ import { Icon } from "@astryxdesign/core/Icon";
 import { Text } from "@astryxdesign/core/Text";
 import { VStack } from "@astryxdesign/core/VStack";
 import type { ComputerViewDto } from "@omarchy-bot/protocol";
+import { isEmergencyControlVisible } from "./emergencyControl.ts";
 
 export interface EmergencyComputerControlProps {
   view: ComputerViewDto;
@@ -28,7 +29,7 @@ export function EmergencyComputerControl({
   onResume,
 }: EmergencyComputerControlProps): JSX.Element | null {
   const stopped = view.state === "emergency-stopped";
-  if (view.state === "unavailable") return null;
+  if (!isEmergencyControlVisible(view.state)) return null;
   return (
     <VStack
       as="aside"

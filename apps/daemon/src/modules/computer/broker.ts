@@ -96,7 +96,7 @@ export class ComputerBroker {
   async acquire(actor: { botId: string }, turnId: string | undefined, ttlMs = this.cfg.leaseTtlMs): Promise<{ granted: boolean; token?: string; queued: boolean }> {
     if (this.#emergencyStopped) return { granted: false, queued: false };
     const l = this.#lease();
-    const expired = l !== undefined && new Date(l.expires_at).getTime() <= Date.now();
+    const expired = l !== undefined && l.holder_is_human === 0 && new Date(l.expires_at).getTime() <= Date.now();
     if (l === undefined || expired) {
       const token = randomUUID();
       const now = new Date();
@@ -152,14 +152,14 @@ export class ComputerBroker {
       this.turns.parkForHuman(parkedTurn);
       this.#writeLease({
         holder_is_human: 1, holder_bot_id: null, turn_id: null,
-        token: randomUUID(), acquired_at: new Date().toISOString(), expires_at: new Date(Date.now() + 24 * 3600_000).toISOString(),
+        token: randomUUID(), acquired_at: new Date().toISOString(), expires_at: "9999-12-31T23:59:59.000Z",
       });
       this.events.append("computer", "state", "computer.state.changed", { botId: parkedBotId });
     } else if (!l) {
       this.#parkedForHuman = undefined;
       this.#writeLease({
         holder_is_human: 1, holder_bot_id: null, turn_id: null,
-        token: randomUUID(), acquired_at: new Date().toISOString(), expires_at: new Date(Date.now() + 24 * 3600_000).toISOString(),
+        token: randomUUID(), acquired_at: new Date().toISOString(), expires_at: "9999-12-31T23:59:59.000Z",
       });
       this.events.append("computer", "state", "computer.state.changed", {});
     }

@@ -130,6 +130,11 @@ function HomeScreen(): JSX.Element {
     queryFn: () => api.computerState(bot?.id),
     refetchInterval: 15_000,
   });
+  const computerSafety = useQuery({
+    queryKey: ["computer", "global"],
+    queryFn: () => api.computerState(),
+    refetchInterval: 15_000,
+  });
 
   const computerAction = useMutation({
     mutationFn: (action: "take" | "return" | "stop" | "resume") => {
@@ -407,7 +412,7 @@ function HomeScreen(): JSX.Element {
           }}
           safetyControl={
             <EmergencyComputerControl
-              view={computer.data ?? { state: "unavailable" }}
+              view={computerSafety.data ?? { state: "unavailable" }}
               busy={computerAction.isPending}
               onEmergencyStop={() => computerAction.mutate("stop")}
               onResume={() => computerAction.mutate("resume")}

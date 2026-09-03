@@ -10,6 +10,7 @@ import type { EventLog } from "../events/eventLog.ts";
 import type { AttachmentsService } from "../attachments/attachments.ts";
 import type { Supervisor } from "../../supervision/supervisor.ts";
 import { HttpError } from "../bots/bots.ts";
+import { nativeEventClientPayload } from "./nativeEvents.ts";
 
 interface TurnContext {
   turnId: string;
@@ -318,22 +319,16 @@ export class TurnService {
         break;
       }
       case "native": {
-        const transcriptPayload = {
-          capability: event.capability,
-          sensitivity: event.sensitivity,
-          ...(event.sensitivity === "secret" ? { redacted: true } : { payload: event.payload }),
-        };
+        const publicPayload = nativeEventClientPayload(event);
         this.threads.appendMessage(ctx.threadId, {
           author: { kind: "bot" },
           kind: "event",
-          payload: transcriptPayload,
+          payload: publicPayload,
         });
         this.events.append("turn", ctx.turnId, "agent.native", {
           threadId: ctx.threadId,
           botId: ctx.botId,
-          capability: event.capability,
-          sensitivity: event.sensitivity,
-          payload: event.payload,
+          ...publicPayload,
         });
         break;
       }

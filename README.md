@@ -37,6 +37,8 @@ The daemon is the only SQLite writer. Agent SDKs and native protocols run behind
 
 ## Development
 
+Clone **`master`**. GitHub's default branch is `main`, which contains only the LICENSE; all product work lives on `master`.
+
 Requirements:
 
 - Bun 1.4+
@@ -45,11 +47,14 @@ Requirements:
 - Voxtype for Composer dictation
 
 ```bash
+git clone -b master https://github.com/XMethues/omarchy-bot.git
 bun install
 bun run dev
 ```
 
-Open <http://127.0.0.1:7322>.
+`bun run dev` serves the Vite UI at <http://127.0.0.1:7322> and proxies `/api` to the daemon on `127.0.0.1:7321`.
+
+Production (`bun run start` or the systemd user unit) serves the built UI from the daemon itself at <http://127.0.0.1:7321>.
 
 Useful checks:
 
@@ -64,7 +69,7 @@ bun test tests/conformance/pi.test.ts  # real model calls
 
 Product data is stored under `~/.local/share/omarchy-bot/`; runtime state is under `~/.local/state/omarchy-bot/` and `$XDG_RUNTIME_DIR` where appropriate. Managed attachments, avatar uploads, and Voxtype transcript handoff remain local.
 
-The daemon binds to `127.0.0.1` for the current product. It does not expose Agent runtimes, raw desktop input sockets, or a public network listener.
+The daemon binds to `127.0.0.1` for the current product (`7321` by default, overridable with `OMARCHY_BOT_PORT`). It does not expose Agent runtimes, raw desktop input sockets, or a public network listener.
 
 ## Design sources
 

@@ -5,20 +5,21 @@
 #
 #   1. Build once (the daemon serves the built web UI on 127.0.0.1:7321):
 #        bun install && bun run build
-#   2. Install the unit (adjust the repo path if you cloned elsewhere):
+#   2. Edit WorkingDirectory and ExecStart below to match this machine
+#      (clone path and bun binary). The checked-in values are placeholders.
+#   3. Install the unit:
 #        cp omarchy-bot.service ~/.config/systemd/user/
 #        systemctl --user daemon-reload
-#   3. Start / enable:
+#   4. Start / enable from the graphical session so WAYLAND_DISPLAY is inherited:
 #        systemctl --user start omarchy-bot
 #        systemctl --user enable omarchy-bot
 #
-# The daemon spawns the pi + computer workers itself; it does not need a
-# desktop session to serve the API, but the computer worker needs access to
-# the running Wayland session (WAYLAND_DISPLAY is discovered at runtime).
+# The daemon spawns the pi + computer workers itself. Computer input needs the
+# running Wayland session (WAYLAND_DISPLAY is discovered at runtime).
 
 [Unit]
-Description=omarchy-bot daemon (multi-agent bot harness)
-Documentation=https://github.com/omarchy-bot/omarchy-bot
+Description=omarchy-bot daemon (local AI teammate workspace)
+Documentation=https://github.com/XMethues/omarchy-bot
 PartOf=graphical-session.target
 After=graphical-session.target
 

@@ -33,7 +33,10 @@ describe("turn state machine", () => {
 describe("computer actions", () => {
   test("input vs observation", () => {
     expect(isInputAction("click")).toBeTrue();
+    expect(isInputAction("open_url")).toBeTrue();
+    expect(isInputAction("open_app")).toBeTrue();
     expect(isInputAction("screenshot")).toBeFalse();
+    expect(isInputAction("notify")).toBeFalse();
   });
   test("lease expiry", () => {
     const lease = { holder: "human" as const, acquiredAt: "2026-01-01T00:00:00Z", expiresAt: "2026-01-01T00:01:00Z" };

@@ -39,7 +39,11 @@ test.describe("contextual computer sheet", () => {
       if (url.pathname === "/api/computer/return-to-bot") state = "idle";
       const selectedBotId = url.searchParams.get("botId") ?? undefined;
       const selectedState: ComputerState =
-        state === "bot-using" && selectedBotId !== activeBotId ? "idle" : state;
+        selectedBotId === undefined
+          ? state
+          : state === "bot-using" && selectedBotId !== activeBotId
+            ? "idle"
+            : state;
       await fulfillJson(route, {
         state: selectedState,
         ...(selectedState === "bot-using" && activeBotId !== undefined ? { botId: activeBotId } : {}),
@@ -54,7 +58,9 @@ test.describe("contextual computer sheet", () => {
     });
 
     await page.goto("/");
+    await expect(page.getByTestId("emergency-computer-control")).toHaveCount(0);
     activeBotId = await createBot(page, "Computer Bot");
+    await expect(page.getByTestId("emergency-computer-control")).toHaveCount(0);
     state = "bot-using";
     await page.reload();
 
@@ -89,6 +95,7 @@ test.describe("contextual computer sheet", () => {
     await page.getByTestId("computer-drawer-close").click();
     await expect(drawer).toBeHidden();
     await expect(trigger).toBeFocused();
+    await expect(page.getByTestId("emergency-computer-control")).toHaveCount(0);
   });
 
   test("waiting belongs only to the waiting bot and the emergency fail-safe stays global", async ({ page }) => {
@@ -103,7 +110,15 @@ test.describe("contextual computer sheet", () => {
       if (url.pathname === "/api/computer/emergency-stop") emergencyStopped = true;
       if (url.pathname === "/api/computer/resume") emergencyStopped = false;
       const selectedBotId = url.searchParams.get("botId") ?? undefined;
-      const selectedState: ComputerState = emergencyStopped ? "emergency-stopped" : selectedBotId === waitingBotId ? "waiting" : "idle";
+      const selectedState: ComputerState = emergencyStopped
+        ? "emergency-stopped"
+        : selectedBotId === undefined
+          ? waitingBotId !== undefined
+            ? "waiting"
+            : "idle"
+          : selectedBotId === waitingBotId
+            ? "waiting"
+            : "idle";
       await fulfillJson(route, {
         state: selectedState,
         ...(selectedState === "waiting" && selectedBotId !== undefined ? { botId: selectedBotId } : {}),
@@ -112,6 +127,7 @@ test.describe("contextual computer sheet", () => {
     });
 
     await page.goto("/");
+    await expect(page.getByTestId("emergency-computer-control")).toHaveCount(0);
     waitingBotId = await createBot(page, "Waiting Bot");
     const otherBotId = await createBot(page, "Other Bot");
 
