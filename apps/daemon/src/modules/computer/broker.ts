@@ -51,6 +51,7 @@ export class ComputerBroker {
   #parkedForEmergency = new Map<SurfaceId, ParkedBot>();
   #emergencyStopped = new Set<SurfaceId>();
   #snapshotCaches = new Map<SurfaceId, SnapshotCache>();
+  #agentOperations = new Map<SurfaceId, Promise<void>>();
 
   constructor(
     private readonly db: Database,
@@ -370,6 +371,77 @@ export class ComputerBroker {
     };
   }
 
+  /**
+   * Executes one SDK computer tool call under Surface-scoped coordination.
+   * The queue is per Surface, so separate Bot Screens remain independent.
+   */
+  async agentToolAct(
+    input: ComputerSurfaceOwner,
+    turnId: string,
+    action: ComputerAction,
+    signal: AbortSignal,
+  ): Promise<{
+    text?: string;
+    imageRef?: string;
+    imageFile?: { mediaType: "image/png" | "image/jpeg"; path: string };
+    windowList?: unknown;
+  }> {
+    const owner = this.#requireOwner(input);
+    return this.#serializeAgentOperation(owner.surfaceId, async () => {
+      signal.throwIfAborted();
+      this.#requireOwner(owner);
+
+      let acquiredToken: string | undefined;
+      if (isInputAction(action.name)) {
+        const lease = this.#lease(owner.surfaceId);
+        const expired = lease !== undefined
+          && new Date(lease.expires_at).getTime() <= Date.now();
+        if (
+          lease !== undefined
+          && !expired
+          && (lease.holder_is_human || lease.turn_id !== turnId)
+        ) {
+          throw new Error("Computer Surface input is busy");
+        }
+        if (lease === undefined || expired) {
+          const acquired = await this.acquire(owner, turnId);
+          if (!acquired.granted || acquired.token === undefined) {
+            throw new Error("Computer Surface input is busy");
+          }
+          acquiredToken = acquired.token;
+        }
+      }
+
+      try {
+        signal.throwIfAborted();
+        const result = await this.act(owner, turnId, action);
+        signal.throwIfAborted();
+        if (result.imageRef === undefined) return result;
+        const artifact = this.db
+          .query(`SELECT media_type, path FROM artifacts WHERE id = ? AND surface_id = ?`)
+          .get(result.imageRef, owner.surfaceId) as {
+            media_type: string;
+            path: string;
+          } | null;
+        if (
+          artifact === null
+          || (artifact.media_type !== "image/png" && artifact.media_type !== "image/jpeg")
+        ) {
+          throw new Error("Bot Screen observation artifact is unavailable");
+        }
+        return {
+          ...result,
+          imageFile: {
+            mediaType: artifact.media_type,
+            path: artifact.path,
+          },
+        };
+      } finally {
+        if (acquiredToken !== undefined) this.release(owner, acquiredToken);
+      }
+    });
+  }
+
   async snapshot(input: ComputerSurfaceOwner): Promise<{ bytes: Uint8Array; mediaType: string } | undefined> {
     const owner = this.#requireOwner(input);
     const cached = this.#snapshotCaches.get(owner.surfaceId);
@@ -411,4 +483,25 @@ export class ComputerBroker {
     this.#emergencyStopped.delete(surfaceId);
     this.#snapshotCaches.delete(surfaceId);
   }
+  async #serializeAgentOperation<T>(
+    surfaceId: SurfaceId,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const previous = this.#agentOperations.get(surfaceId) ?? Promise.resolve();
+    const result = previous.catch(() => {}).then(operation);
+    const settled = result.then(
+      () => {},
+      () => {},
+    );
+    this.#agentOperations.set(surfaceId, settled);
+    try {
+      return await result;
+    } finally {
+      if (this.#agentOperations.get(surfaceId) === settled) {
+        this.#agentOperations.delete(surfaceId);
+      }
+    }
+  }
+
 }
+

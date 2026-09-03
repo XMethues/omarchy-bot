@@ -8,7 +8,7 @@
  *   2. streamed fixed text           7. close → resume → history
  *   3. read-only tool lifecycle      8. worker exit leaves no orphans
  *   4. native write tool lifecycle    9. capability inventory / event mapping
- *   5. mid-turn cancel + steer      10. Computer fixture via the real broker
+ *   5. mid-turn cancel + steer      10. Real Pi computer tool via owning Broker
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, writeFileSync, existsSync, rmSync } from "node:fs";
@@ -301,47 +301,69 @@ describe("pi conformance (10 steps, real model)", () => {
       }]);
       console.log(`conformance: step 9 ok — normalized event inventory mapped: ${[...seenEventTypes].sort().join(", ")}`);
 
-      // ---- Step 10: Computer fixture via the REAL broker + REAL computer worker ----
-      const broker = daemon.svc.computer;
-      const bot = daemon.svc.bots.create({ name: "Conformance Computer", agentId: "pi" });
-      const owner = { botId: bot.id, surfaceId: bot.surfaceId };
-      // observe without lease
-      const obs = await broker.act(owner, undefined, { name: "observe", args: {} });
-      expect((obs.text ?? "").length).toBeGreaterThan(0);
-      // screenshot lands an artifact
-      await broker.act(owner, undefined, { name: "screenshot", args: {} });
-      expect(daemon.svc.computer.state(owner).lastImageAt).toBeDefined();
-      // Gate 1: bot input without lease is rejected
-      await expect(broker.act(owner, undefined, { name: "click", args: {} })).rejects.toThrow(/no active input lease/);
-      // acquire lease as bot, harmless test input (lone shift press is a no-op)
-      const lease = await broker.acquire(owner, undefined);
-      expect(lease.granted).toBeTrue();
-      await broker.act(owner, undefined, { name: "key", args: { key: "shift" } });
-      // Take over: human steals the lease; bot input must now fail
-      broker.takeOver(owner);
-      await expect(broker.act(owner, undefined, { name: "type", args: { text: "x" } })).rejects.toThrow();
-      // I'm done: re-observe, release, bot can resume
-      await broker.imDone(owner);
-      const reAcquire = await broker.acquire(owner, undefined);
-      expect(reAcquire.granted).toBeTrue();
-      const obs2 = await broker.act(owner, undefined, { name: "observe", args: {} });
-      expect((obs2.text ?? "").length).toBeGreaterThan(0);
-      broker.release(owner, reAcquire.token!);
-      console.log("conformance: step 10 ok — observe/screenshot/lease/input/take-over/im-done/resume");
-
-      // ---- Record: write the versioned conformance record and verify the gate ----
+      // ---- Step 10: REAL Pi SDK custom tool -> daemon -> owning Broker/worker ----
+      // Seed only the isolated daemon's gate so its supervised Pi worker can run
+      // this final live conformance turn. The durable user record is written only
+      // after the turn succeeds below.
       const version = await pi.request({ type: "probe", requestId: crypto.randomUUID() }, 30_000);
       const agentVersion = (version as { agentVersion?: string }).agentVersion!;
       const image = imageResult === "ok" ? "verified" : "provider-unsupported";
-      const realConfDir = path.join(os.homedir(), ".local/share/omarchy-bot/conformance");
-      mkdirSync(realConfDir, { recursive: true });
-      const record = JSON.stringify({ ok: true, at: new Date().toISOString(), steps: 10, image });
-      const recordPath = path.join(realConfDir, `pi-${agentVersion}.json`);
-      writeFileSync(recordPath, record);
-      // The daemon under test resolves conformanceDir from its own (temp) home.
       const testConfDir = path.join(daemon.home, "conformance");
       mkdirSync(testConfDir, { recursive: true });
+      const record = JSON.stringify({ ok: true, at: new Date().toISOString(), steps: 10, image });
       writeFileSync(path.join(testConfDir, `pi-${agentVersion}.json`), record);
+      expect((await daemon.svc.agents.recheck("pi")).status).toBe("ready");
+
+      const bot = daemon.svc.bots.create({
+        name: "Conformance Computer",
+        agentId: "pi",
+        instructions: "When explicitly asked for computer conformance, follow the requested computer tool calls exactly.",
+      });
+      const sent = await daemon.svc.turns.send(
+        bot.id,
+        null,
+        [
+          "This is a computer conformance check.",
+          "Use only the computer tool and invoke it exactly twice.",
+          "First call action \"type\" with args {\"text\":\"PI-BOT-SCREEN-VISIBLE\"}.",
+          "Then call action \"screenshot\" with empty args.",
+          "After both calls succeed, reply PI-COMPUTER-TOOL-OK.",
+        ].join(" "),
+      );
+      const terminal = await daemon.svc.turns.waitForTerminal(sent.turnId, 180_000);
+      expect(terminal.status).toBe("completed");
+      const transcript = await fetch(
+        `${daemon.baseUrl}/api/threads/${sent.threadId}/messages`,
+      ).then((response) => response.json()) as Array<{
+        kind: string;
+        text?: string;
+        payload?: {
+          name?: string;
+          state?: string;
+          input?: { action?: string };
+        };
+      }>;
+      const computerCalls = transcript.filter((message) =>
+        message.kind === "tool"
+        && message.payload?.name === "computer"
+        && message.payload.state === "complete"
+      );
+      expect(computerCalls.some((message) => message.payload?.input?.action === "type")).toBeTrue();
+      expect(computerCalls.some((message) => message.payload?.input?.action === "screenshot")).toBeTrue();
+      expect(
+        transcript.some((message) => message.text?.includes("PI-COMPUTER-TOOL-OK")),
+      ).toBeTrue();
+      expect(daemon.svc.computer.state({
+        botId: bot.id,
+        surfaceId: bot.surfaceId,
+      }).lastImageAt).toBeDefined();
+      console.log("conformance: step 10 ok — real Pi custom tool typed and observed its owning Bot Screen");
+
+      // ---- Record: write the versioned conformance record and verify the gate ----
+      const realConfDir = path.join(os.homedir(), ".local/share/omarchy-bot/conformance");
+      mkdirSync(realConfDir, { recursive: true });
+      const recordPath = path.join(realConfDir, `pi-${agentVersion}.json`);
+      writeFileSync(recordPath, record);
       console.log(`conformance: record written ${recordPath}`);
       const agent = await daemon.svc.agents.recheck("pi");
       expect(agent.status).toBe("ready");

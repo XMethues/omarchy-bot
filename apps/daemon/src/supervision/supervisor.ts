@@ -1,11 +1,22 @@
 import path from "node:path";
-import type { AgentEvent, ComputerActPayload, ComputerCommand } from "@omarchy-bot/agent-contract";
+import type {
+  AgentComputerToolOutput,
+  AgentComputerToolRequest,
+  AgentEvent,
+  ComputerActPayload,
+  ComputerCommand,
+} from "@omarchy-bot/agent-contract";
 import { isSurfaceId, type AgentId, type SurfaceId } from "@omarchy-bot/domain";
 import { WorkerClient, sanitizedEnv } from "./workerClient.ts";
 
 export interface SupervisorHooks {
   onAgentEvent: (agentId: AgentId, event: AgentEvent) => void;
   onWorkerCrash: (agentId: AgentId, error: Error) => void;
+  onAgentComputerRequest: (
+    agentId: AgentId,
+    request: AgentComputerToolRequest,
+    signal: AbortSignal,
+  ) => Promise<AgentComputerToolOutput>;
 }
 
 type ComputerActCommand = Extract<ComputerCommand, { type: "act" }>;
@@ -57,7 +68,13 @@ export class Supervisor {
       script: path.join(this.workerDirs.agents, agentId, "src", "worker.ts"),
       env: sanitizedEnv(),
       onEvent: (e) => this.hooks.onAgentEvent(agentId, e),
-      onExit: () => {
+      onRequest: (request, signal) =>
+        this.hooks.onAgentComputerRequest(agentId, request, signal),
+      onExit: (code) => {
+        this.hooks.onWorkerCrash(
+          agentId,
+          new Error(`Agent worker exited (${code})`),
+        );
         // Restart with backoff unless it was an explicit stop; sessions get recovered by callers.
         if (!this.#restartTimers.has(agentId)) {
           const t = setTimeout(() => {

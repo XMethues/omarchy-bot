@@ -38,7 +38,7 @@ export async function main(options: MainOptions = {}): Promise<{ stop: () => Pro
   const hostWaylandDisplay = process.env.WAYLAND_DISPLAY;
   const workersDir = process.env.OMARCHY_BOT_WORKERS_DIR ?? path.resolve(import.meta.dir, "../../../../workers");
   const agentsDir = path.resolve(workersDir);
-  const supervisor = new Supervisor(
+  const supervisor: Supervisor = new Supervisor(
     {
       onAgentEvent: (agentId, event) => {
         if (!avatars.onAgentEvent(agentId, event)) turns.onAgentEvent(agentId, event);
@@ -46,7 +46,10 @@ export async function main(options: MainOptions = {}): Promise<{ stop: () => Pro
       onWorkerCrash: (agentId, err) => {
         events.append("agent", agentId, "agent.worker_crash", { agentId, message: err.message });
         agents.markOffline(agentId, err.message);
+        turns.onAgentWorkerCrash(agentId, err);
       },
+      onAgentComputerRequest: (agentId, request, signal) =>
+        turns.onAgentComputerRequest(agentId, request, computer, signal),
     },
     {
       agents: agentsDir,
@@ -85,14 +88,14 @@ export async function main(options: MainOptions = {}): Promise<{ stop: () => Pro
     }
   });
   const dictation = new DictationService(cfg.dictationDir, cfg.voxtypeBin ?? "voxtype", events);
-  const agents = new AgentsRegistry(db, events, { conformanceDir: cfg.conformanceDir, workersAgentsDir: agentsDir }, supervisor);
-  const threads = new ThreadsService(db, events, agents);
+  const agents: AgentsRegistry = new AgentsRegistry(db, events, { conformanceDir: cfg.conformanceDir, workersAgentsDir: agentsDir }, supervisor);
+  const threads: ThreadsService = new ThreadsService(db, events, agents);
   const bots = new BotsService(db, events, agents, threads);
   const attachments = new AttachmentsService(db, cfg.attachmentsDir, agents);
   attachments.gcStaged();
   const avatars = new AvatarService(bots, supervisor, cfg.avatarsDir);
   const botDeletions = new BotDeletionService(db, events, attachments, avatars, agents, supervisor);
-  const turns = new TurnService(db, events, threads, agents, bots, attachments, supervisor, cfg);
+  const turns: TurnService = new TurnService(db, events, threads, agents, bots, attachments, supervisor, cfg);
   const computer = new ComputerBroker(db, events, turns, screens, cfg);
 
   agents.init();

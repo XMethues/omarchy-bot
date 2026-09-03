@@ -1,3 +1,4 @@
+import type { ComputerAction, SurfaceId } from "@omarchy-bot/domain";
 import type { Hello, OpenSessionOptionsLike } from "./shared.ts";
 
 /**
@@ -19,7 +20,14 @@ export type AgentCommand =
   | { type: "probe"; requestId: string }
   | { type: "session.open"; requestId: string; botId: string; threadId: string; options: OpenSessionOptionsLike }
   | { type: "session.resume"; requestId: string; botId: string; threadId: string; nativeSessionId: string; options: OpenSessionOptionsLike }
-  | { type: "message.send"; requestId: string; sessionId: string; turnId: string; message: WorkerUserMessage }
+  | {
+      type: "message.send";
+      requestId: string;
+      sessionId: string;
+      turnId: string;
+      message: WorkerUserMessage;
+      computer: AgentComputerTurnContext;
+    }
   | { type: "message.steer"; requestId: string; sessionId: string; text: string }
   | { type: "turn.abort"; requestId: string; sessionId: string }
   | { type: "session.history"; requestId: string; sessionId: string }
@@ -31,6 +39,45 @@ export interface WorkerUserMessage {
   attachments?: { id: string; name: string; path: string; mediaType: string }[];
 }
 
+/** Daemon-authored binding installed for one active Agent turn. */
+export interface AgentComputerTurnContext {
+  botId: string;
+  turnId: string;
+  workerSessionId: string;
+  surfaceId: SurfaceId;
+}
+
+/** Pi adds its SDK tool-call identity to the immutable turn binding. */
+export interface AgentComputerToolContext extends AgentComputerTurnContext {
+  toolCallId: string;
+}
+
+export interface AgentComputerToolRequest {
+  type: "computer.request";
+  requestId: string;
+  context: AgentComputerToolContext;
+  action: ComputerAction;
+}
+
+export interface AgentComputerToolCancel {
+  type: "computer.cancel";
+  requestId: string;
+}
+
+export interface AgentComputerToolOutput {
+  text?: string;
+  imageFile?: {
+    mediaType: "image/png" | "image/jpeg";
+    path: string;
+  };
+  imageRef?: string;
+  windowList?: unknown;
+}
+
+export type AgentComputerToolResult =
+  | { type: "computer.result"; requestId: string; ok: true; payload: AgentComputerToolOutput }
+  | { type: "computer.result"; requestId: string; ok: false; error: string };
+
 export type AgentResult =
   | { requestId: string; ok: true; payload: unknown }
   | { requestId: string; ok: false; error: string };
@@ -39,6 +86,8 @@ export type WorkerOutbound =
   | Hello
   | { type: "heartbeat" }
   | { type: "event"; event: AgentEvent }
+  | AgentComputerToolRequest
+  | AgentComputerToolCancel
   | AgentResult;
 
 export const AGENT_CAPABILITY_INVENTORY_VERSION = 1 as const;

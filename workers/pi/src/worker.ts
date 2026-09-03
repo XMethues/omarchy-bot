@@ -21,19 +21,27 @@ import {
   writeJsonl,
   AGENT_CAPABILITY_INVENTORY_VERSION,
   type AgentCommand,
+  type AgentComputerToolContext,
+  type AgentComputerToolOutput,
+  type AgentComputerToolResult,
+  type AgentComputerTurnContext,
   type AgentEvent,
   type AgentResult,
   type HistoryPayload,
   type ProbePayload,
   type SessionOpenedPayload,
 } from "@omarchy-bot/agent-contract";
+import { isSurfaceId, type ComputerAction } from "@omarchy-bot/domain";
 import { normalizeSessionEvent, toNormalizedMessages, type SessionRuntime } from "./normalize.ts";
 import { sdkVersion } from "./sdk-version.ts";
+import { createComputerTool } from "./computer-tool.ts";
 
 const AGENT_ID = "pi";
 
 interface SessionEntry extends SessionRuntime {
   session: AgentSession;
+  botId: string;
+  computer?: AgentComputerTurnContext;
 }
 
 const sessions = new Map<string, SessionEntry>();
@@ -42,6 +50,50 @@ let modelRuntimePromise: Promise<ModelRuntime> | undefined;
 function getModelRuntime(): Promise<ModelRuntime> {
   modelRuntimePromise ??= ModelRuntime.create();
   return modelRuntimePromise;
+}
+
+interface PendingComputerRequest {
+  resolve: (output: AgentComputerToolOutput) => void;
+  reject: (error: Error) => void;
+  signal?: AbortSignal;
+  onAbort?: () => void;
+}
+
+const computerRequests = new Map<string, PendingComputerRequest>();
+
+function requestComputer(
+  context: AgentComputerToolContext,
+  action: ComputerAction,
+  signal: AbortSignal | undefined,
+): Promise<AgentComputerToolOutput> {
+  signal?.throwIfAborted();
+  const requestId = crypto.randomUUID();
+  return new Promise<AgentComputerToolOutput>((resolve, reject) => {
+    const pending: PendingComputerRequest = { resolve, reject };
+    if (signal !== undefined) {
+      pending.signal = signal;
+      pending.onAbort = () => {
+        if (computerRequests.delete(requestId)) {
+          writeJsonl({ type: "computer.cancel", requestId });
+          reject(new Error("computer tool call cancelled"));
+        }
+      };
+      signal.addEventListener("abort", pending.onAbort, { once: true });
+    }
+    computerRequests.set(requestId, pending);
+    writeJsonl({ type: "computer.request", requestId, context, action });
+  });
+}
+
+function handleComputerResult(result: AgentComputerToolResult): void {
+  const pending = computerRequests.get(result.requestId);
+  if (pending === undefined) return;
+  computerRequests.delete(result.requestId);
+  if (pending.signal !== undefined && pending.onAbort !== undefined) {
+    pending.signal.removeEventListener("abort", pending.onAbort);
+  }
+  if (result.ok === true) pending.resolve(result.payload);
+  else pending.reject(new Error(result.error));
 }
 
 let authAvailable: boolean | undefined;
@@ -92,6 +144,7 @@ function attachSubscription(entry: SessionEntry): void {
     if (ev.type === "agent_settled" && entry.running && !entry.finished) {
       entry.running = false;
       entry.finished = true;
+      delete entry.computer;
       if (entry.aborted) emit({ type: "turn.cancelled", sessionId });
       else emit({ type: "turn.completed", sessionId });
     }
@@ -100,9 +153,14 @@ function attachSubscription(entry: SessionEntry): void {
 
 async function openSession(
   requestId: string,
-  options: { cwd: string; instructions: string; model?: string },
+  options: { botId: string; cwd: string; instructions: string; model?: string },
   existing?: SessionEntry | undefined,
 ): Promise<void> {
+  let newEntry: SessionEntry | undefined;
+  const computerTool = createComputerTool(
+    () => newEntry?.computer,
+    { request: requestComputer },
+  );
   const sessionId = `s_${crypto.randomUUID()}`;
 
   // Bot Job/Instructions are injected into Pi's native system prompt.
@@ -131,11 +189,13 @@ async function openSession(
     modelRuntime: rt,
     ...(model !== undefined ? { model } : {}),
     resourceLoader: loader,
+    customTools: [computerTool],
   });
 
   const nativeSessionId = session.sessionFile ?? `mem:${sessionId}`;
-  const newEntry: SessionEntry = {
+  newEntry = {
     sessionId,
+    botId: options.botId,
     nativeSessionId,
     session,
     running: false,
@@ -183,6 +243,7 @@ async function handleMessage(cmd: AgentCommand): Promise<void> {
       }
       case "session.open":
         await openSession(cmd.requestId, {
+          botId: cmd.botId,
           cwd: cmd.options.cwd,
           instructions: cmd.options.instructions,
           ...(cmd.options.model !== undefined ? { model: cmd.options.model } : {}),
@@ -194,6 +255,7 @@ async function handleMessage(cmd: AgentCommand): Promise<void> {
         if (!(await f.exists())) throw new Error(`native session not found: ${cmd.nativeSessionId}`);
         const holder = { nativeSessionId: cmd.nativeSessionId } as SessionEntry;
         await openSession(cmd.requestId, {
+          botId: cmd.botId,
           cwd: cmd.options.cwd,
           instructions: cmd.options.instructions,
           ...(cmd.options.model !== undefined ? { model: cmd.options.model } : {}),
@@ -205,6 +267,17 @@ async function handleMessage(cmd: AgentCommand): Promise<void> {
         // as message.steer. A busy session is therefore an error, never a crash.
         const entry = sessionEntry(cmd.sessionId);
         if (entry.session.isStreaming) throw new Error("session busy: a turn is already running");
+        if (
+          cmd.computer !== undefined
+          && (
+            cmd.computer.botId !== entry.botId
+            || cmd.computer.workerSessionId !== cmd.sessionId
+            || cmd.computer.turnId !== cmd.turnId
+            || !isSurfaceId(cmd.computer.surfaceId)
+          )
+        ) {
+          throw new Error("computer tool binding does not match Agent command");
+        }
         const images =
           cmd.message.attachments && cmd.message.attachments.length > 0
             ? await Promise.all(
@@ -226,6 +299,7 @@ async function handleMessage(cmd: AgentCommand): Promise<void> {
           const content = await Bun.file(a.path).text();
           promptText += `\n\n[attachment ${a.name}]\n${content}\n[/attachment ${a.name}]`;
         }
+        entry.computer = cmd.computer;
         entry.running = true;
         entry.finished = false;
         entry.aborted = false;
@@ -234,6 +308,7 @@ async function handleMessage(cmd: AgentCommand): Promise<void> {
           .catch((err: unknown) => {
             entry.running = false;
             entry.finished = true;
+            delete entry.computer;
             emit({ type: "error", sessionId: entry.sessionId, message: String(err), retryable: false });
           });
         reply({ requestId: cmd.requestId, ok: true, payload: { accepted: true } });
@@ -301,7 +376,19 @@ setInterval(() => writeJsonl({ type: "heartbeat" }), HEARTBEAT_MS).unref();
 await readJsonl(
   Bun.stdin.stream(),
   (msg) => {
-    if (msg && typeof msg === "object" && "type" in msg) void handleMessage(msg as AgentCommand);
+    if (msg && typeof msg === "object" && "type" in msg) {
+      if (msg.type === "computer.result") {
+        handleComputerResult(msg as AgentComputerToolResult);
+      } else {
+        void handleMessage(msg as AgentCommand);
+      }
+    }
   },
-  () => process.exit(0),
+  () => {
+    for (const pending of computerRequests.values()) {
+      pending.reject(new Error("daemon connection closed during computer tool call"));
+    }
+    computerRequests.clear();
+    process.exit(0);
+  },
 );

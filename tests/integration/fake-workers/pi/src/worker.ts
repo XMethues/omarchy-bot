@@ -10,6 +10,7 @@
  *   steer-echo       long atomic tool action; message.steer is acknowledged
  *                    immediately, applied after tool.completed, then completes
  *   attachment-echo validates the daemon's managed worker paths and echoes metadata/content
+ *   computer:<action> invokes the daemon-owned Bot Screen tool bridge
  *
  * Stays alive until stdin closes (daemon lifecycle contract).
  */
@@ -86,10 +87,18 @@ interface FakeAttachment {
   mediaType: string;
 }
 
+interface ComputerTurnContext {
+  botId: string;
+  turnId: string;
+  workerSessionId: string;
+  surfaceId: string;
+}
+
 interface FakeSession {
   aborted: boolean;
   streaming: boolean;
   directive?: string | undefined;
+  computerRequestId?: string;
   steerReply?: ((text: string) => void) | undefined;
 }
 const sessions = new Map<string, FakeSession>();
@@ -101,9 +110,71 @@ const respondError = (requestId: string, error: string): void => {
   write({ requestId, ok: false, error });
 };
 
+const computerRequests = new Map<string, {
+  resolve: (payload: unknown) => void;
+  reject: (error: Error) => void;
+}>();
+
+async function requestComputer(
+  context: ComputerTurnContext,
+  toolCallId: string,
+  action: { name: string; args: Record<string, unknown> },
+  onRequest: (requestId: string) => void,
+): Promise<unknown> {
+  const requestId = crypto.randomUUID();
+  onRequest(requestId);
+  const pending = Promise.withResolvers<unknown>();
+  computerRequests.set(requestId, { resolve: pending.resolve, reject: pending.reject });
+  write({
+    type: "computer.request",
+    requestId,
+    context: { ...context, toolCallId },
+    action,
+  });
+  return pending.promise;
+}
+
+function cancelComputerRequest(requestId: string): void {
+  const pending = computerRequests.get(requestId);
+  if (pending === undefined) return;
+  computerRequests.delete(requestId);
+  write({ type: "computer.cancel", requestId });
+  pending.reject(new Error("computer tool call cancelled"));
+}
+
+function computerTurnContext(value: unknown): ComputerTurnContext | undefined {
+  if (value === null || typeof value !== "object") return undefined;
+  if (
+    !("botId" in value)
+    || !("turnId" in value)
+    || !("workerSessionId" in value)
+    || !("surfaceId" in value)
+    || typeof value.botId !== "string"
+    || typeof value.turnId !== "string"
+    || typeof value.workerSessionId !== "string"
+    || typeof value.surfaceId !== "string"
+  ) {
+    return undefined;
+  }
+  return {
+    botId: value.botId,
+    turnId: value.turnId,
+    workerSessionId: value.workerSessionId,
+    surfaceId: value.surfaceId,
+  };
+}
+
 readJsonl(Bun.stdin.stream(), (raw) => {
   const msg = raw as Record<string, unknown> & { type: string; requestId?: string };
   switch (msg.type) {
+    case "computer.result": {
+      const pending = msg.requestId === undefined ? undefined : computerRequests.get(msg.requestId);
+      if (pending === undefined) break;
+      computerRequests.delete(msg.requestId!);
+      if (msg.ok === true) pending.resolve(msg.payload);
+      else pending.reject(new Error(String(msg.error)));
+      break;
+    }
     case "probe": {
       const control = probeControl();
       if (control.fakeProbe === "offline") {
@@ -157,6 +228,90 @@ readJsonl(Bun.stdin.stream(), (raw) => {
       s.directive = undefined;
       s.steerReply = undefined;
       void (async () => {
+        if (text.startsWith("computer:")) {
+          const binding = computerTurnContext(msg.computer);
+          const parts = text.split(":");
+          const toolCallId = `computer-${command.turnId}`;
+          write({
+            type: "event",
+            event: {
+              type: "tool.started",
+              sessionId,
+              id: toolCallId,
+              name: "computer",
+              input: { action: parts[1] },
+            },
+          });
+          if (parts[1] === "crash-agent") process.exit(17);
+          try {
+            if (binding === undefined) throw new Error("computer tool binding missing");
+            const context = { ...binding };
+            if (parts[2] === "mismatch") context.surfaceId = parts[3] ?? "";
+            if (parts[2] === "stale") context.turnId = `stale-${context.turnId}`;
+            if (parts[2] === "wrong-bot") context.botId = `wrong-${context.botId}`;
+            if (parts[2] === "wrong-session") {
+              context.workerSessionId = `wrong-${context.workerSessionId}`;
+            }
+            const requestToolCallId = parts[2] === "missing-tool-call"
+              ? ""
+              : toolCallId;
+            const action = parts[1] === "click"
+              ? { name: "click", args: { marker: parts[2] ?? "" } }
+              : {
+                  name: "observe",
+                  args: parts[2] === "fail" ? { fail: true } : {},
+                };
+            s.streaming = true;
+            const result = await requestComputer(
+              context,
+              requestToolCallId,
+              action,
+              (requestId) => {
+                s.computerRequestId = requestId;
+              },
+            );
+            write({
+              type: "event",
+              event: {
+                type: "tool.completed",
+                sessionId,
+                id: toolCallId,
+                output: result,
+                isError: false,
+              },
+            });
+            write({
+              type: "event",
+              event: {
+                type: "message.delta",
+                sessionId,
+                text: JSON.stringify(result),
+              },
+            });
+            write({ type: "event", event: { type: "turn.completed", sessionId } });
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            write({
+              type: "event",
+              event: {
+                type: "tool.completed",
+                sessionId,
+                id: toolCallId,
+                output: message,
+                isError: true,
+              },
+            });
+            write({
+              type: "event",
+              event: { type: "error", sessionId, message, retryable: false },
+            });
+          } finally {
+            s.streaming = false;
+            delete s.computerRequestId;
+          }
+          respond(msg.requestId!, { accepted: true });
+          return;
+        }
         if (text === "attachment-echo") {
           const summaries = await Promise.all((message.attachments ?? []).map(async (attachment) => {
             const file = Bun.file(attachment.path);
@@ -301,6 +456,10 @@ readJsonl(Bun.stdin.stream(), (raw) => {
       const s = sessions.get(sessionId);
       if (s?.streaming) {
         s.aborted = true;
+        if (s.computerRequestId !== undefined) {
+          cancelComputerRequest(s.computerRequestId);
+          delete s.computerRequestId;
+        }
         s.streaming = false;
         s.steerReply?.("");
         s.steerReply = undefined;
