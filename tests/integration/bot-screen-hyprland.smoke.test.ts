@@ -65,7 +65,7 @@ async function waitUntilReady(harness: Harness, botId: string, surfaceId: string
 
 platformTest("two real nested Hyprland Screens act and capture concurrently with distinct pixels", async () => {
   const beforeClients = await hostClientAddresses();
-  const harness = await startDaemon(undefined, { useProductionBotScreen: true });
+  const harness = await startDaemon(undefined, { useProductionBotScreen: true, botScreenCapacity: 2 });
   const runtimeSurfaceDirs: string[] = [];
   const profileSurfaceDirs: string[] = [];
   try {

@@ -22,6 +22,7 @@ export interface HarnessOptions {
   botScreenFailure?: string;
   useProductionBotScreen?: boolean;
   botScreenAdapter?: BotScreenRuntimeAdapter;
+  botScreenCapacity?: number;
 }
 
 export async function startDaemon(existingHome?: string, options: HarnessOptions = {}): Promise<Harness> {
@@ -48,8 +49,13 @@ export async function startDaemon(existingHome?: string, options: HarnessOptions
   // Dynamic import keeps the harness the single boot seam for fresh and legacy homes.
   const { main } = await import("../../../apps/daemon/src/bootstrap/main.ts");
   const daemon = options.useProductionBotScreen
-    ? await main()
-    : await main({ botScreenAdapter: options.botScreenAdapter ?? new FakeBotScreenRuntimeAdapter(options.botScreenFailure) });
+    ? await main({
+        ...(options.botScreenCapacity === undefined ? {} : { botScreenCapacity: options.botScreenCapacity }),
+      })
+    : await main({
+        botScreenAdapter: options.botScreenAdapter ?? new FakeBotScreenRuntimeAdapter(options.botScreenFailure),
+        botScreenCapacity: options.botScreenCapacity ?? 8,
+      });
   const { stop, disconnectForRestart, port, svc } = daemon;
   const base: Harness = {
     baseUrl: `http://127.0.0.1:${port}`,

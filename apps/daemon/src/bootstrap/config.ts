@@ -20,6 +20,32 @@ export interface Config {
   voxtypeBin?: string;
   port: number;
   turnTimeoutMs: number;
+  botScreenCapacity: number;
+  botScreenProfile: "1080p" | "720p";
+  botScreenLogicalWidth: number;
+  botScreenLogicalHeight: number;
+  botScreenFrameRate: number;
+}
+
+function positiveInteger(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined) return fallback;
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new Error(`${name} must be a positive integer`);
+  }
+  return value;
+}
+
+function botScreenProfile(): {
+  name: "1080p" | "720p";
+  logicalWidth: number;
+  logicalHeight: number;
+} {
+  const name = process.env.OMARCHY_BOT_SCREEN_PROFILE ?? "1080p";
+  if (name === "1080p") return { name, logicalWidth: 1920, logicalHeight: 1080 };
+  if (name === "720p") return { name, logicalWidth: 1280, logicalHeight: 720 };
+  throw new Error("OMARCHY_BOT_SCREEN_PROFILE must be 1080p or 720p");
 }
 
 export function loadConfig(): Config {
@@ -27,6 +53,7 @@ export function loadConfig(): Config {
   const stateDir = process.env.OMARCHY_BOT_STATE ?? path.join(os.homedir(), ".local/state/omarchy-bot");
   const runtimeDir = process.env.XDG_RUNTIME_DIR;
   const voxtypeBin = process.env.OMARCHY_BOT_VOXTYPE_BIN;
+  const screenProfile = botScreenProfile();
   const cfg: Config = {
     dataDir,
     stateDir,
@@ -44,6 +71,11 @@ export function loadConfig(): Config {
     ...(voxtypeBin !== undefined ? { voxtypeBin } : {}),
     port: Number(process.env.OMARCHY_BOT_PORT ?? 7321),
     turnTimeoutMs: Number(process.env.OMARCHY_BOT_TURN_TIMEOUT_MS ?? 600_000),
+    botScreenCapacity: positiveInteger("OMARCHY_BOT_SCREEN_CAPACITY", 4),
+    botScreenProfile: screenProfile.name,
+    botScreenLogicalWidth: screenProfile.logicalWidth,
+    botScreenLogicalHeight: screenProfile.logicalHeight,
+    botScreenFrameRate: positiveInteger("OMARCHY_BOT_SCREEN_FRAME_RATE", 16),
   };
   mkdirSync(dataDir, { recursive: true });
   mkdirSync(stateDir, { recursive: true });

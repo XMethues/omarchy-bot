@@ -69,6 +69,18 @@ export interface BotScreenRuntimeAdapter {
 export interface BotScreenLifecycle {
   state: BotScreenLifecycleState;
   failure?: string;
+  admission?: {
+    reason: "capacity";
+    active: number;
+    limit: number;
+  };
+}
+
+export interface BotScreenManagerOptions {
+  capacity: number;
+  logicalWidth: number;
+  logicalHeight: number;
+  frameRate: number;
 }
 
 interface SurfaceRow {
@@ -117,7 +129,12 @@ export class BotScreenManager {
   constructor(
     private readonly db: Database,
     private readonly adapter: BotScreenRuntimeAdapter,
-  ) {}
+    private readonly options: BotScreenManagerOptions,
+  ) {
+    if (!Number.isSafeInteger(options.capacity) || options.capacity < 1) {
+      throw new Error("Bot Screen capacity must be a positive integer");
+    }
+  }
 
   subscribe(listener: BotScreenTransitionListener): () => void {
     this.#listeners.add(listener);
@@ -139,32 +156,41 @@ export class BotScreenManager {
                 bot_surfaces.scale, bot_surfaces.refresh_rate, bot_surfaces.last_failure
          FROM bot_surfaces
          JOIN bots ON bots.id = bot_surfaces.bot_id
-         WHERE bot_surfaces.lifecycle_state IN ('starting', 'ready', 'failed')`,
+         WHERE bot_surfaces.lifecycle_state IN ('starting', 'ready', 'failed')
+         ORDER BY bot_surfaces.transitioned_at, bot_surfaces.surface_id`,
       )
       .all() as RecoveryRow[];
 
-    await Promise.all(rows.map((row) => this.#serialize(row.surface_id, async () => {
-      const provision = this.#provision(row.surface_id, row.runtime_generation, row);
-      const runtime = await this.adapter.reconcile?.(provision).catch(() => undefined);
-      if (row.archived) {
-        await runtime?.releaseInput().catch(() => {});
-        await runtime?.stop().catch(() => {});
+    for (const row of rows) {
+      await this.#serialize(row.surface_id, async () => {
+        const provision = this.#provision(row.surface_id, row.runtime_generation, row);
+        const runtime = await this.adapter.reconcile?.(provision).catch(() => undefined);
+        if (row.archived) {
+          await runtime?.releaseInput().catch(() => {});
+          await runtime?.stop().catch(() => {});
+          this.#transition(row.surface_id, "stopped", null);
+          return;
+        }
+        if (row.lifecycle_state === "failed") {
+          await runtime?.releaseInput().catch(() => {});
+          await runtime?.stop().catch(() => {});
+          this.#transition(row.surface_id, "failed", row.last_failure);
+          return;
+        }
+        if (this.#reservedCapacity() >= this.options.capacity) {
+          await runtime?.releaseInput().catch(() => {});
+          await runtime?.stop().catch(() => {});
+          this.#transition(row.surface_id, "stopped", null);
+          return;
+        }
+        if (runtime !== undefined) {
+          this.#install(row.surface_id, provision, Promise.resolve(runtime), runtime);
+          return;
+        }
         this.#transition(row.surface_id, "stopped", null);
-        return;
-      }
-      if (row.lifecycle_state === "failed") {
-        await runtime?.releaseInput().catch(() => {});
-        await runtime?.stop().catch(() => {});
-        this.#transition(row.surface_id, "failed", row.last_failure);
-        return;
-      }
-      if (runtime !== undefined) {
-        this.#install(row.surface_id, provision, Promise.resolve(runtime), runtime);
-        return;
-      }
-      this.#transition(row.surface_id, "stopped", null);
-      await this.#start({ botId: row.bot_id, surfaceId: row.surface_id }, this.#row(row.surface_id));
-    })));
+        await this.#start({ botId: row.bot_id, surfaceId: row.surface_id }, this.#row(row.surface_id));
+      });
+    }
   }
 
   open(owner: ComputerSurfaceOwner): BotScreenLifecycle {
@@ -177,6 +203,14 @@ export class BotScreenManager {
       row = this.#row(owner.surfaceId);
     }
     if (row.lifecycle_state !== "stopped") return this.#lifecycle(row);
+    const active = this.#reservedCapacity();
+    if (active >= this.options.capacity) {
+      return {
+        state: "stopped",
+        admission: { reason: "capacity", active, limit: this.options.capacity },
+      };
+    }
+
 
     void this.#start(owner, row);
     return { state: "starting" };
@@ -383,6 +417,7 @@ export class BotScreenManager {
       throw error;
     }
   }
+
   async #failRuntime(surfaceId: SurfaceId, entry: RuntimeEntry, error: unknown): Promise<void> {
     if (this.#entries.get(surfaceId) !== entry) return;
     this.#entries.delete(surfaceId);
@@ -399,14 +434,14 @@ export class BotScreenManager {
     }
   }
 
-  #provision(surfaceId: SurfaceId, generation: number, row: SurfaceRow): BotScreenProvision {
+  #provision(surfaceId: SurfaceId, generation: number, _row: SurfaceRow): BotScreenProvision {
     return {
       surfaceId,
       generation,
-      logicalWidth: row.logical_width,
-      logicalHeight: row.logical_height,
-      scale: row.scale,
-      refreshRate: row.refresh_rate,
+      logicalWidth: this.options.logicalWidth,
+      logicalHeight: this.options.logicalHeight,
+      scale: 1,
+      refreshRate: this.options.frameRate,
     };
   }
 
@@ -441,6 +476,14 @@ export class BotScreenManager {
       ...(failure === null ? {} : { failure }),
     };
     for (const listener of this.#listeners) listener(transition);
+  }
+
+  #reservedCapacity(): number {
+    return new Set([
+      ...this.#entries.keys(),
+      ...this.#stops.keys(),
+      ...this.#cleanupRuntimes.keys(),
+    ]).size;
   }
 
   #lifecycle(row: SurfaceRow): BotScreenLifecycle {

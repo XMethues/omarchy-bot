@@ -82,6 +82,7 @@ async function connectProjection(
   name: string,
 ): Promise<{
   peer: PeerConnection;
+  frames: DataChannel;
   control: DataChannel;
   input: DataChannel;
   answer: ProjectionAnswer;
@@ -93,7 +94,7 @@ async function connectProjection(
     });
   });
   const described = waitFor<void>((resolve) => peer.onLocalDescription(() => resolve()));
-  peer.createDataChannel("screen.frames.v1", { unordered: false });
+  const frames = peer.createDataChannel("screen.frames.v1", { unordered: false });
   const control = peer.createDataChannel("screen.control.v1", { unordered: false });
   const input = peer.createDataChannel("screen.input.v1", { unordered: false });
   peer.setLocalDescription("offer");
@@ -113,8 +114,8 @@ async function connectProjection(
   const answer = await response.json() as ProjectionAnswer;
   peer.setRemoteDescription(answer.sdp, "answer");
   for (const candidate of answer.candidates) peer.addRemoteCandidate(candidate.candidate, candidate.sdpMid);
-  await Promise.all([openChannel(control), openChannel(input)]);
-  return { peer, control, input, answer };
+  await Promise.all([openChannel(frames), openChannel(control), openChannel(input)]);
+  return { peer, frames, control, input, answer };
 }
 
 function authority(input: DataChannel, active = true): Promise<{
@@ -247,6 +248,32 @@ describe("WebRTC Screen Projection signaling", () => {
     const activeStatus = await fetch(statusUrl);
     expect(activeStatus.status).toBe(200);
     expect(await activeStatus.json()).toMatchObject({ state: "preview", mode: "preview", framesSent: 1 });
+  }, 15_000);
+
+  test("expanded Screen Projection targets at least 15 delivered frames per second", async () => {
+    const owner = await ownerFor(h, await makeBot(h, "Expanded frame rate"));
+    const connection = await connectProjection(h, owner, "expanded-frame-rate-browser");
+    peer = connection.peer;
+    const eighthFrame = Promise.withResolvers<void>();
+    let frames = 0;
+    connection.frames.onMessage((raw) => {
+      if (typeof raw !== "string") return;
+      const message = JSON.parse(raw) as { type?: string };
+      if (message.type !== "frame") return;
+      frames += 1;
+      if (frames === 8) eighthFrame.resolve();
+    });
+
+    const startedAt = performance.now();
+    expect(connection.control.sendMessage(JSON.stringify({
+      version: 1,
+      type: "view",
+      surfaceId: owner.surfaceId,
+      runtimeGeneration: connection.answer.runtimeGeneration,
+      mode: "expanded",
+    }))).toBeTrue();
+    await eighthFrame.promise;
+    expect(performance.now() - startedAt).toBeLessThanOrEqual(550);
   }, 15_000);
 
   test("rejects a WebRTC offer when Bot and Surface do not own each other", async () => {

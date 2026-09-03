@@ -27,6 +27,7 @@ function writeStatusAtomic(statusPath: string, data: unknown): void {
 
 export interface MainOptions {
   botScreenAdapter?: BotScreenRuntimeAdapter;
+  botScreenCapacity?: number;
 }
 
 export async function main(options: MainOptions = {}): Promise<{
@@ -36,6 +37,7 @@ export async function main(options: MainOptions = {}): Promise<{
   svc: DaemonServices;
 }> {
   const cfg = loadConfig();
+  if (options.botScreenCapacity !== undefined) cfg.botScreenCapacity = options.botScreenCapacity;
   const db = openDb(cfg);
   recoverOnStartup(db);
   const runtimeDir = process.env.XDG_RUNTIME_DIR;
@@ -79,7 +81,16 @@ export async function main(options: MainOptions = {}): Promise<{
       ? {}
       : { applicationBin: process.env.OMARCHY_BOT_SCREEN_APP_BIN }),
   });
-  const screens = new BotScreenManager(db, options.botScreenAdapter ?? productionScreenAdapter);
+  const screens = new BotScreenManager(
+    db,
+    options.botScreenAdapter ?? productionScreenAdapter,
+    {
+      capacity: cfg.botScreenCapacity,
+      logicalWidth: cfg.botScreenLogicalWidth,
+      logicalHeight: cfg.botScreenLogicalHeight,
+      frameRate: cfg.botScreenFrameRate,
+    },
+  );
   await screens.recover();
   let projections!: ScreenProjectionService;
 
@@ -104,6 +115,7 @@ export async function main(options: MainOptions = {}): Promise<{
     screens,
     new InputDiagnostics(db),
     (owner) => computer.canAcceptWebControl(owner),
+    cfg.botScreenFrameRate,
   );
 
   agents.init();

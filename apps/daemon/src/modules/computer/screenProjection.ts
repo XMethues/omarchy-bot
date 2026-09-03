@@ -22,7 +22,6 @@ import type {
 import { InputDiagnostics, type InputDiagnosticCategory } from "./inputDiagnostics.ts";
 
 const PREVIEW_INTERVAL_MS = 1_000;
-const EXPANDED_INTERVAL_MS = 200;
 const MAX_BUFFERED_BYTES = 8 * 1024 * 1024;
 const MAX_FRAME_BYTES = MAX_BUFFERED_BYTES;
 const CHUNK_BYTES = 48 * 1024;
@@ -53,6 +52,7 @@ interface ProjectionSession {
   input?: DataChannel;
   sequence: number;
   timer?: Timer | undefined;
+  nextFrameAt?: number | undefined;
   framesSent: number;
   captureInFlight: boolean;
   inputSuspended: boolean;
@@ -126,7 +126,11 @@ export class ScreenProjectionService {
     private readonly screens: BotScreenManager,
     private readonly diagnostics: InputDiagnostics,
     private readonly canAcceptWebControl: (owner: ComputerSurfaceOwner) => boolean,
+    private readonly expandedFrameRate = 15,
   ) {
+    if (!Number.isSafeInteger(expandedFrameRate) || expandedFrameRate < 1) {
+      throw new Error("expanded Screen Projection frame rate must be a positive integer");
+    }
     this.#unsubscribeScreens = screens.subscribe((transition) => {
       if (transition.state === "failed" || transition.state === "stopped") {
         this.closeSurface(transition.surfaceId);
@@ -304,6 +308,7 @@ export class ScreenProjectionService {
     const changed = session.mode !== mode;
     if (mode !== "expanded" || changed) session.inputSuspended = false;
     session.mode = mode;
+    session.nextFrameAt = mode === "idle" ? undefined : performance.now();
     session.state = mode;
     if (mode === "expanded" && (changed || !this.#isInputController(session))) this.#claimInput(session);
     if (mode !== "idle") this.#schedule(session, 0);
@@ -367,8 +372,10 @@ export class ScreenProjectionService {
   }
 
   #scheduleNext(session: ProjectionSession): void {
-    const delay = session.mode === "expanded" ? EXPANDED_INTERVAL_MS : PREVIEW_INTERVAL_MS;
-    this.#schedule(session, delay);
+    const now = performance.now();
+    const interval = session.mode === "expanded" ? 1_000 / this.expandedFrameRate : PREVIEW_INTERVAL_MS;
+    session.nextFrameAt = Math.max((session.nextFrameAt ?? now) + interval, now);
+    this.#schedule(session, session.nextFrameAt - now);
   }
 
 

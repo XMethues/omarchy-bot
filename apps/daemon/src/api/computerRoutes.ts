@@ -12,6 +12,17 @@ function json(data: unknown, status = 200): Response {
 export function computerView(state: ComputerBrokerState, lifecycle: BotScreenLifecycle): ComputerViewDto {
   const identity = { botId: state.botId, surfaceId: state.surfaceId, takeover: state.takeover };
   const preview = state.lastImageAt === undefined ? {} : { previewAt: state.lastImageAt };
+  if (lifecycle.admission?.reason === "capacity") {
+    const { active, limit } = lifecycle.admission;
+    return {
+      ...identity,
+      state: "unavailable",
+      activity: `Bot Screen capacity is full (${active}/${limit}).`,
+      unavailableReason: "capacity",
+      capacity: { active, limit },
+      ...preview,
+    };
+  }
   if (lifecycle.state === "starting" || lifecycle.state === "stopped") {
     return { ...identity, state: "starting", activity: "Screen starting.", ...preview };
   }
@@ -49,7 +60,10 @@ export async function handleComputerRequest(
   if (owner === undefined) return json({ error: "Computer Surface was not found for this Bot" }, 404);
   const currentView = (): ComputerViewDto => computerView(computer.state(owner), screens.open(owner));
 
-  if (url.pathname === "/api/computer/state" && req.method === "GET") return json(currentView());
+  if (url.pathname === "/api/computer/state" && req.method === "GET") {
+    const lifecycle = screens.open(owner);
+    return json(computerView(computer.state(owner), lifecycle), lifecycle.admission === undefined ? 200 : 503);
+  }
   if (url.pathname === "/api/computer/take-control" && req.method === "POST") {
     if (!await screens.ensureReady(owner)) return json(currentView(), 503);
     const takeover = await computer.takeOver(owner);

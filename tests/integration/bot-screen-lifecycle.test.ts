@@ -145,4 +145,54 @@ describe("Bot Screen lifecycle", () => {
       expect(h.svc.db.query(`SELECT COUNT(*) AS count FROM ${table}`).get()).toEqual({ count: 0 });
     }
   });
+  test("rejects a Bot Screen before provisioning when measured capacity is full", async () => {
+    const adapter = new FakeBotScreenRuntimeAdapter();
+    h = await startDaemon(undefined, { botScreenAdapter: adapter, botScreenCapacity: 1 });
+    const first = await bot(h, await makeBot(h, "Admitted Screen"));
+    const second = await bot(h, await makeBot(h, "Busy Screen"));
+    await waitForState(h, first, "ready");
+
+    const startsBeforeRejection = adapter.starts.length;
+    const rejected = await apiStatus(h, "GET", computerPath(second));
+    expect(rejected).toEqual({
+      status: 503,
+      body: {
+        botId: second.id,
+        surfaceId: second.surfaceId,
+        state: "unavailable",
+        takeover: "unavailable",
+        activity: "Bot Screen capacity is full (1/1).",
+        unavailableReason: "capacity",
+        capacity: { active: 1, limit: 1 },
+      },
+    });
+    expect(adapter.starts).toHaveLength(startsBeforeRejection);
+    expect(await waitForState(h, first, "ready")).toMatchObject({ surfaceId: first.surfaceId });
+    expect((await fetch(`${h.baseUrl}/api/computer/snapshot?botId=${first.id}&surfaceId=${first.surfaceId}`)).status)
+      .toBe(200);
+
+    await api<BotDto>(h, "POST", `/api/bots/${first.id}/archive`, {});
+    expect((await apiStatus(h, "GET", computerPath(second))).status).toBe(200);
+    await waitForState(h, second, "ready");
+    expect(adapter.running(second.surfaceId)).toEqual({ generation: 1 });
+  });
+
+  test("recovery sheds excess runtimes before admitting Screens at a lower capacity", async () => {
+    const adapter = new FakeBotScreenRuntimeAdapter();
+    h = await startDaemon(undefined, { botScreenAdapter: adapter, botScreenCapacity: 2 });
+    const owners = await Promise.all([
+      bot(h, await makeBot(h, "Recovery capacity A")),
+      bot(h, await makeBot(h, "Recovery capacity B")),
+    ]);
+    await Promise.all(owners.map((owner) => waitForState(h!, owner, "ready")));
+    const home = h.home;
+
+    await h.disconnectForRestart();
+    h = await startDaemon(home, { botScreenAdapter: adapter, botScreenCapacity: 1 });
+
+    const results = await Promise.all(owners.map((owner) => apiStatus(h!, "GET", computerPath(owner))));
+    expect(results.map((result) => result.status).sort()).toEqual([200, 503]);
+    expect(owners.filter((owner) => adapter.running(owner.surfaceId) !== undefined)).toHaveLength(1);
+  });
+
 });
