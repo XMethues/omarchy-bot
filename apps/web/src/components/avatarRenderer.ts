@@ -1,4 +1,4 @@
-import { Avatar as CurrentAvatar, Style as CurrentStyle } from "@dicebear/core";
+import { Avatar as CurrentAvatar, Style as CurrentStyle } from "@dicebear/core-v10";
 import { renderLegacyAvatar } from "@omarchy-bot/avatar-renderer-v9";
 import currentPixelbotDefinition from "@dicebear/styles/pixelbot.json";
 import currentShapesDefinition from "@dicebear/styles/shapes.json";
