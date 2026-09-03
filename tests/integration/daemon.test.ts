@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { Database } from "bun:sqlite";
 import { MIGRATIONS } from "../../apps/daemon/src/persistence/db.ts";
+import { AVATAR_RENDERER_ID } from "../../packages/protocol/src/index.ts";
 import { api, apiStatus, makeBot, sendToBot, sendToThread, startDaemon, waitThreadIdle, type Harness } from "./helpers/harness.ts";
 
 let h: Harness;
@@ -432,7 +433,7 @@ describe("integration: legacy migration", () => {
         "bot_22222222222222222222222222222222",
         "bot_33333333333333333333333333333333",
       ]);
-      expect(visibleBots.every((bot) => bot.avatar.recipe?.rendererVersion === "9.4.3")).toBeTrue();
+      expect(visibleBots.every((bot) => bot.avatar.recipe?.rendererVersion === AVATAR_RENDERER_ID)).toBeTrue();
     } finally {
       await contracted.stop();
       rmSync(legacyHome, { recursive: true, force: true });

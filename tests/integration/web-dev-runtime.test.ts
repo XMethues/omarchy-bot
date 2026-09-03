@@ -45,13 +45,13 @@ afterAll(async () => {
   await devServer.exited;
 });
 
-test("the Vite development runtime loads both pinned DiceBear renderers", async () => {
+test("the Vite development runtime loads the sole pinned DiceBear renderer", async () => {
   const browser = await chromium.launch();
   try {
     const page = await browser.newPage();
 
     await page.goto(devUrl);
-    // Dynamic import is the contract under test: Vite must resolve both pinned browser modules.
+    // Dynamic import is the contract under test: Vite must load the browser renderer module.
     const moduleError = await page.evaluate(async (modulePath) => {
       try {
         await import(modulePath);

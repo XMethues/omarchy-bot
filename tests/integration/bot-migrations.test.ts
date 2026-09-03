@@ -5,7 +5,7 @@ import path from "node:path";
 import { Database } from "bun:sqlite";
 import { MIGRATIONS, openDb } from "../../apps/daemon/src/persistence/db.ts";
 import { renderAvatarRecipe } from "../../apps/web/src/components/avatarRenderer.ts";
-import { AvatarRecipeDto } from "../../packages/protocol/src/index.ts";
+import { AVATAR_RENDERER_ID, AvatarRecipeDto } from "../../packages/protocol/src/index.ts";
 
 function databaseThrough(migrationName: string): { db: Database; dbPath: string; home: string } {
   const home = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-migrations-"));
@@ -36,7 +36,7 @@ function finishMigrations(db: Database, dbPath: string): Database {
 }
 
 describe("integration: Bot provenance migrations", () => {
-  test("preserves shape-only ambiguity while classifying proven user ownership", () => {
+  test("preserves Bot provenance while replacing every legacy avatar recipe", () => {
     const { db, dbPath, home } = databaseThrough("0004-contract-legacy-runtime");
     const now = "2026-09-01T00:02:00.000Z";
     const userRecipe = ` {"rendererVersion":"9.4.3", "style":"micah", "seed":"changed-legacy-seed", "options":{"backgroundColor":["ff0000"],"flip":true}} `;
@@ -72,19 +72,57 @@ describe("integration: Bot provenance migrations", () => {
           ["bot_shape_only", "user_created"],
           ["bot_user", "user_created"],
         ]);
-        expect(bots.find((bot) => bot.id === "bot_user")?.avatar_recipe).toBe(userRecipe);
-        expect(AvatarRecipeDto.parse(JSON.parse(bots.find((bot) => bot.id === "bot_user")!.avatar_recipe))).toEqual({
-          rendererVersion: "9.4.3",
-          style: "micah",
-          seed: "changed-legacy-seed",
-          options: { backgroundColor: ["ff0000"], flip: true },
-        });
-        expect(bots.find((bot) => bot.id === "bot_conversation")?.avatar_recipe).toBe(conversationRecipe);
-        expect(bots.find((bot) => bot.id === "bot_config")?.avatar_recipe).toBe(configRecipe);
-        expect(bots.find((bot) => bot.id === "bot_ambiguous")?.avatar_recipe).toBe(ambiguousRecipe);
-        expect(bots.find((bot) => bot.id === "bot_shape_only")?.avatar_recipe).toBe(
-          '{"rendererVersion":"9.4.3","style":"shapes","seed":"bot_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","options":{}}',
-        );
+        for (const bot of bots) {
+          expect(AvatarRecipeDto.parse(JSON.parse(bot.avatar_recipe))).toEqual({
+            rendererVersion: AVATAR_RENDERER_ID,
+            style: "shapes",
+            seed: bot.id,
+            options: {},
+          });
+        }
+      } finally {
+        migrated.close();
+      }
+    } finally {
+      try {
+        db.close();
+      } catch {
+        // finishMigrations already closed the setup connection.
+      }
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("resets unsupported generated recipes to the sole current renderer", () => {
+    const { db, dbPath, home } = databaseThrough("0008-staged-attachment-draft-ownership");
+    const now = "2026-09-01T00:02:00.000Z";
+    const currentRenderer = AVATAR_RENDERER_ID;
+
+    try {
+      db.query(`INSERT INTO agents (id, display_name, status, updated_at) VALUES ('pi', 'Pi', 'ready', ?)`).run(now);
+      db.query(
+        `INSERT INTO bots (id, name, instructions, agent_id, avatar_kind, avatar_recipe, created_at, updated_at)
+         VALUES ('bot_legacy', 'Legacy', '', 'pi', 'recipe', '{"rendererVersion":"9.4.3","style":"micah","seed":"old-seed","options":{"flip":true}}', ?, ?),
+                ('bot_current', 'Current', '', 'pi', 'recipe', '{"rendererVersion":"dicebear-core@10.7.0+styles@10.6.0","style":"thumbs","seed":"current-seed","options":{}}', ?, ?)`,
+      ).run(now, now, now, now);
+
+      const migrated = finishMigrations(db, dbPath);
+      try {
+        const bots = migrated.query<{ id: string; avatar_kind: string; avatar_recipe: string }, []>(
+          `SELECT id, avatar_kind, avatar_recipe FROM bots ORDER BY id`,
+        ).all();
+        expect(bots).toEqual([
+          {
+            id: "bot_current",
+            avatar_kind: "recipe",
+            avatar_recipe: `{"rendererVersion":"${currentRenderer}","style":"thumbs","seed":"current-seed","options":{}}`,
+          },
+          {
+            id: "bot_legacy",
+            avatar_kind: "generated",
+            avatar_recipe: `{"rendererVersion":"${currentRenderer}","style":"shapes","seed":"bot_legacy","options":{}}`,
+          },
+        ]);
       } finally {
         migrated.close();
       }
@@ -120,7 +158,7 @@ describe("integration: Bot provenance migrations", () => {
           options: { title: "kept" },
           seed: "already-upgraded",
           style: "shapes",
-          rendererVersion: "dicebear-core@10.7.0+styles@10.6.0",
+          rendererVersion: AVATAR_RENDERER_ID,
         });
         expect(renderAvatarRecipe(repaired, "idle")).not.toBeUndefined();
         expect(
@@ -162,7 +200,11 @@ describe("integration: Bot provenance migrations", () => {
         expect(bots).toHaveLength(1);
         expect(bots[0]?.agent_id).toBe("claude");
         expect(bots[0]?.provenance).toBe("legacy_conversation");
-        expect(JSON.parse(bots[0]!.avatar_recipe)).toMatchObject({ rendererVersion: "9.4.3", style: "shapes", options: {} });
+        expect(JSON.parse(bots[0]!.avatar_recipe)).toMatchObject({
+          rendererVersion: AVATAR_RENDERER_ID,
+          style: "shapes",
+          options: {},
+        });
       } finally {
         migrated.close();
       }

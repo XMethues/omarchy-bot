@@ -34,7 +34,7 @@ The specification and accepted design define product behavior. Context documents
 - A Bot is a persistent user-created or conservatively preserved assistant. An Agent is a Pi, Claude, or Codex execution backend. Enabled Agent inventory is never a Bot.
 - Migration retains user-owned conversation, profile, and configuration data, records `user_created`, `legacy_conversation`, or `legacy_inventory` provenance, deletes only proven inventory, and preserves ambiguity.
 - Each Agent adapter returns the sole `AgentCapabilityInventory` used for steering, abort, session deletion, Thread actions, attachment modalities, and native event families.
-- New Avatar Recipes use `dicebear-core@10.7.0+styles@10.6.0`; legacy renderer id `9.4.3` remains deterministic until explicit regeneration.
+- Avatar Recipes use the sole current renderer `dicebear-core@10.7.0+styles@10.6.0`; upgrades replace unsupported recipes with deterministic current defaults instead of shipping compatibility renderers.
 - Create and History use desktop Dialogs and narrow BottomSheets. Computer uses a desktop drawer and narrow BottomSheet.
 - Emergency control is absent while idle and immediately available while computer input is active or stopped.
 - Browser E2E is role-first and treats accessible roles and visible names as the public user seam.

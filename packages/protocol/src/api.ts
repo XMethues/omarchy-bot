@@ -35,6 +35,9 @@ export const AgentDto = z.object({
 export type AgentDto = z.infer<typeof AgentDto>;
 
 // ----- Avatars -----
+export const AVATAR_RENDERER_ID = "dicebear-core@10.7.0+styles@10.6.0" as const;
+export const AVATAR_STYLE_IDS = ["shapes", "pixelbot", "thumbs"] as const;
+
 
 const AvatarOptionValueDto = z.union([
   z.string(),
@@ -44,8 +47,8 @@ const AvatarOptionValueDto = z.union([
 ]);
 
 export const AvatarRecipeDto = z.object({
-  rendererVersion: z.string(),
-  style: z.string(),
+  rendererVersion: z.literal(AVATAR_RENDERER_ID),
+  style: z.enum(AVATAR_STYLE_IDS),
   seed: z.string(),
   options: z.record(AvatarOptionValueDto),
 });

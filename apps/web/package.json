@@ -11,8 +11,7 @@
   "dependencies": {
     "@astryxdesign/core": "0.5.2",
     "@astryxdesign/theme-neutral": "^0.5.2",
-    "@dicebear/core-v10": "npm:@dicebear/core@10.7.0",
-    "@omarchy-bot/avatar-renderer-v9": "workspace:*",
+    "@dicebear/core": "10.7.0",
     "@dicebear/styles": "10.6.0",
     "@omarchy-bot/api-client": "workspace:*",
     "@omarchy-bot/protocol": "workspace:*",

@@ -104,7 +104,7 @@ A Bot can use either:
 - a locally uploaded image; or
 - a deterministic animated DiceBear SVG Avatar Recipe.
 
-New Bots and explicitly regenerated avatars use renderer id `dicebear-core@10.7.0+styles@10.6.0` and DiceBear's native `animationVariant`. Each recipe stores its renderer id, style, seed, and validated options so rendering remains lossless. Legacy renderer id `9.4.3` remains meaningful: those recipes keep deterministic legacy rendering and are never silently rewritten. A legacy avatar upgrades only when the user explicitly requests a new variation or prompt-generated recipe.
+Generated avatars use the application's sole renderer id `dicebear-core@10.7.0+styles@10.6.0` and DiceBear's native `animationVariant`. Each recipe stores its renderer id, style, seed, and validated options. Product upgrades replace recipes from retired or unsupported renderers with deterministic current defaults; the browser bundle does not ship legacy renderers.
 
 In profile editing, the user may upload an image, choose another generated variation, or describe an avatar in a prompt. The Bot's selected Agent converts that prompt into a constrained Avatar Recipe. Omarchy Bot validates the recipe and renders DiceBear itself; Agent-produced SVG, HTML, scripts, and remote URLs are never rendered.
 

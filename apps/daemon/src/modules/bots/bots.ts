@@ -1,11 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { Database } from "bun:sqlite";
 import type { AgentId } from "@omarchy-bot/domain";
-import type { AvatarDto, AvatarRecipeDto, BotDto, BotViewDto, TurnDto } from "@omarchy-bot/protocol";
+import { AVATAR_RENDERER_ID, type AvatarDto, type AvatarRecipeDto, type BotDto, type BotViewDto, type TurnDto } from "@omarchy-bot/protocol";
 import type { EventLog } from "../events/eventLog.ts";
 import type { AgentsRegistry } from "../agents/registry.ts";
 import type { ThreadsService } from "../threads/threads.ts";
-import { AVATAR_RENDERER_VERSION } from "../avatars/recipes.ts";
 
 interface BotRow {
   id: string; name: string; instructions: string; agent_id: string;
@@ -25,7 +24,7 @@ export interface BotTurnAborter {
 
 /** A new Bot ships with a deterministic generated avatar recipe. */
 export function defaultAvatarRecipe(botId: string): string {
-  return JSON.stringify({ rendererVersion: AVATAR_RENDERER_VERSION, style: "shapes", seed: botId, options: {} });
+  return JSON.stringify({ rendererVersion: AVATAR_RENDERER_ID, style: "shapes", seed: botId, options: {} });
 }
 
 export class HttpError extends Error {
@@ -248,7 +247,7 @@ export class BotsService {
       .get(id) as { count: number };
     const variation = generated.count + 1;
     const recipe: AvatarRecipeDto = {
-      rendererVersion: AVATAR_RENDERER_VERSION,
+      rendererVersion: AVATAR_RENDERER_ID,
       style: "shapes",
       seed: createHash("sha256").update(`${id}:${variation}`).digest("hex"),
       options: {},

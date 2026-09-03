@@ -17,8 +17,8 @@ The identity presented for a Bot: its editable name, job instructions, and avata
 _Avoid_: Role contract, capability manifest, editable Agent
 
 **Avatar Recipe**:
-A validated set of DiceBear style options stored with the exact renderer identity that produced it. The Agent produces recipe data rather than executable SVG; Omarchy Bot renders it deterministically. Legacy recipes retain their renderer identity until the user explicitly requests an upgrade.
-_Avoid_: Agent-generated SVG, avatar capability, implicit renderer upgrade
+A validated set of DiceBear style options for the application's sole current renderer. The Agent produces recipe data rather than executable SVG; Omarchy Bot renders it deterministically. Product upgrades replace recipes from retired renderers with deterministic current defaults.
+_Avoid_: Agent-generated SVG, avatar capability, multiple active renderer versions
 
 **Thread**:
 A conversation between the user and one Bot. A Bot may have multiple Threads; selecting a Bot opens its most recently active Thread.

@@ -86,52 +86,6 @@ test.describe("Bot profiles and avatars", () => {
     await expect(page.getByRole("dialog", { name: "Bot profile" }).getByTestId("avatar-thumbs")).toBeVisible();
   });
 
-  test("dispatches exact renderer versions without upgrading legacy style identities", async ({ page, request }) => {
-    const botId = await createBot(page, "Pinned Renderer Bot");
-    const currentResponse = await request.get(`/api/bots/${botId}`);
-    const current: unknown = await currentResponse.json();
-    if (current === null || typeof current !== "object") throw new Error("Bot API returned an invalid profile");
-
-    let recipe: {
-      rendererVersion: string;
-      style: string;
-      seed: string;
-      options: Record<string, string | number | boolean>;
-    } = { rendererVersion: "9.4.3", style: "micah", seed: "legacy-e2e", options: { flip: true } };
-    await page.route(`**/api/bots/${botId}/avatar/recipe`, async (route) => {
-      await route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({ ...current, avatar: { kind: "recipe", recipe } }),
-      });
-    });
-
-    await openProfile(page);
-    const prompt = page.getByRole("textbox", { name: "Describe avatar" });
-    await prompt.fill("Keep my pinned renderer");
-    await page.getByRole("button", { name: "Create from description" }).click();
-    const legacyAvatar = page.getByRole("dialog", { name: "Bot profile" }).getByTestId("avatar-micah");
-    await expect(legacyAvatar).toBeVisible();
-    const legacySvg = await avatarSvg(legacyAvatar);
-    expect(legacySvg).toContain("<dc:title>Avatar Illustration System</dc:title>");
-    expect(legacySvg).not.toContain("dbsh-");
-
-    recipe = {
-      rendererVersion: "dicebear-core@10.7.0+styles@10.6.0",
-      style: "shapes",
-      seed: "current-e2e",
-      options: {},
-    };
-    await prompt.fill("Use the current pinned renderer");
-    await page.getByRole("button", { name: "Create from description" }).click();
-    const currentAvatar = page.getByRole("dialog", { name: "Bot profile" }).getByTestId("avatar-shapes");
-    await expect(currentAvatar).toBeVisible();
-    const currentSvg = await avatarSvg(currentAvatar);
-    expect(currentSvg).toContain("@keyframes");
-    expect(currentSvg).toContain("@media (prefers-reduced-motion: no-preference)");
-    expect(currentSvg).toContain("dbsh-slowest");
-    expect(currentSvg).not.toBe(legacySvg);
-  });
 
   test("shows selected and streaming activity without moving transcript content", async ({ page }) => {
     await createBot(page, "Activity Avatar Bot");

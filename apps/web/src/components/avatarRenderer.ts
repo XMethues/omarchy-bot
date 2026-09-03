@@ -1,12 +1,8 @@
-import { Avatar as CurrentAvatar, Style as CurrentStyle } from "@dicebear/core-v10";
-import { renderLegacyAvatar } from "@omarchy-bot/avatar-renderer-v9";
+import { Avatar as CurrentAvatar, Style as CurrentStyle } from "@dicebear/core";
+import { AVATAR_RENDERER_ID, type AvatarRecipeDto } from "@omarchy-bot/protocol";
 import currentPixelbotDefinition from "@dicebear/styles/pixelbot.json";
 import currentShapesDefinition from "@dicebear/styles/shapes.json";
 import currentThumbsDefinition from "@dicebear/styles/thumbs.json";
-import type { AvatarRecipeDto } from "@omarchy-bot/protocol";
-
-export const CURRENT_AVATAR_RENDERER = "dicebear-core@10.7.0+styles@10.6.0";
-export const LEGACY_AVATAR_RENDERER = "9.4.3";
 
 export type AvatarActivity = "idle" | "selected" | "working" | "streaming";
 
@@ -53,10 +49,8 @@ function remember(key: string, dataUri: string): string {
   return dataUri;
 }
 
-function renderCurrent(recipe: AvatarRecipeDto, activity: AvatarActivity): string | undefined {
-  const style = currentStyles[recipe.style as keyof typeof currentStyles];
-  if (style === undefined) return undefined;
-
+function renderCurrent(recipe: AvatarRecipeDto, activity: AvatarActivity): string {
+  const style = currentStyles[recipe.style];
   const variant = animationVariant(activity);
   const options = variant === undefined
     ? { ...(recipe.options as object), seed: recipe.seed }
@@ -64,8 +58,8 @@ function renderCurrent(recipe: AvatarRecipeDto, activity: AvatarActivity): strin
   return new CurrentAvatar(style, options).toDataUri();
 }
 
-/** Render only recipes whose exact pinned renderer is available locally. */
-export function renderAvatarRecipe(recipe: AvatarRecipeDto, activity: AvatarActivity): string | undefined {
+/** Render a validated recipe with the application's sole pinned renderer. */
+export function renderAvatarRecipe(recipe: AvatarRecipeDto, activity: AvatarActivity): string {
   const key = cacheKey(recipe, activity);
   const cached = svgCache.get(key);
   if (cached !== undefined) {
@@ -74,10 +68,5 @@ export function renderAvatarRecipe(recipe: AvatarRecipeDto, activity: AvatarActi
     return cached;
   }
 
-  const dataUri = recipe.rendererVersion === CURRENT_AVATAR_RENDERER
-    ? renderCurrent(recipe, activity)
-    : recipe.rendererVersion === LEGACY_AVATAR_RENDERER
-      ? renderLegacyAvatar(recipe)
-      : undefined;
-  return dataUri === undefined ? undefined : remember(key, dataUri);
+  return remember(key, renderCurrent(recipe, activity));
 }

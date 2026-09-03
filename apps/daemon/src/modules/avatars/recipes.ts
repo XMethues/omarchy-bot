@@ -1,8 +1,11 @@
 import { z } from "zod";
-import type { AvatarRecipeDto } from "@omarchy-bot/protocol";
+import {
+  AVATAR_RENDERER_ID,
+  AVATAR_STYLE_IDS,
+  type AvatarRecipeDto,
+} from "@omarchy-bot/protocol";
 
-export const AVATAR_RENDERER_VERSION = "dicebear-core@10.7.0+styles@10.6.0";
-export const ALLOWED_AVATAR_STYLES = ["shapes", "pixelbot", "thumbs"] as const;
+export const ALLOWED_AVATAR_STYLES = AVATAR_STYLE_IDS;
 export type AllowedAvatarStyle = (typeof ALLOWED_AVATAR_STYLES)[number];
 
 const styleOptions = {
@@ -58,7 +61,7 @@ export function parseAvatarRecipeResponse(text: string): AvatarRecipeDto {
   }
 
   return {
-    rendererVersion: AVATAR_RENDERER_VERSION,
+    rendererVersion: AVATAR_RENDERER_ID,
     style: envelope.data.style,
     seed: envelope.data.seed,
     options: options.data,

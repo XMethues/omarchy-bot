@@ -1,4 +1,5 @@
 import { Database } from "bun:sqlite";
+import { AVATAR_RENDERER_ID } from "@omarchy-bot/protocol";
 import type { Config } from "../bootstrap/config.ts";
 
 export const MIGRATIONS: { name: string; sql: string }[] = [
@@ -238,7 +239,7 @@ SELECT 'bot_' || lower(hex(randomblob(16))),
        COALESCE((SELECT r.instructions FROM roles r WHERE r.bot_id = b.id AND r.id = 'default'), ''),
        b.id,
        'generated',
-       '{"rendererVersion":"9.4.3","style":"shapes","seed":"bot_' || lower(hex(randomblob(16))) || '","options":{}}',
+       '{"rendererVersion":"${AVATAR_RENDERER_ID}","style":"shapes","seed":"bot_' || lower(hex(randomblob(16))) || '","options":{}}',
        b.created_at,
        b.updated_at
 FROM bots b
@@ -262,7 +263,7 @@ WHERE EXISTS (SELECT 1 FROM threads t WHERE t.bot_id = b.id)
      WHEN 'gemini' THEN 'Gemini' WHEN 'copilot' THEN 'Copilot' WHEN 'crush' THEN 'Crush'
      ELSE b.id
    END;
--- Keep the generated legacy-conversation recipe tied to its new Bot identity.
+-- Keep the generated conversation recipe tied to its new Bot identity.
 -- This is provenance evidence for fresh migrations and avoids manufacturing
 -- the random-seed signature used by older inventory placeholders.
 UPDATE bots_new
@@ -423,7 +424,7 @@ WHERE NOT EXISTS (SELECT 1 FROM bot_state WHERE bot_state.bot_id = bots.id)
     END
     OR (
       json_valid(avatar_recipe)
-      AND json_extract(avatar_recipe, '$.rendererVersion') = '9.4.3'
+      AND json_extract(avatar_recipe, '$.rendererVersion') IN ('9.4.3', '${AVATAR_RENDERER_ID}')
       AND json_extract(avatar_recipe, '$.seed') = id
     )
   );
@@ -460,6 +461,36 @@ WHERE json_valid(avatar_recipe)
     name: "0008-staged-attachment-draft-ownership",
     sql: `
 ALTER TABLE attachments ADD COLUMN draft_token TEXT;
+`,
+  },
+  {
+    // The application ships one renderer. Existing non-current or unsupported
+    // generated recipes become deterministic current defaults; no legacy
+    // renderer remains in the browser bundle.
+    name: "0009-current-avatar-renderer-only",
+    sql: `
+UPDATE bots
+SET avatar_kind = 'generated',
+    avatar_recipe = json_object(
+      'rendererVersion', '${AVATAR_RENDERER_ID}',
+      'style', 'shapes',
+      'seed', id,
+      'options', json('{}')
+    )
+WHERE avatar_kind IN ('generated', 'recipe')
+  AND CASE
+    WHEN json_valid(avatar_recipe) = 1 THEN
+      CASE
+        WHEN json_type(avatar_recipe, '$') = 'object' THEN NOT (
+          json_extract(avatar_recipe, '$.rendererVersion') = '${AVATAR_RENDERER_ID}'
+          AND json_extract(avatar_recipe, '$.style') IN ('shapes', 'pixelbot', 'thumbs')
+          AND json_type(avatar_recipe, '$.seed') = 'text'
+          AND json_type(avatar_recipe, '$.options') = 'object'
+        )
+        ELSE 1
+      END
+    ELSE 1
+  END;
 `,
   },
 ];
