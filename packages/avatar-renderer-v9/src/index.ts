@@ -1,4 +1,4 @@
-import { createAvatar } from "@dicebear/core";
+import { createAvatar } from "@dicebear/core-v9";
 import * as micahStyle from "@dicebear/micah";
 import * as pixelArtStyle from "@dicebear/pixel-art";
 import * as shapesStyle from "@dicebear/shapes";
