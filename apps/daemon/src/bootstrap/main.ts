@@ -34,9 +34,27 @@ export async function main(options: MainOptions = {}): Promise<{ stop: () => Pro
   recoverOnStartup(db); // leases never survive a restart as bot-held
   const runtimeDir = process.env.XDG_RUNTIME_DIR;
   const hostWaylandDisplay = process.env.WAYLAND_DISPLAY;
+  const workersDir = process.env.OMARCHY_BOT_WORKERS_DIR ?? path.resolve(import.meta.dir, "../../../../workers");
+  const agentsDir = path.resolve(workersDir);
+  const supervisor = new Supervisor(
+    {
+      onAgentEvent: (agentId, event) => {
+        if (!avatars.onAgentEvent(agentId, event)) turns.onAgentEvent(agentId, event);
+      },
+      onWorkerCrash: (agentId, err) => {
+        events.append("agent", agentId, "agent.worker_crash", { agentId, message: err.message });
+        agents.markOffline(agentId, err.message);
+      },
+    },
+    {
+      agents: agentsDir,
+      computer: process.env.OMARCHY_BOT_COMPUTER_WORKER_DIR ?? path.resolve(agentsDir, "computer"),
+    },
+  );
   const productionScreenAdapter = new HyprlandBotScreenRuntimeAdapter({
     runtimeRoot: cfg.botScreenRuntimeDir,
     profileRoot: cfg.botScreenProfileDir,
+    computerWorkers: supervisor,
     ...(runtimeDir === undefined ? {} : { hostRuntimeDir: runtimeDir }),
     ...(hostWaylandDisplay === undefined ? {} : { hostWaylandDisplay }),
     ...(process.env.OMARCHY_BOT_HYPRLAND_BIN === undefined
@@ -61,23 +79,6 @@ export async function main(options: MainOptions = {}): Promise<{ stop: () => Pro
     if (typeof payload?.surfaceId === "string") void screens.stop(payload.surfaceId as SurfaceId);
   });
   const dictation = new DictationService(cfg.dictationDir, cfg.voxtypeBin ?? "voxtype", events);
-  const workersDir = process.env.OMARCHY_BOT_WORKERS_DIR ?? path.resolve(import.meta.dir, "../../../../workers");
-  const agentsDir = path.resolve(workersDir);
-  const supervisor = new Supervisor(
-    {
-      onAgentEvent: (agentId, event) => {
-        if (!avatars.onAgentEvent(agentId, event)) turns.onAgentEvent(agentId, event);
-      },
-      onWorkerCrash: (agentId, err) => {
-        events.append("agent", agentId, "agent.worker_crash", { agentId, message: err.message });
-        agents.markOffline(agentId, err.message);
-      },
-    },
-    {
-      agents: agentsDir,
-      computer: path.resolve(agentsDir, "computer"),
-    },
-  );
   const agents = new AgentsRegistry(db, events, { conformanceDir: cfg.conformanceDir, workersAgentsDir: agentsDir }, supervisor);
   const threads = new ThreadsService(db, events, agents);
   const bots = new BotsService(db, events, agents, threads);

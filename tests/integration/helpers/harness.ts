@@ -7,6 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import type { DaemonServices } from "../../../apps/daemon/src/api/http.ts";
 import { FakeBotScreenRuntimeAdapter } from "../../../apps/daemon/src/modules/computer/fakeBotScreenRuntime.ts";
+import type { BotScreenRuntimeAdapter } from "../../../apps/daemon/src/modules/computer/botScreenManager.ts";
 
 export interface Harness {
   baseUrl: string;
@@ -19,6 +20,7 @@ export interface Harness {
 export interface HarnessOptions {
   botScreenFailure?: string;
   useProductionBotScreen?: boolean;
+  botScreenAdapter?: BotScreenRuntimeAdapter;
 }
 
 export async function startDaemon(existingHome?: string, options: HarnessOptions = {}): Promise<Harness> {
@@ -38,12 +40,15 @@ export async function startDaemon(existingHome?: string, options: HarnessOptions
   process.env.OMARCHY_BOT_STATE = state;
   process.env.OMARCHY_BOT_PORT = "0";
   process.env.OMARCHY_BOT_WORKERS_DIR = path.resolve(import.meta.dir, "../fake-workers");
+  process.env.OMARCHY_BOT_COMPUTER_WORKER_DIR = options.useProductionBotScreen
+    ? path.resolve(import.meta.dir, "../../../workers/computer")
+    : path.resolve(import.meta.dir, "../fake-workers/computer");
 
   // Dynamic import keeps the harness the single boot seam for fresh and legacy homes.
   const { main } = await import("../../../apps/daemon/src/bootstrap/main.ts");
   const daemon = options.useProductionBotScreen
     ? await main()
-    : await main({ botScreenAdapter: new FakeBotScreenRuntimeAdapter(options.botScreenFailure) });
+    : await main({ botScreenAdapter: options.botScreenAdapter ?? new FakeBotScreenRuntimeAdapter(options.botScreenFailure) });
   const { stop, port, svc } = daemon;
   const base: Harness = { baseUrl: `http://127.0.0.1:${port}`, port, home, svc, stop };
   // Wait until the fake pi agent finishes its probe and reports ready.

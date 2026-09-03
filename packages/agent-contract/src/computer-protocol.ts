@@ -7,6 +7,7 @@ export type ComputerCommand =
       type: "act";
       requestId: string;
       surfaceId: SurfaceId;
+      runtimeGeneration: number;
       action: ComputerAction;
       /** Set for input actions. Worker refuses input without it (defense in depth). */
       lease?: { surfaceId: SurfaceId; holder: { botId: string } | "human"; turnId?: string; token: string };

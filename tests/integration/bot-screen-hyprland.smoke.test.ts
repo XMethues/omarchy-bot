@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { existsSync, statSync } from "node:fs";
 import path from "node:path";
+import type { SurfaceId } from "../../packages/domain/src/ids.ts";
 import { api, makeBot, startDaemon, type Harness } from "./helpers/harness.ts";
 
 const platformTest = process.env.OMARCHY_BOT_REAL_HYPRLAND_SMOKE === "1" ? test : test.skip;
@@ -44,40 +45,80 @@ async function waitUntilReady(harness: Harness, botId: string, surfaceId: string
   }
 }
 
-platformTest("real nested Hyprland is headless, directly captured, and completely torn down", async () => {
+platformTest("two real nested Hyprland Screens act and capture concurrently with distinct pixels", async () => {
   const beforeClients = await hostClientAddresses();
   const harness = await startDaemon(undefined, { useProductionBotScreen: true });
-  let runtimeSurfaceDir: string | undefined;
+  const runtimeSurfaceDirs: string[] = [];
   try {
-    const botId = await makeBot(harness, "Real Hyprland smoke");
-    const bot = await api<{ surfaceId: string }>(harness, "GET", `/api/bots/${botId}`);
-    runtimeSurfaceDir = path.join(harness.svc.cfg.botScreenRuntimeDir, bot.surfaceId);
+    const botIds = await Promise.all([
+      makeBot(harness, "First real Hyprland screen"),
+      makeBot(harness, "Second real Hyprland screen"),
+    ]);
+    const bots = await Promise.all(botIds.map((botId) =>
+      api<{ surfaceId: string }>(harness, "GET", `/api/bots/${botId}`)
+    ));
+    const owners = botIds.map((botId, index) => ({
+      botId,
+      surfaceId: bots[index]!.surfaceId as SurfaceId,
+    }));
+    runtimeSurfaceDirs.push(...owners.map((owner) =>
+      path.join(harness.svc.cfg.botScreenRuntimeDir, owner.surfaceId)
+    ));
 
-    const opening = await fetch(
-      `${harness.baseUrl}/api/computer/state?botId=${encodeURIComponent(botId)}&surfaceId=${encodeURIComponent(bot.surfaceId)}`,
-    ).then((response) => response.json()) as { state: string };
-    expect(opening.state).toBe("starting");
-    await waitUntilReady(harness, botId, bot.surfaceId);
+    const openings = await Promise.all(owners.map((owner) =>
+      fetch(
+        `${harness.baseUrl}/api/computer/state?botId=${encodeURIComponent(owner.botId)}&surfaceId=${encodeURIComponent(owner.surfaceId)}`,
+      ).then((response) => response.json()) as Promise<{ state: string }>
+    ));
+    expect(openings.map((opening) => opening.state)).toEqual(["starting", "starting"]);
+    await Promise.all(owners.map((owner) => waitUntilReady(harness, owner.botId, owner.surfaceId)));
 
     expect(await hostClientAddresses()).toEqual(beforeClients);
-    expect(statSync(runtimeSurfaceDir).mode & 0o777).toBe(0o700);
-    for (const profile of ["config", "state", "cache"]) {
-      expect(statSync(path.join(harness.svc.cfg.botScreenProfileDir, bot.surfaceId, profile)).mode & 0o777).toBe(0o700);
+    for (const owner of owners) {
+      expect(statSync(path.join(harness.svc.cfg.botScreenRuntimeDir, owner.surfaceId)).mode & 0o777).toBe(0o700);
+      for (const profile of ["config", "state", "cache"]) {
+        expect(statSync(path.join(harness.svc.cfg.botScreenProfileDir, owner.surfaceId, profile)).mode & 0o777).toBe(0o700);
+      }
     }
 
-    const previewBuffer = await fetch(
-      `${harness.baseUrl}/api/computer/snapshot?botId=${encodeURIComponent(botId)}&surfaceId=${encodeURIComponent(bot.surfaceId)}`,
-    ).then((response) => response.arrayBuffer());
-    const preview = new Uint8Array(previewBuffer as ArrayBuffer);
+    const leases = await Promise.all(owners.map((owner) =>
+      harness.svc.computer.acquire(owner, undefined)
+    ));
+    expect(leases.every((lease) => lease.granted && lease.token !== undefined)).toBeTrue();
+    await Promise.all([
+      harness.svc.computer.act(owners[0]!, undefined, { name: "type", args: { text: "FIRST-SCREEN-PIXELS" } }),
+      harness.svc.computer.act(owners[1]!, undefined, { name: "type", args: { text: "SECOND-SCREEN-PIXELS" } }),
+    ]);
+    const activeViews = await Promise.all(owners.map((owner) =>
+      fetch(
+        `${harness.baseUrl}/api/computer/state?botId=${encodeURIComponent(owner.botId)}&surfaceId=${encodeURIComponent(owner.surfaceId)}`,
+      ).then((response) => response.json()) as Promise<{ state: string }>
+    ));
+    expect(activeViews.map((view) => view.state)).toEqual(["bot-using", "bot-using"]);
+
+    const previews = await Promise.all(owners.map(async (owner) => {
+      const response = await fetch(
+        `${harness.baseUrl}/api/computer/snapshot?botId=${encodeURIComponent(owner.botId)}&surfaceId=${encodeURIComponent(owner.surfaceId)}`,
+      );
+      expect(response.status).toBe(200);
+      return new Uint8Array(await response.arrayBuffer());
+    }));
+    const pngSignature = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    expect(previews[0]!.slice(0, 8)).toEqual(pngSignature);
+    expect(previews[1]!.slice(0, 8)).toEqual(pngSignature);
+    expect(sha256(previews[0]!)).not.toBe(sha256(previews[1]!));
     const hostCapture = await runBytes(["grim", "-"]);
-    expect(preview.slice(0, 8)).toEqual(new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
-    expect(sha256(preview)).not.toBe(sha256(hostCapture));
+    expect(previews.every((preview) => sha256(preview) !== sha256(hostCapture))).toBeTrue();
+
+    for (const [index, owner] of owners.entries()) {
+      harness.svc.computer.release(owner, leases[index]!.token!);
+    }
   } finally {
     await harness.stop();
   }
 
-  expect(runtimeSurfaceDir).toBeDefined();
-  expect(existsSync(runtimeSurfaceDir!)).toBeFalse();
+  expect(runtimeSurfaceDirs).toHaveLength(2);
+  expect(runtimeSurfaceDirs.every((runtimeDir) => !existsSync(runtimeDir))).toBeTrue();
   const processes = await run(["ps", "-eo", "args"]);
   expect(processes.includes(harness.svc.cfg.botScreenRuntimeDir)).toBeFalse();
-}, 60_000);
+}, 90_000);

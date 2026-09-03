@@ -22,6 +22,8 @@ import { isInputAction, isSurfaceId } from "@omarchy-bot/domain";
 import { McpClient, type McpCallResult } from "./mcp.ts";
 
 const AGENT_ID = "computer";
+const EXPECTED_SURFACE_ID = process.env.OMARCHY_BOT_SURFACE_ID;
+const EXPECTED_RUNTIME_GENERATION = Number(process.env.OMARCHY_BOT_RUNTIME_GENERATION);
 
 function resolveBinary(): string | undefined {
   const envOverride = process.env.OMARCHY_COMPUTER_BIN ?? process.env.OMARCHY_BOT_COMPUTER_BIN;
@@ -204,6 +206,12 @@ async function handle(cmd: ComputerCommand): Promise<ComputerResult> {
     case "act": {
       if (!isSurfaceId(cmd.surfaceId)) {
         return { requestId: cmd.requestId, ok: false, error: "valid surfaceId is required" };
+      }
+      if (!isSurfaceId(EXPECTED_SURFACE_ID ?? "") || cmd.surfaceId !== EXPECTED_SURFACE_ID) {
+        return { requestId: cmd.requestId, ok: false, error: "command Surface does not match worker context" };
+      }
+      if (!Number.isInteger(cmd.runtimeGeneration) || cmd.runtimeGeneration !== EXPECTED_RUNTIME_GENERATION) {
+        return { requestId: cmd.requestId, ok: false, error: "runtime generation does not match worker context" };
       }
       if (cmd.lease !== undefined && cmd.lease.surfaceId !== cmd.surfaceId) {
         return { requestId: cmd.requestId, ok: false, error: "lease Surface does not match command Surface" };

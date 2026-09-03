@@ -12,6 +12,10 @@ const write = (msg: unknown): void => {
 };
 
 write({ type: "hello", v: 1, worker: "computer:computer", pid: process.pid });
+const expectedSurfaceId = process.env.OMARCHY_BOT_SURFACE_ID;
+const expectedRuntimeGeneration = Number(process.env.OMARCHY_BOT_RUNTIME_GENERATION);
+const heartbeat = setInterval(() => write({ type: "heartbeat" }), 10_000);
+heartbeat.unref?.();
 
 const log: { action: string; hadLease: boolean }[] = [];
 const ONE_PIXEL_PNG =
@@ -19,7 +23,14 @@ const ONE_PIXEL_PNG =
 
 
 readJsonl(Bun.stdin.stream(), (raw) => {
-  const msg = raw as { type: string; requestId?: string; surfaceId?: string; action?: { name: string; args?: Record<string, unknown> }; lease?: { surfaceId?: string; token: string } };
+  const msg = raw as {
+    type: string;
+    requestId?: string;
+    surfaceId?: string;
+    runtimeGeneration?: number;
+    action?: { name: string; args?: Record<string, unknown> };
+    lease?: { surfaceId?: string; token: string };
+  };
   if (msg.type === "probe") {
     write({ requestId: msg.requestId!, ok: true, payload: { ok: true, backend: "fake" } });
     return;
@@ -29,11 +40,20 @@ readJsonl(Bun.stdin.stream(), (raw) => {
       write({ requestId: msg.requestId!, ok: false, error: "fake worker requires a valid surfaceId" });
       return;
     }
+    if (msg.surfaceId !== expectedSurfaceId) {
+      write({ requestId: msg.requestId!, ok: false, error: "fake worker rejects mismatched worker Surface context" });
+      return;
+    }
+    if (msg.runtimeGeneration !== expectedRuntimeGeneration) {
+      write({ requestId: msg.requestId!, ok: false, error: "fake worker rejects stale runtime generation" });
+      return;
+    }
     if (msg.lease !== undefined && msg.lease.surfaceId !== msg.surfaceId) {
       write({ requestId: msg.requestId!, ok: false, error: "fake worker rejects mismatched lease Surface" });
       return;
     }
     const action = msg.action!;
+    if (action.args?.crash === true) process.exit(17);
     const hadLease = msg.lease !== undefined;
     const actionName = action.name as ComputerActionName;
     if (isInputAction(actionName) && !hadLease) {
@@ -53,6 +73,10 @@ readJsonl(Bun.stdin.stream(), (raw) => {
       },
     });
     return;
+  }
+  if (msg.type === "shutdown") {
+    write({ requestId: msg.requestId!, ok: true, payload: { done: true } });
+    process.exit(0);
   }
   if (msg.requestId) write({ requestId: msg.requestId, ok: false, error: `unknown ${msg.type}` });
 });

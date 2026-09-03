@@ -15,6 +15,13 @@ export interface BotScreenActionResult {
   windowList?: unknown;
 }
 
+export interface BotScreenInputLease {
+  surfaceId: SurfaceId;
+  holder: { botId: string } | "human";
+  turnId?: string;
+  token: string;
+}
+
 export interface BotScreenProvision {
   surfaceId: SurfaceId;
   generation: number;
@@ -27,7 +34,7 @@ export interface BotScreenProvision {
 /** Internal platform seam. Runtime handles keep process and socket facts private. */
 export interface BotScreenRuntime {
   capture(): Promise<BotScreenCapture>;
-  act(action: ComputerAction): Promise<BotScreenActionResult>;
+  act(action: ComputerAction, lease?: BotScreenInputLease): Promise<BotScreenActionResult>;
   /** Resolves only when the runtime exits; deliberate stops are ignored by the manager. */
   exited: Promise<Error>;
   stop(): Promise<void>;
@@ -65,6 +72,7 @@ interface RuntimeEntry {
 export class BotScreenManager {
   #entries = new Map<SurfaceId, RuntimeEntry>();
   #stops = new Map<SurfaceId, Promise<void>>();
+  #operations = new Map<SurfaceId, Promise<void>>();
 
   constructor(
     private readonly db: Database,
@@ -131,14 +139,25 @@ export class BotScreenManager {
   }
 
   async capture(owner: ComputerSurfaceOwner): Promise<BotScreenCapture | undefined> {
-    const runtime = await this.#readyRuntime(owner);
-    return runtime?.capture();
+    return this.#serialize(owner.surfaceId, async () => {
+      const runtime = await this.#readyRuntime(owner);
+      return runtime?.capture();
+    });
   }
 
-  async act(owner: ComputerSurfaceOwner, action: ComputerAction): Promise<BotScreenActionResult> {
-    const runtime = await this.#readyRuntime(owner);
-    if (runtime === undefined) throw new Error(this.state(owner).failure ?? "Bot Screen is unavailable");
-    return runtime.act(action);
+  async act(
+    owner: ComputerSurfaceOwner,
+    action: ComputerAction,
+    lease?: BotScreenInputLease,
+  ): Promise<BotScreenActionResult> {
+    if (lease !== undefined && lease.surfaceId !== owner.surfaceId) {
+      throw new Error("input lease does not belong to this Computer Surface");
+    }
+    return this.#serialize(owner.surfaceId, async () => {
+      const runtime = await this.#readyRuntime(owner);
+      if (runtime === undefined) throw new Error(this.state(owner).failure ?? "Bot Screen is unavailable");
+      return runtime.act(action, lease);
+    });
   }
 
   async ensureReady(owner: ComputerSurfaceOwner): Promise<boolean> {
@@ -148,7 +167,7 @@ export class BotScreenManager {
   async stop(surfaceId: SurfaceId): Promise<void> {
     const activeStop = this.#stops.get(surfaceId);
     if (activeStop !== undefined) return activeStop;
-    const operation = this.#stopSurface(surfaceId);
+    const operation = this.#serialize(surfaceId, () => this.#stopSurface(surfaceId));
     this.#stops.set(surfaceId, operation);
     try {
       await operation;
@@ -158,7 +177,7 @@ export class BotScreenManager {
   }
 
   async shutdown(): Promise<void> {
-    const surfaceIds = new Set([...this.#entries.keys(), ...this.#stops.keys()]);
+    const surfaceIds = new Set([...this.#entries.keys(), ...this.#stops.keys(), ...this.#operations.keys()]);
     await Promise.all([...surfaceIds].map((surfaceId) => this.stop(surfaceId)));
   }
 
@@ -208,6 +227,21 @@ export class BotScreenManager {
       state: row.lifecycle_state,
       ...(row.last_failure === null ? {} : { failure: row.last_failure }),
     };
+  }
+
+  async #serialize<T>(surfaceId: SurfaceId, operation: () => Promise<T>): Promise<T> {
+    const previous = this.#operations.get(surfaceId) ?? Promise.resolve();
+    const result = previous.catch(() => {}).then(operation);
+    const settled = result.then(
+      () => {},
+      () => {},
+    );
+    this.#operations.set(surfaceId, settled);
+    try {
+      return await result;
+    } finally {
+      if (this.#operations.get(surfaceId) === settled) this.#operations.delete(surfaceId);
+    }
   }
 
   #failure(error: unknown): string {

@@ -10,9 +10,11 @@ import {
 } from "node:fs";
 import path from "node:path";
 import type { ComputerAction } from "@omarchy-bot/domain";
+import type { SurfaceComputerWorker, Supervisor } from "../../supervision/supervisor.ts";
 import type {
   BotScreenActionResult,
   BotScreenCapture,
+  BotScreenInputLease,
   BotScreenProvision,
   BotScreenRuntime,
   BotScreenRuntimeAdapter,
@@ -27,6 +29,7 @@ interface HyprlandAdapterOptions {
   hyprctlBin?: string;
   grimBin?: string;
   applicationBin?: string;
+  computerWorkers: Pick<Supervisor, "startComputerWorker">;
 }
 
 interface CommandResult {
@@ -97,6 +100,10 @@ function explicitEnvironment(input: {
     MOZ_ENABLE_WAYLAND: "1",
     QT_QPA_PLATFORM: "wayland",
   };
+  for (const key of ["OMARCHY_COMPUTER_BIN", "OMARCHY_BOT_COMPUTER_BIN"]) {
+    const value = process.env[key];
+    if (value !== undefined) env[key] = value;
+  }
   if (input.instanceSignature !== undefined) env.HYPRLAND_INSTANCE_SIGNATURE = input.instanceSignature;
   return env;
 }
@@ -182,6 +189,7 @@ export class HyprlandBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter 
     });
 
     let applicationProcess: ScreenProcess | undefined;
+    let computerWorker: SurfaceComputerWorker | undefined;
     try {
       const ready = await this.#discover(socketRuntimeDir, compositor);
       const childEnv = explicitEnvironment({
@@ -216,9 +224,16 @@ export class HyprlandBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter 
         detached: true,
       });
       await this.#waitForApplication(hyprctl, childEnv, applicationProcess);
+      const startedComputerWorker = await this.options.computerWorkers.startComputerWorker({
+        surfaceId: provision.surfaceId,
+        runtimeGeneration: provision.generation,
+        env: childEnv,
+      });
+      computerWorker = startedComputerWorker;
       const exited = Promise.race([
         compositor.exited.then((status) => new Error(`nested Hyprland exited with status ${status}`)),
         applicationProcess.exited.then((status) => new Error(`Bot Screen application exited with status ${status}`)),
+        startedComputerWorker.exited,
       ]);
 
       let stopped = false;
@@ -241,14 +256,23 @@ export class HyprlandBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter 
         }
         return { mediaType: "image/png", bytes: image };
       };
-      const act = async (action: ComputerAction): Promise<BotScreenActionResult> => {
-        if (action.name !== "observe" && action.name !== "screenshot") {
-          throw new Error("Bot Screen input is not available in this release");
-        }
-        const image = await capture();
+      const act = async (
+        action: ComputerAction,
+        lease?: BotScreenInputLease,
+      ): Promise<BotScreenActionResult> => {
+        const result = await startedComputerWorker.act(action, lease);
+        const workerImage = result.image === undefined
+          ? undefined
+          : {
+              mediaType: result.image.mediaType,
+              bytes: new Uint8Array(Buffer.from(result.image.base64, "base64")),
+            };
         return {
-          ...(action.name === "observe" ? { text: "Bot Screen observed." } : {}),
-          image,
+          ...(result.text === undefined ? {} : { text: result.text }),
+          ...(result.windowList === undefined ? {} : { windowList: result.windowList }),
+          ...(workerImage === undefined && action.name === "observe"
+            ? { image: await capture() }
+            : workerImage === undefined ? {} : { image: workerImage }),
         };
       };
       return {
@@ -259,6 +283,7 @@ export class HyprlandBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter 
           if (stopped) return;
           stopped = true;
           await Promise.allSettled([
+            startedComputerWorker.stop(),
             ...(applicationProcess === undefined ? [] : [terminate(applicationProcess)]),
             terminate(compositor),
           ]);
@@ -267,6 +292,7 @@ export class HyprlandBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter 
         },
       };
     } catch (error) {
+      await computerWorker?.stop().catch(() => {});
       await Promise.allSettled([
         ...(applicationProcess === undefined ? [] : [terminate(applicationProcess)]),
         terminate(compositor),

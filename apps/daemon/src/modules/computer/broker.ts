@@ -5,7 +5,7 @@ import type { Database } from "bun:sqlite";
 import { isInputAction, type ComputerAction, type ComputerLease, type SurfaceId } from "@omarchy-bot/domain";
 import type { EventLog } from "../events/eventLog.ts";
 import type { TurnService } from "../turns/turns.ts";
-import type { BotScreenManager } from "./botScreenManager.ts";
+import type { BotScreenInputLease, BotScreenManager } from "./botScreenManager.ts";
 import type { Config } from "../../bootstrap/config.ts";
 
 interface LeaseRow {
@@ -339,7 +339,15 @@ export class ComputerBroker {
       }
     }
 
-    const result = await this.screens.act(owner, action);
+    const screenLease: BotScreenInputLease | undefined = !isInputAction(action.name) || lease === undefined
+      ? undefined
+      : {
+          surfaceId: owner.surfaceId,
+          holder: actor === "human" ? "human" : { botId: owner.botId },
+          ...(lease.turn_id === null ? {} : { turnId: lease.turn_id }),
+          token: lease.token,
+        };
+    const result = await this.screens.act(owner, action, screenLease);
 
     let imageRef: string | undefined;
     if (result.image !== undefined) {

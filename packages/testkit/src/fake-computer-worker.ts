@@ -2,6 +2,7 @@
 // refuses input actions without a lease token (defense in depth).
 import { PROTOCOL_VERSION, readJsonl, writeJsonl } from "@omarchy-bot/agent-contract";
 import type { ComputerActPayload, ComputerCommand, ComputerProbePayload, ComputerWorkerOutbound } from "@omarchy-bot/agent-contract";
+import { isSurfaceId } from "@omarchy-bot/domain";
 
 const out = (m: ComputerWorkerOutbound) => writeJsonl(m);
 const result = (requestId: string, ok: boolean, payload: ComputerActPayload | ComputerProbePayload | string) =>
@@ -13,6 +14,9 @@ out({ type: "hello", v: PROTOCOL_VERSION, worker: "fake-computer", pid: process.
 const heartbeat = setInterval(() => out({ type: "heartbeat" }), 10_000);
 heartbeat.unref?.();
 
+const expectedSurfaceId = process.env.OMARCHY_BOT_SURFACE_ID;
+const expectedRuntimeGeneration = Number(process.env.OMARCHY_BOT_RUNTIME_GENERATION);
+
 readJsonl(Bun.stdin.stream(), (raw) => {
   const cmd = raw as ComputerCommand;
   switch (cmd.type) {
@@ -20,6 +24,18 @@ readJsonl(Bun.stdin.stream(), (raw) => {
       result(cmd.requestId, true, { agentId: "computer", installed: true, agentVersion: "fake-1.0.0", sdkOk: true });
       break;
     case "act": {
+      if (!isSurfaceId(expectedSurfaceId ?? "") || cmd.surfaceId !== expectedSurfaceId) {
+        result(cmd.requestId, false, "command Surface does not match worker context");
+        break;
+      }
+      if (cmd.runtimeGeneration !== expectedRuntimeGeneration) {
+        result(cmd.requestId, false, "runtime generation does not match worker context");
+        break;
+      }
+      if (cmd.lease !== undefined && cmd.lease.surfaceId !== cmd.surfaceId) {
+        result(cmd.requestId, false, "lease Surface does not match command Surface");
+        break;
+      }
       const needsLease = ["focus_window", "click", "type", "key", "scroll", "open_app", "open_url"].includes(cmd.action.name);
       if (needsLease && !cmd.lease) return result(cmd.requestId, false, "input action without lease token");
       switch (cmd.action.name) {
