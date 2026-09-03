@@ -3,7 +3,6 @@ import { useState } from "react";
 import { useAppShellMobile } from "@astryxdesign/core/AppShell";
 import {
   SideNav,
-  SideNavHeading,
   SideNavItem,
   SideNavSection,
 } from "@astryxdesign/core/SideNav";
@@ -147,33 +146,35 @@ export function Sidebar({
         <SideNav
           aria-label="Bot navigation"
           {...(isMobile ? { "data-testid": "mobile-sidebar" } : {})}
-          header={<SideNavHeading heading="omarchy-bot" subheading="AI teammate workspace" />}
-          footerIcons={
-            <IconButton
-              label="Settings"
-              tooltip="Settings"
-              variant="ghost"
-              icon={<Icon icon="wrench" size="sm" />}
-              onClick={() => {
-                if (isMobile) closeMobileNav();
-                onOpenSettings();
-              }}
-              data-testid="sidebar-settings"
-            />
+          footer={
+            <VStack gap={1}>
+              {safetyControl}
+              <SideNavItem
+                label="Settings"
+                aria-label="Settings"
+                icon={<Icon icon="wrench" size="sm" />}
+                onClick={() => {
+                  if (isMobile) closeMobileNav();
+                  onOpenSettings();
+                }}
+                data-testid="sidebar-settings"
+              />
+            </VStack>
           }
-          footer={safetyControl}
           topContent={
-            <IconButton
-              label="New bot"
-              tooltip="New bot"
-              variant="primary"
-              icon={<Icon icon={Plus} size="md" />}
-              onClick={() => {
-                if (isMobile) closeMobileNav();
-                onCreateBot();
-              }}
-              data-testid="sidebar-create-bot"
-            />
+            <HStack justify="end">
+              <IconButton
+                label="New bot"
+                tooltip="New bot"
+                variant="primary"
+                icon={<Icon icon={Plus} size="md" />}
+                onClick={() => {
+                  if (isMobile) closeMobileNav();
+                  onCreateBot();
+                }}
+                data-testid="sidebar-create-bot"
+              />
+            </HStack>
           }
         >
           <SideNavSection title="Bots">

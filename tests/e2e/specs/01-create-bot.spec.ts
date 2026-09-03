@@ -25,6 +25,16 @@ test.describe("create bot flow", () => {
   test("lists agent readiness and selects a newly created bot on a blank conversation", async ({ page }) => {
     await page.goto("/");
     await expect(botNavigation(page).getByRole("button", { name: /^Actions for / })).toHaveCount(0);
+    const navigation = botNavigation(page);
+    await expect(navigation.getByText("omarchy-bot", { exact: true })).toHaveCount(0);
+    await expect(navigation.getByText("AI teammate workspace", { exact: true })).toHaveCount(0);
+    const navigationBox = await navigation.boundingBox();
+    const createBox = await navigation.getByRole("button", { name: "New bot" }).boundingBox();
+    if (navigationBox === null || createBox === null) throw new Error("sidebar create action has no layout box");
+    expect(navigationBox.x + navigationBox.width - (createBox.x + createBox.width)).toBeLessThanOrEqual(24);
+    const settingsBox = await navigation.getByRole("button", { name: "Settings" }).boundingBox();
+    if (settingsBox === null) throw new Error("sidebar settings action has no layout box");
+    expect(settingsBox.width).toBeGreaterThanOrEqual(navigationBox.width - 32);
 
     await openCreateDialog(page);
     await expect(page.getByRole("radiogroup", { name: "Agent" }).getByRole("radio")).toHaveCount(9);
