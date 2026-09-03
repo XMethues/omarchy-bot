@@ -19,7 +19,7 @@ import { ConversationHeader } from "../components/ConversationHeader.tsx";
 import { ChatPanel } from "../components/ChatPanel.tsx";
 import { CreateBotDialog } from "../components/CreateBotDialog.tsx";
 import { HistoryDialog } from "../components/HistoryDialog.tsx";
-import { ProfileDialog } from "../components/ProfileDialog.tsx";
+import { ProfileSheet } from "../components/ProfileSheet.tsx";
 import { SettingsDialog } from "../components/SettingsDialog.tsx";
 import { ComputerSheet } from "../components/ComputerSheet.tsx";
 import { EmergencyComputerControl } from "../components/EmergencyComputerControl.tsx";
@@ -65,6 +65,7 @@ function HomeScreen(): JSX.Element {
   const botNamesRef = useRef<Record<string, string>>({});
   const mobileNavigationTriggerRef = useRef<HTMLButtonElement>(null);
   const computerTriggerRef = useRef<HTMLButtonElement>(null);
+  const profileTriggerRef = useRef<HTMLButtonElement>(null);
   selectedBotRef.current = selectedBotId;
 
   const invalidate = useCallback(
@@ -441,9 +442,11 @@ function HomeScreen(): JSX.Element {
             onOpenHistory={() => setHistoryOpen(true)}
             onOpenProfile={() => setProfileOpen(true)}
             computerState={computer.data?.state ?? "unavailable"}
-            onOpenComputer={() => setComputerOpen(true)}
+            computerOpen={computerOpen}
+            onToggleComputer={() => setComputerOpen((open) => !open)}
             mobileNavigationTriggerRef={mobileNavigationTriggerRef}
             computerTriggerRef={computerTriggerRef}
+            profileTriggerRef={profileTriggerRef}
           />
         }
         content={
@@ -498,10 +501,11 @@ function HomeScreen(): JSX.Element {
             onSelectThread={(threadId) => void navigate({ search: { bot: bot.id, thread: threadId } })}
             onNewConversation={() => void navigate({ search: { bot: bot.id, thread: "blank" } })}
           />
-          <ProfileDialog
+          <ProfileSheet
             bot={bot}
             agentDisplayName={selectedAgent?.displayName ?? bot.agentId}
             open={profileOpen}
+            returnFocusRef={profileTriggerRef}
             onClose={() => setProfileOpen(false)}
             onUpdated={() => invalidate("bots")}
           />

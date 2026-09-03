@@ -1,4 +1,5 @@
 import type { JSX, RefObject } from "react";
+import { Monitor } from "lucide-react";
 import { Button } from "@astryxdesign/core/Button";
 import { useAppShellMobile } from "@astryxdesign/core/AppShell";
 import { Heading } from "@astryxdesign/core/Heading";
@@ -25,11 +26,13 @@ export interface ConversationHeaderProps {
   bot?: BotViewDto;
   thread?: ThreadDto;
   computerState: ComputerViewDto["state"];
+  computerOpen: boolean;
   onOpenHistory: () => void;
   onOpenProfile: () => void;
-  onOpenComputer: () => void;
+  onToggleComputer: () => void;
   mobileNavigationTriggerRef: RefObject<HTMLButtonElement | null>;
   computerTriggerRef: RefObject<HTMLButtonElement | null>;
+  profileTriggerRef: RefObject<HTMLButtonElement | null>;
 }
 
 function MobileSidebarTrigger({ triggerRef }: { triggerRef: RefObject<HTMLButtonElement | null> }): JSX.Element | null {
@@ -66,11 +69,13 @@ export function ConversationHeader({
   bot,
   thread,
   computerState,
+  computerOpen,
   onOpenHistory,
   onOpenProfile,
-  onOpenComputer,
+  onToggleComputer,
   mobileNavigationTriggerRef,
   computerTriggerRef,
+  profileTriggerRef,
 }: ConversationHeaderProps): JSX.Element {
   return (
     <LayoutHeader hasDivider label="Conversation">
@@ -82,20 +87,37 @@ export function ConversationHeader({
         data-testid="conversation-header"
       >
         <MobileSidebarTrigger triggerRef={mobileNavigationTriggerRef} />
-        {bot !== undefined ? (
-          <AvatarView
-            avatar={bot.avatar}
-            name={bot.name}
-            size="sm"
-            activity={bot.status === "working" ? "working" : "selected"}
-            decorative
-          />
-        ) : null}
         <StackItem size="fill">
           <VStack gap={0.5}>
-            <Heading level={1} maxLines={1}>
-              {bot?.name ?? "omarchy-bot"}
-            </Heading>
+            {bot !== undefined ? (
+              <HStack>
+                <Button
+                  ref={profileTriggerRef}
+                  label={`Open profile for ${bot.name}`}
+                  variant="ghost"
+                  size="sm"
+                  onClick={onOpenProfile}
+                  data-testid="profile-open"
+                >
+                  <HStack gap={2} vAlign="center">
+                    <AvatarView
+                      avatar={bot.avatar}
+                      name={bot.name}
+                      size="sm"
+                      activity={bot.status === "working" ? "working" : "selected"}
+                      decorative
+                    />
+                    <Heading level={1} maxLines={1}>
+                      {bot.name}
+                    </Heading>
+                  </HStack>
+                </Button>
+              </HStack>
+            ) : (
+              <Heading level={1} maxLines={1}>
+                omarchy-bot
+              </Heading>
+            )}
             <HStack>
               <Button
                 label="Open conversation history"
@@ -112,23 +134,17 @@ export function ConversationHeader({
         </StackItem>
         <IconButton
           ref={computerTriggerRef}
-          label="Open computer"
-          tooltip={COMPUTER_TOOLTIPS[computerState]}
+          label={computerOpen ? "Close computer" : "Open computer"}
+          tooltip={computerOpen ? "Close computer" : COMPUTER_TOOLTIPS[computerState]}
           isDisabled={bot === undefined}
-          icon={<Icon icon="viewColumns" size="md" />}
-          variant={computerState === "idle" || computerState === "unavailable" ? "ghost" : "secondary"}
-          onClick={onOpenComputer}
+          icon={<Icon icon={Monitor} size="md" />}
+          variant={
+            computerOpen || (computerState !== "idle" && computerState !== "unavailable") ? "secondary" : "ghost"
+          }
+          onClick={onToggleComputer}
+          aria-expanded={computerOpen}
           data-state={computerState}
           data-testid="header-computer"
-        />
-        <IconButton
-          label="Edit bot profile"
-          tooltip="Edit bot profile"
-          icon={<Icon icon="moreHorizontal" size="md" />}
-          variant="ghost"
-          onClick={onOpenProfile}
-          isDisabled={bot === undefined}
-          data-testid="profile-open"
         />
       </HStack>
     </LayoutHeader>

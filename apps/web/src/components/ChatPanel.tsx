@@ -652,9 +652,7 @@ export function ChatPanel({
             ? { type: "warning" as const, message: "Checking draft attachments…" }
             : activeTurnCannotSteer
               ? { type: "warning" as const, message: "This agent does not support steering an active turn." }
-              : bot !== undefined && !isAgentReady
-                ? { type: "warning" as const, message: "This bot can’t send messages until its agent is ready." }
-                : undefined;
+              : undefined;
   const dictationLabel =
     voiceState.state === "recording"
       ? "Stop voice recording"

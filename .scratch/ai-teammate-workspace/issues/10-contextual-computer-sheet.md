@@ -6,9 +6,9 @@
 
 **Status:** resolved
 
-- [x] A Computer icon is always available in the conversation Header and is visually quiet while inactive.
-- [x] The icon reflects only plain-language selected-Bot states such as using computer, waiting, needs you, or user control.
-- [x] The desktop Computer surface is a docked Astryx drawer; narrow viewports use an Astryx BottomSheet.
+- [x] A recognizable Computer glyph is always available in the conversation Header and is visually quiet while inactive.
+- [x] The control reflects only plain-language selected-Bot states such as using computer, waiting, needs you, or user control.
+- [x] The control toggles the docked Astryx drawer on desktop; narrow viewports use an Astryx BottomSheet.
 - [x] The compact preview opens an Astryx Lightbox modal only after the user selects its expand icon.
 - [x] Take control appears only when human input is relevant and parks Bot desktop input before handing over the Shared Screen.
 - [x] Return to Bot re-observes the Shared Screen before resuming the parked work.

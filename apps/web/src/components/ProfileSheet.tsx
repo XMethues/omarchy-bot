@@ -1,9 +1,9 @@
-import type { ChangeEvent, JSX } from "react";
+import type { ChangeEvent, JSX, RefObject } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import * as stylex from "@stylexjs/stylex";
 import { Banner } from "@astryxdesign/core/Banner";
 import { Button } from "@astryxdesign/core/Button";
-import { Dialog, DialogHeader } from "@astryxdesign/core/Dialog";
+import { Heading } from "@astryxdesign/core/Heading";
 import { HStack } from "@astryxdesign/core/HStack";
 import { Text } from "@astryxdesign/core/Text";
 import { TextArea } from "@astryxdesign/core/TextArea";
@@ -13,11 +13,13 @@ import type { BotDto, BotViewDto } from "@omarchy-bot/protocol";
 import { api, apiErrorMessage } from "../lib/api.ts";
 import styles from "../lib/styles.ts";
 import { AvatarView } from "./AvatarView.tsx";
+import { BottomSheetWithReturnFocus } from "./BottomSheetWithReturnFocus.tsx";
 
-export interface ProfileDialogProps {
+export interface ProfileSheetProps {
   bot: BotViewDto;
   open: boolean;
   agentDisplayName: string;
+  returnFocusRef: RefObject<HTMLElement | null>;
   onClose: () => void;
   onUpdated: (bot: BotDto) => void;
 }
@@ -25,8 +27,15 @@ export interface ProfileDialogProps {
 type BusyAction = "save" | "variation" | "upload" | "recipe";
 type InvalidField = "name" | "avatarDescription";
 
-/** Profile fields and avatar choices for one bot. Its agent remains fixed. */
-export function ProfileDialog({ bot, agentDisplayName, open, onClose, onUpdated }: ProfileDialogProps): JSX.Element {
+/** Profile sheet for one bot. Its backing agent remains fixed. */
+export function ProfileSheet({
+  bot,
+  agentDisplayName,
+  open,
+  returnFocusRef,
+  onClose,
+  onUpdated,
+}: ProfileSheetProps): JSX.Element {
   const [current, setCurrent] = useState<BotDto>(bot);
   const [name, setName] = useState(bot.name);
   const [instructions, setInstructions] = useState(bot.instructions);
@@ -142,8 +151,14 @@ export function ProfileDialog({ bot, agentDisplayName, open, onClose, onUpdated 
   const disabled = busy !== undefined;
 
   return (
-    <Dialog isOpen={open} onOpenChange={(isOpen) => !isOpen && onClose()} width={560} purpose="form">
-      <DialogHeader title="Bot profile" subtitle="Update this teammate’s name, job, and avatar." />
+    <BottomSheetWithReturnFocus
+      label="Bot profile"
+      returnFocusRef={returnFocusRef}
+      isOpen={open}
+      onOpenChange={(isOpen) => !isOpen && onClose()}
+      height="tall"
+      purpose="form"
+    >
       <form
         noValidate
         onSubmit={(event) => {
@@ -152,6 +167,10 @@ export function ProfileDialog({ bot, agentDisplayName, open, onClose, onUpdated 
         }}
       >
         <VStack padding={4} gap={4} aria-busy={disabled || undefined}>
+          <VStack gap={0.5} data-testid="profile-sheet">
+            <Heading level={2}>Bot profile</Heading>
+            <Text color="secondary">Update this teammate’s name, job, and avatar.</Text>
+          </VStack>
           {error !== undefined ? <Banner status="error" title={error} /> : null}
           <HStack gap={3} align="center" wrap="wrap">
             <AvatarView avatar={current.avatar} name={current.name} size="lg" activity="selected" />
@@ -256,6 +275,6 @@ export function ProfileDialog({ bot, agentDisplayName, open, onClose, onUpdated 
           </VStack>
         </VStack>
       </form>
-    </Dialog>
+    </BottomSheetWithReturnFocus>
   );
 }

@@ -354,7 +354,7 @@ test.describe("ticket 13 responsive, accessible, and visual QA", () => {
     await page.keyboard.press("Escape");
     await expect(history).toBeHidden();
 
-    await page.getByRole("button", { name: "Edit bot profile" }).click();
+    await page.getByRole("button", { name: "Open profile for Release Partner" }).click();
     const profile = page.getByRole("dialog", { name: "Bot profile" });
     await expectInsideViewport(page, profile);
     await page.keyboard.press("Escape");
@@ -404,6 +404,8 @@ test.describe("ticket 13 responsive, accessible, and visual QA", () => {
     const conversationWorkspace = page.getByLabel("Conversation workspace");
     const unavailableNotice = conversationWorkspace.getByRole("alert").filter({ hasText: "Agent unavailable" });
     await expect(unavailableNotice).toContainText("Reconnect Claude before sending a message.");
+    await expect(conversationWorkspace.getByRole("alert")).toHaveCount(1);
+    await expect(page.getByTestId("composer")).not.toContainText("This bot can’t send messages until its agent is ready.");
     await expect(page.getByRole("textbox", { name: "Message input" })).toHaveAttribute("contenteditable", "false");
 
     await page.getByRole("button", { name: "Open computer", exact: true }).click();
@@ -437,17 +439,21 @@ test.describe("ticket 13 responsive, accessible, and visual QA", () => {
     await expect(page.getByRole("heading", { level: 1, name: "Offline Researcher" })).toBeVisible();
   });
 
-  test("returns focus after Dialog and Sheet dismissal", async ({ page }) => {
+  test("returns focus after profile and computer Sheet dismissal", async ({ page }) => {
     await page.setViewportSize(desktopViewport);
     await seedWorkspaceApi(page);
     await gotoSeededWorkspace(page);
 
-    const profileTrigger = page.getByRole("button", { name: "Edit bot profile" });
+    const profileTrigger = page.getByRole("button", { name: "Open profile for Release Partner" });
+    await expect(page.getByRole("button", { name: "Edit bot profile" })).toHaveCount(0);
+    await expect(profileTrigger.getByTestId("avatar-view")).toBeVisible();
+    await expect(profileTrigger.getByRole("heading", { level: 1, name: "Release Partner" })).toBeVisible();
     await profileTrigger.focus();
     await profileTrigger.press("Enter");
-    await expect(page.getByRole("dialog", { name: "Bot profile" })).toBeVisible();
+    const profileSheet = page.getByRole("dialog", { name: "Bot profile" });
+    await expect(profileSheet.getByTestId("profile-sheet")).toBeVisible();
     await page.keyboard.press("Escape");
-    await expect(page.getByRole("dialog", { name: "Bot profile" })).toBeHidden();
+    await expect(profileSheet).toBeHidden();
     await expect(profileTrigger).toBeFocused();
 
     await page.setViewportSize(narrowViewport);
@@ -478,7 +484,7 @@ test.describe("ticket 13 responsive, accessible, and visual QA", () => {
     await seedWorkspaceApi(page);
     await gotoSeededWorkspace(page);
 
-    await page.getByRole("button", { name: "Edit bot profile" }).click();
+    await page.getByRole("button", { name: "Open profile for Release Partner" }).click();
     const profile = page.getByRole("dialog", { name: "Bot profile" });
     await expect(profile.getByText("Backing Agent", { exact: true })).toBeVisible();
     await expect(profile.getByText("Pi", { exact: true })).toBeVisible();

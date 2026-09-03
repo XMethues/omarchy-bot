@@ -60,13 +60,21 @@ test.describe("contextual computer sheet", () => {
 
     const trigger = page.getByRole("button", { name: "Open computer", exact: true });
     await expect(trigger).toHaveAttribute("data-state", "bot-using");
+    await expect(trigger).toHaveAttribute("aria-expanded", "false");
+    await expect(trigger.locator("svg.lucide-monitor")).toBeVisible();
     await trigger.click();
     const drawer = page.getByRole("complementary", { name: "Computer", exact: true });
+    const closeTrigger = page.getByRole("button", { name: "Close computer", exact: true });
+    await expect(closeTrigger).toHaveAttribute("aria-expanded", "true");
+    await expect(drawer).toBeVisible();
+    await closeTrigger.click();
+    await expect(drawer).toBeHidden();
+    await expect(trigger).toHaveAttribute("aria-expanded", "false");
+    await trigger.click();
     await expect(drawer).toBeVisible();
     await expect(page.getByRole("dialog", { name: "Computer" })).toHaveCount(0);
 
     const sheet = drawer;
-    await expect(sheet).toBeVisible();
     await expect(sheet.getByAltText("Latest computer preview for Computer Bot")).toBeVisible();
     await expect(sheet).toContainText("This bot is using the computer.");
     await expect(sheet).not.toContainText(/lease|TTL|token|queue depth/i);

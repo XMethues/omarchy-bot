@@ -14,9 +14,10 @@ async function createBot(page: Page, name: string): Promise<string> {
   return botId;
 }
 
-async function openProfile(page: Page): Promise<void> {
-  await page.getByRole("button", { name: "Edit bot profile" }).click();
-  await expect(page.getByRole("dialog", { name: "Bot profile" })).toBeVisible();
+async function openProfile(page: Page, botName: string): Promise<void> {
+  await page.getByRole("button", { name: `Open profile for ${botName}` }).click();
+  const profile = page.getByRole("dialog", { name: "Bot profile" });
+  await expect(profile.getByTestId("profile-sheet")).toBeVisible();
 }
 
 const onePixelPng = Buffer.from(
@@ -34,7 +35,7 @@ async function avatarSvg(avatar: Locator): Promise<string> {
 test.describe("Bot profiles and avatars", () => {
   test("edits profile fields, creates a variation, and uploads a local image", async ({ page }) => {
     const botId = await createBot(page, "Profile Bot");
-    await openProfile(page);
+    await openProfile(page, "Profile Bot");
 
     const profile = page.getByRole("dialog", { name: "Bot profile" });
     await expect(profile.getByText("Backing Agent", { exact: true })).toBeVisible();
@@ -80,7 +81,7 @@ test.describe("Bot profiles and avatars", () => {
       });
     });
 
-    await openProfile(page);
+    await openProfile(page, "Recipe UI Bot");
     await page.getByRole("textbox", { name: "Describe avatar" }).fill("A friendly teammate with round glasses");
     await page.getByRole("button", { name: "Create from description" }).click();
     await expect(page.getByRole("dialog", { name: "Bot profile" }).getByTestId("avatar-thumbs")).toBeVisible();
@@ -117,7 +118,7 @@ test.describe("Bot profiles and avatars", () => {
   test("reduced motion gates native SVG animation while retaining activity state", async ({ page }) => {
     await page.emulateMedia({ reducedMotion: "reduce" });
     await createBot(page, "Reduced Motion Bot");
-    await openProfile(page);
+    await openProfile(page, "Reduced Motion Bot");
 
     const avatar = page.getByRole("dialog", { name: "Bot profile" }).getByTestId("avatar-view");
     await expect(avatar).toHaveAttribute("data-avatar-activity", "selected");
