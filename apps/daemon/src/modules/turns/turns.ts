@@ -21,6 +21,8 @@ interface TurnContext {
   turnTimeout: ReturnType<typeof setTimeout>;
   /** Present only when cancellation came from the explicit abort path. */
   abortReason?: string;
+  /** A timeout remains a failed Turn even when native abort reports cancellation. */
+  timeoutFailureReason?: string;
 }
 
 interface TerminalTurnWaiter {
@@ -79,7 +81,15 @@ export class TurnService {
     this.db
       .query(`UPDATE turns SET status = ?${finished ? ", finished_at = ?" : ""}${reason !== undefined ? ", outcome_reason = ?" : ""} WHERE id = ?`)
       .run(...(finished && reason !== undefined ? [next, new Date().toISOString(), reason, turnId] : finished ? [next, new Date().toISOString(), turnId] : reason !== undefined ? [next, reason, turnId] : [next, turnId]));
-    this.events.append("turn", turnId, "turn.status", { turnId, from, to: next, threadId: t.thread_id, botId: t.bot_id });
+    this.events.append("turn", turnId, "turn.status", {
+      turnId,
+      from,
+      to: next,
+      threadId: t.thread_id,
+      botId: t.bot_id,
+      ...(reason !== undefined ? { reason } : {}),
+    });
+    this.bots.recordActivityStatus(t.bot_id, t.thread_id, turnId);
     if (finished) {
       const terminal = this.#turnDto(turnId);
       const waiters = this.#terminalWaiters.get(turnId);
@@ -105,8 +115,13 @@ export class TurnService {
     attachmentDraftToken?: string,
     opts: { cwd?: string } = {},
   ): Promise<SendResultDto> {
-    const bot = this.db.query(`SELECT * FROM bots WHERE id = ? AND archived = 0`).get(botId) as { id: string; agent_id: string; instructions: string } | undefined;
+    const bot = this.db.query(`SELECT * FROM bots WHERE id = ?`).get(botId) as { id: string; agent_id: string; instructions: string } | undefined;
     if (!bot) throw new HttpError(404, `unknown bot ${botId}`);
+    if (
+      this.db.query(`SELECT bot_id FROM bot_deletions WHERE bot_id = ? AND state = 'cleaning'`).get(botId) !== null
+    ) {
+      throw new HttpError(409, "bot deletion is in progress; new work cannot start");
+    }
     const agentId = bot.agent_id as AgentId;
     if (this.#timeoutQueues.has(agentId)) {
       throw new HttpError(409, `agent '${agentId}' is stopping a timed-out session; the bot cannot chat right now`);
@@ -170,7 +185,8 @@ export class TurnService {
     const userMsgDto = this.threads.getMessage(result.messageId)!;
     this.events.append("thread", result.threadId, "message.appended", userMsgDto);
     this.events.append("turn", turnId, "turn.created", { turnId, threadId: result.threadId, botId });
-    this.bots.recordActivity(botId, result.threadId, text, false);
+    this.bots.recordActivityStatus(botId, result.threadId, turnId);
+    this.bots.recordUserMessage(botId, result.threadId);
     const start = this.#startTurn(turnId, result.threadId, botId, agentId, text, result.workerAttachments);
     this.#turnStarts.set(turnId, start);
     void start
@@ -178,7 +194,6 @@ export class TurnService {
         const row = this.threads.turnRow(turnId);
         if (!row || isTerminalTurn(row.status as TurnStatus)) return;
         const reason = errorMessage(err);
-        this.#emitSystemNote(result.threadId, `turn failed to start: ${reason}`);
         this.#setTurnStatus(turnId, "failed", reason);
       })
       .finally(() => {
@@ -254,7 +269,7 @@ export class TurnService {
     const userMsg = this.threads.appendMessage(turn.threadId, {
       author: { kind: "user" }, kind: "text", text, payload: { turnId: turn.id },
     });
-    this.bots.recordActivity(turn.botId, turn.threadId, text, false);
+    this.bots.recordUserMessage(turn.botId, turn.threadId);
     try {
       let ctx = [...this.#turns.values()].find((candidate) => candidate.turnId === turn.id);
       if (!ctx) {
@@ -349,11 +364,14 @@ export class TurnService {
         break;
       }
       case "turn.cancelled": {
-        this.#finishTurn(ctx, "cancelled", ctx.abortReason);
+        if (ctx.timeoutFailureReason !== undefined) {
+          this.#finishTurn(ctx, "failed", ctx.timeoutFailureReason);
+        } else {
+          this.#finishTurn(ctx, "cancelled", ctx.abortReason);
+        }
         break;
       }
       case "error": {
-        this.threads.appendMessage(ctx.threadId, { author: { kind: "system" }, kind: "event", text: `error: ${event.message}` });
         this.#finishTurn(ctx, "failed", event.message);
         break;
       }
@@ -386,11 +404,13 @@ export class TurnService {
     let assistantMsg: MessageDto | undefined;
     if (ctx.assistantBuf.trim()) {
       assistantMsg = this.threads.appendMessage(ctx.threadId, { author: { kind: "bot" }, kind: "text", text: ctx.assistantBuf });
-      this.bots.recordActivity(ctx.botId, ctx.threadId, ctx.assistantBuf.trim(), true);
+      this.bots.recordAssistantOutput(ctx.botId, ctx.threadId, ctx.assistantBuf.trim());
     }
-    if (outcome !== "completed") {
-      // Keep the transcript honest: non-clean turn ends always leave a note.
-      this.threads.appendMessage(ctx.threadId, { author: { kind: "system" }, kind: "event", text: reason ? `turn ${outcome}: ${reason}` : `turn ${outcome}` });
+    if (outcome === "cancelled") {
+      this.#emitSystemNote(
+        ctx.threadId,
+        reason === undefined ? "turn cancelled" : `turn cancelled: ${reason}`,
+      );
     }
 
     this.#setTurnStatus(ctx.turnId, outcome, reason);
@@ -422,7 +442,7 @@ export class TurnService {
     let cancellationConfirmed = false;
     try {
       if (this.agents.capabilityInventory(ctx.agentId)?.abort) {
-        ctx.abortReason = reason;
+        ctx.timeoutFailureReason = reason;
         const worker = await this.supervisor.agentWorker(ctx.agentId);
         await worker.request({ type: "turn.abort", sessionId: ctx.workerSessionId }, 30_000);
         await this.waitForTerminal(ctx.turnId, 5_000);
@@ -437,18 +457,16 @@ export class TurnService {
     this.agents.markOffline(ctx.agentId, `worker stopped after ${reason}`);
     for (const active of [...this.#turns.values()]) {
       if (active.agentId !== ctx.agentId) continue;
-      this.#finishTurn(
-        active,
-        "failed",
-        active === ctx ? reason : `agent worker stopped after another turn ${reason}`,
-      );
+      const failureReason =
+        active === ctx ? reason : `agent worker stopped after another turn ${reason}`;
+      this.#finishTurn(active, "failed", failureReason);
     }
   }
 
 
   /**
-   * Resolve only after the persisted turn is terminal. Archive uses this
-   * barrier so a Bot cannot disappear while its native Agent is still working.
+   * Resolve only after the persisted turn is terminal. Bot lifecycle services
+   * use this barrier so a Bot cannot disappear while its native Agent is still working.
    */
   waitForTerminal(turnId: string, timeoutMs = 30_000): Promise<TurnDto> {
     const current = this.#turnDto(turnId);
@@ -498,7 +516,7 @@ export class TurnService {
       return;
     }
     this.#setTurnStatus(turnId, "cancelled", reason);
-    this.#emitSystemNote(t.thread_id, `turn cancelled (${reason})`);
+    this.#emitSystemNote(t.thread_id, `turn cancelled: ${reason}`);
   }
 
   /** Lease contention: the turn parks in waiting_for_computer until granted. */

@@ -1,9 +1,5 @@
 import * as stylex from "@stylexjs/stylex";
 
-const workingPulse = stylex.keyframes({
-  "0%, 100%": { opacity: 0.62 },
-  "50%": { opacity: 1 },
-});
 
 const styles = stylex.create({
   fillColumn: {
@@ -58,16 +54,6 @@ const styles = stylex.create({
   },
   activityWrap: {
     paddingInline: "var(--spacing-2)",
-  },
-  workingIndicator: {
-    color: "var(--color-text-secondary)",
-    animationName: {
-      default: workingPulse,
-      "@media (prefers-reduced-motion: reduce)": "none",
-    },
-    animationDuration: "var(--duration-slow)",
-    animationTimingFunction: "var(--ease-standard)",
-    animationIterationCount: "infinite",
   },
 });
 

@@ -204,7 +204,7 @@ export function ProfilePanel({
         <VStack padding={4} paddingBlockStart={0} gap={4} aria-busy={disabled || undefined} data-testid="profile-drawer">
           {error !== undefined ? <Banner status="error" title={error} /> : null}
           <HStack gap={3} align="center" wrap="wrap">
-            <AvatarView avatar={current.avatar} name={current.name} size="lg" activity="selected" />
+            <AvatarView avatar={current.avatar} name={current.name} size="lg" presentation="static" />
             <VStack gap={0.5}>
               <Text type="label-lg">Current avatar</Text>
               <Text color="secondary">This image represents the bot throughout your workspace.</Text>
@@ -289,7 +289,7 @@ export function ProfilePanel({
                 if (invalidField === "avatarDescription" && value.trim().length > 0) setInvalidField(undefined);
               }}
               maxLength={2000}
-              placeholder="A calm geometric teammate with crisp blue shapes"
+              placeholder="A focused coding teammate with a warm expression and blue accents"
               {...(invalidField === "avatarDescription" ? { status: { type: "error" as const, message: "Describe the avatar you want." } } : {})}
               width="100%"
               data-testid="avatar-prompt"

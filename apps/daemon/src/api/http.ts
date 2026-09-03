@@ -13,7 +13,6 @@ import type { DictationService } from "../modules/dictation/dictationService.ts"
 import type { AttachmentsService } from "../modules/attachments/attachments.ts";
 import { handleAvatarRequest } from "./avatarRoutes.ts";
 import { handleThreadFeatureRequest } from "./threadRoutes.ts";
-import { handleBotArchiveRequest } from "./botArchiveRoutes.ts";
 import { handleBotAttentionRequest } from "./botAttentionRoutes.ts";
 import { handleBotDeletionRequest } from "./botDeletionRoutes.ts";
 import { handleComputerRequest } from "./computerRoutes.ts";
@@ -24,6 +23,7 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 import { CreateBotBody, PatchBotBody, SendMessageBody } from "@omarchy-bot/protocol";
 import { HttpError } from "../modules/bots/bots.ts";
+import { AGENT_IDS, type AgentId } from "@omarchy-bot/domain";
 
 export interface DaemonServices {
   cfg: Config;
@@ -85,10 +85,14 @@ export function startHttp(svc: DaemonServices): { stop: () => Promise<void>; por
     if (pathname === "/api/health" && req.method === "GET") return json({ ok: true, ts: new Date().toISOString() });
 
     if (pathname === "/api/agents" && req.method === "GET") return json(svc.agents.list());
-
-    if (pathname === "/api/bots" && req.method === "GET") {
-      return json(svc.bots.list({ includeArchived: url.searchParams.get("includeArchived") === "1" }));
+    const agentRecheck = pathname.match(/^\/api\/agents\/([\w-]+)\/recheck$/);
+    if (agentRecheck && req.method === "POST") {
+      const agentId = agentRecheck[1] as AgentId;
+      if (!AGENT_IDS.includes(agentId)) return notFound(`unknown agent ${agentId}`);
+      return json(await svc.agents.recheck(agentId));
     }
+
+    if (pathname === "/api/bots" && req.method === "GET") return json(svc.bots.list());
     if (pathname === "/api/bots" && req.method === "POST") {
       const body = await parseBody(req, CreateBotBody);
       return json(svc.bots.create(body), 201);
@@ -113,8 +117,6 @@ export function startHttp(svc: DaemonServices): { stop: () => Promise<void>; por
     const attentionResponse = await handleBotAttentionRequest(req, svc.bots, pathname);
     if (attentionResponse) return attentionResponse;
 
-    const archiveResponse = await handleBotArchiveRequest(req, svc.bots, svc.turns, pathname);
-    if (archiveResponse) return archiveResponse;
 
     const avatarResponse = await handleAvatarRequest(req, svc.avatars, pathname);
     if (avatarResponse) return avatarResponse;

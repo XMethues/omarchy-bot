@@ -1,6 +1,7 @@
 import type { JSX, ReactNode } from "react";
 import { AppShell, useAppShellMobile } from "@astryxdesign/core/AppShell";
 import { Banner } from "@astryxdesign/core/Banner";
+import { AlertDialog } from "@astryxdesign/core/AlertDialog";
 import { Button } from "@astryxdesign/core/Button";
 import { EmptyState } from "@astryxdesign/core/EmptyState";
 import { Icon } from "@astryxdesign/core/Icon";
@@ -11,10 +12,11 @@ import { VStack } from "@astryxdesign/core/VStack";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import type { BotViewDto } from "@omarchy-bot/protocol";
 import { api, apiErrorMessage } from "../lib/api.ts";
 import { requestDesktopNotificationPermission, startEventPump, type QueryTag } from "../lib/events.ts";
 import { mostRecentlyActiveBot, Sidebar } from "../components/Sidebar.tsx";
-import { clearDraftsByBot } from "../lib/drafts.ts";
+import { clearDraftsByBot, restoreDrafts, takeDraftsByBot } from "../lib/drafts.ts";
 import { ConversationHeader } from "../components/ConversationHeader.tsx";
 import { ChatPanel } from "../components/ChatPanel.tsx";
 import { CreateBotDialog } from "../components/CreateBotDialog.tsx";
@@ -71,6 +73,9 @@ function HomeScreen(): JSX.Element {
   const [computerOpen, setComputerOpen] = useState(false);
   const [computerError, setComputerError] = useState<string | undefined>(undefined);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [pendingDeleteBot, setPendingDeleteBot] = useState<BotViewDto | undefined>(undefined);
+  const [deletingBotId, setDeletingBotId] = useState<string | undefined>(undefined);
+  const [deleteError, setDeleteError] = useState<string | undefined>(undefined);
   const [autoSendVoice, setAutoSendVoice] = useVoiceAutoSendSetting();
   const [isOnline, setIsOnline] = useState(() => typeof navigator === "undefined" || navigator.onLine);
   const [notificationPermission, setNotificationPermission] = useState<NotificationPermission | "unsupported">(() =>
@@ -114,11 +119,6 @@ function HomeScreen(): JSX.Element {
   const agents = useQuery({ queryKey: ["agents"], queryFn: () => api.listAgents(), refetchInterval: 30_000 });
   const bots = useQuery({ queryKey: ["bots"], queryFn: () => api.listBots(), refetchInterval: 30_000 });
   botNamesRef.current = Object.fromEntries((bots.data ?? []).map((candidate) => [candidate.id, candidate.name]));
-  const allBots = useQuery({
-    queryKey: ["bots", "all"],
-    queryFn: () => api.listBots(true),
-    enabled: settingsOpen,
-  });
   const dictation = useQuery({
     queryKey: ["dictation"],
     queryFn: () => api.dictation(),
@@ -179,7 +179,7 @@ function HomeScreen(): JSX.Element {
     refetchInterval: 60_000,
   });
 
-  // Startup and archive fallback select the most recent available Bot.
+  // Startup and deletion recovery select the most recent surviving Bot.
   useEffect(() => {
     if (bots.data === undefined) return;
     if (selectedBotId !== undefined && bots.data.some((candidate) => candidate.id === selectedBotId)) return;
@@ -296,16 +296,6 @@ function HomeScreen(): JSX.Element {
         description="You can review this conversation while the agent connection is checked."
         container="section"
       />
-    ) : bot !== undefined && !isAgentReady ? (
-      <Banner
-        status="warning"
-        title="Agent unavailable"
-        description={
-          selectedAgent?.guidance
-          ?? "This bot’s conversation is still available, but new messages cannot be sent until its agent is ready."
-        }
-        container="section"
-      />
     ) : undefined;
 
   let workspaceContent: ReactNode;
@@ -392,6 +382,12 @@ function HomeScreen(): JSX.Element {
                 ? { messagesError: apiErrorMessage(messages.error, "Messages could not be loaded.") }
                 : {})}
               {...(thread !== undefined ? { onRetryMessages: () => void messages.refetch() } : {})}
+              {...(selectedAgent !== undefined ? { agentReadiness: selectedAgent } : {})}
+              onRetryAgentReadiness={async () => {
+                await api.recheckAgent(bot.agentId);
+                await agents.refetch();
+                invalidate("bots");
+              }}
               dictation={dictationController}
               autoSendVoice={autoSendVoice}
               onVoiceAutoSend={async (target, text) => {
@@ -413,11 +409,95 @@ function HomeScreen(): JSX.Element {
     );
   }
 
+  const currentPendingDeleteBot =
+    pendingDeleteBot === undefined
+      ? undefined
+      : bots.data?.find((candidate) => candidate.id === pendingDeleteBot.id) ?? pendingDeleteBot;
+
+  const requestBotDeletion = (target: BotViewDto): void => {
+    setPendingDeleteBot(target);
+    setDeleteError(undefined);
+  };
+
+  const deletePendingBot = async (): Promise<void> => {
+    const target = pendingDeleteBot;
+    if (target === undefined) return;
+    setDeletingBotId(target.id);
+    setDeleteError(undefined);
+
+    const clearedDrafts = takeDraftsByBot(target.id);
+    if (clearedDrafts === undefined) {
+      setDeleteError(
+        `Drafts saved in this browser couldn’t be cleared. ${target.name} was not deleted. Close other tabs using this Bot and try again.`,
+      );
+      setDeletingBotId(undefined);
+      return;
+    }
+
+    try {
+      const result = await api.deleteBot(target.id);
+      if (result.status === "failed") {
+        const draftsRestored = restoreDrafts(clearedDrafts);
+        const firstFailure = result.failures[0];
+        const barrierFailed =
+          firstFailure?.stage === "turn_cancellation" || firstFailure?.stage === "terminal_wait";
+        setDeleteError(
+          `${barrierFailed
+            ? `Active work couldn’t be stopped, so no local cleanup began and ${target.name} remains available.`
+            : `Some local data couldn’t be removed, so ${target.name} remains available.`}`
+          + `${firstFailure === undefined ? "" : ` ${firstFailure.message}.`} Try again.`
+          + `${draftsRestored ? "" : " Drafts saved in this browser also couldn’t be restored."}`,
+        );
+        return;
+      }
+
+      await qc.cancelQueries({ queryKey: ["bots"] });
+      const remaining = (bots.data ?? []).filter((candidate) => candidate.id !== target.id);
+      qc.setQueryData(["bots"], remaining);
+      qc.removeQueries({ queryKey: ["threads", target.id], exact: true });
+      qc.removeQueries({ queryKey: ["messages"] });
+      setPendingDeleteBot(undefined);
+      setDeleteError(undefined);
+
+      if (selectedBotId === target.id) {
+        setHistoryOpen(false);
+        setProfileOpen(false);
+        setComputerOpen(false);
+        const fallback = mostRecentlyActiveBot(remaining);
+        await navigate({
+          search: fallback === undefined ? {} : { bot: fallback.id },
+          replace: true,
+        });
+      }
+      invalidate("bots");
+    } catch (failure) {
+      const draftsRestored = restoreDrafts(clearedDrafts);
+      setDeleteError(
+        apiErrorMessage(
+          failure,
+          `Local deletion couldn’t be completed, so ${target.name} remains available. Try again.`,
+        )
+        + `${draftsRestored ? "" : " Drafts saved in this browser also couldn’t be restored."}`,
+      );
+    } finally {
+      setDeletingBotId(undefined);
+    }
+  };
+
   const sidebar = (
     <Sidebar
       bots={bots.data ?? []}
       {...(selectedBotId !== undefined ? { selectedBotId } : {})}
       onSelectBot={selectBot}
+      onEditProfile={(botId) => {
+        setComputerOpen(false);
+        if (selectedBotId === botId) {
+          setProfileOpen(true);
+          return;
+        }
+        void navigate({ search: { bot: botId } }).then(() => setProfileOpen(true));
+      }}
+      onDeleteBot={requestBotDeletion}
       onCreateBot={() => setCreateOpen(true)}
       onOpenSettings={() => {
         setNotificationPermission(typeof Notification === "undefined" ? "unsupported" : Notification.permission);
@@ -539,12 +619,12 @@ function HomeScreen(): JSX.Element {
         open={settingsOpen}
         mobileReturnFocusRef={mobileNavigationTriggerRef}
         onClose={() => setSettingsOpen(false)}
-        bots={allBots.data ?? []}
-        {...(allBots.isPending ? { botsLoading: true } : {})}
-        {...(allBots.error !== null
-          ? { botsError: apiErrorMessage(allBots.error, "Bots could not be loaded.") }
+        bots={bots.data ?? []}
+        {...(bots.isPending ? { botsLoading: true } : {})}
+        {...(bots.error !== null
+          ? { botsError: apiErrorMessage(bots.error, "Bots could not be loaded.") }
           : {})}
-        {...(allBots.error !== null ? { onRetryBots: () => void allBots.refetch() } : {})}
+        {...(bots.error !== null ? { onRetryBots: () => void bots.refetch() } : {})}
         agents={agents.data ?? []}
         {...(agents.isPending ? { agentsLoading: true } : {})}
         {...(agents.error !== null
@@ -565,28 +645,34 @@ function HomeScreen(): JSX.Element {
         onRequestNotifications={() => {
           void requestDesktopNotificationPermission().then(setNotificationPermission);
         }}
-        onArchiveBot={(botId, body) => api.archiveBot(botId, body)}
-        onBotArchived={(botId) => {
-          qc.setQueryData(["bots"], (current: typeof bots.data) => current?.filter((candidate) => candidate.id !== botId));
-          invalidate("bots");
-          if (selectedBotId === botId) void navigate({ search: {}, replace: true });
+        {...(deletingBotId !== undefined ? { deletingBotId } : {})}
+        onRequestDeleteBot={requestBotDeletion}
+      />
+      <AlertDialog
+        isOpen={pendingDeleteBot !== undefined}
+        onOpenChange={(nextOpen) => {
+          if (!nextOpen && deletingBotId === undefined) {
+            setPendingDeleteBot(undefined);
+            setDeleteError(undefined);
+          }
         }}
-        onRestoreBot={(botId) => api.restoreBot(botId)}
-        onBotRestored={() => invalidate("bots")}
-        onDeleteBot={async (botId, confirmName) => {
-          const result = await api.deleteBot(botId, { confirmName });
-          if (result.status === "deleted") await qc.cancelQueries({ queryKey: ["bots"] });
-          return result;
-        }}
-        onBotDeleted={(botId) => {
-          qc.setQueryData(["bots"], (current: typeof bots.data) => current?.filter((candidate) => candidate.id !== botId));
-          qc.setQueryData(["bots", "all"], (current: typeof allBots.data) => current?.filter((candidate) => candidate.id !== botId));
-          qc.removeQueries({ queryKey: ["threads", botId], exact: true });
-          qc.removeQueries({ queryKey: ["messages"] });
-          clearDraftsByBot(botId);
-          invalidate("bots");
-          if (selectedBotId === botId) void navigate({ search: {}, replace: true });
-        }}
+        title={
+          deleteError === undefined
+            ? `Delete ${currentPendingDeleteBot?.name ?? "this Bot"}?`
+            : `Couldn’t delete ${currentPendingDeleteBot?.name ?? "this Bot"}`
+        }
+        description={
+          deleteError
+          ?? `${currentPendingDeleteBot?.status === "active"
+            ? `${currentPendingDeleteBot.name} has active work. Deleting it will stop all of this Bot’s current work. `
+            : ""}Deleting ${currentPendingDeleteBot?.name ?? "this Bot"} permanently removes its Omarchy Bot conversations, messages, managed attachments, uploaded avatar data, and local drafts. Agent-owned Native Sessions may remain. This cannot be undone.`
+        }
+        cancelLabel="Cancel"
+        actionLabel={deleteError === undefined ? "Delete permanently" : "Try again"}
+        actionVariant="destructive"
+        isActionLoading={deletingBotId !== undefined}
+        onAction={() => void deletePendingBot()}
+        data-testid="permanent-delete-confirmation"
       />
     </AppShell>
   );

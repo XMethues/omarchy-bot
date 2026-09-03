@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 import * as stylex from "@stylexjs/stylex";
 import { Paperclip } from "lucide-react";
 import { AspectRatio } from "@astryxdesign/core/AspectRatio";
+import { Banner } from "@astryxdesign/core/Banner";
 import { Button } from "@astryxdesign/core/Button";
 import {
   ChatComposer,
@@ -23,12 +24,14 @@ import { Icon } from "@astryxdesign/core/Icon";
 import { Item } from "@astryxdesign/core/Item";
 import { Token } from "@astryxdesign/core/Token";
 import { VStack } from "@astryxdesign/core/VStack";
-import type { AttachmentDto, BotViewDto, DictationDto, DictationResultDto, MessageDto, ThreadDto } from "@omarchy-bot/protocol";
+import { VisuallyHidden } from "@astryxdesign/core/VisuallyHidden";
+import type { AgentDto, AttachmentDto, BotViewDto, DictationDto, DictationResultDto, MessageDto, ThreadDto } from "@omarchy-bot/protocol";
+import { isTerminalTurn } from "@omarchy-bot/domain";
 import { getDelta, subscribeDeltas } from "../lib/live.ts";
 import { api, apiErrorMessage, trimSendText } from "../lib/api.ts";
 import { loadDraft, saveDraft, type ConversationDraft } from "../lib/drafts.ts";
 import { insertDictationTranscript } from "../lib/dictation.ts";
-import { AvatarView } from "./AvatarView.tsx";
+import { WorkingAvatarView } from "./AvatarView.tsx";
 import { useTranscriptAttentionSurface } from "./TranscriptAttention.tsx";
 import styles from "../lib/styles.ts";
 
@@ -51,12 +54,21 @@ interface ChatPanelProps {
   onMessageSent: (threadId: string) => void;
   isAgentReady: boolean;
   supportsSteering: boolean;
+  agentReadiness?: AgentDto;
+  onRetryAgentReadiness?: () => Promise<void>;
   dictation: DictationController;
   autoSendVoice: boolean;
   onVoiceAutoSend: (target: VoiceDraftTarget, text: string) => Promise<void>;
   messagesLoading?: boolean;
   messagesError?: string;
   onRetryMessages?: () => void;
+}
+
+interface ContextualErrorCard {
+  key: string;
+  title: string;
+  description: string;
+  retry?: () => Promise<void>;
 }
 
 function stringPayloadField(payload: unknown, field: string): string | undefined {
@@ -94,6 +106,7 @@ function groupMessages(messages: MessageDto[]): Row[] {
   flushRun();
   return out;
 }
+
 
 const EMPTY_DRAFT: ConversationDraft = { text: "", cursor: 0, stagedIds: [] };
 
@@ -175,6 +188,8 @@ export function ChatPanel({
   onMessageSent,
   isAgentReady,
   supportsSteering,
+  agentReadiness,
+  onRetryAgentReadiness,
   dictation,
   autoSendVoice,
   onVoiceAutoSend,
@@ -184,6 +199,15 @@ export function ChatPanel({
 }: ChatPanelProps): JSX.Element {
   const [draft, setDraft] = useState<ConversationDraft>(EMPTY_DRAFT);
   const [submitError, setSubmitError] = useState<string | undefined>(undefined);
+  const [dismissedErrorKeys, setDismissedErrorKeys] = useState<ReadonlySet<string>>(() => new Set());
+  const dismissError = useCallback((key: string): void => {
+    setDismissedErrorKeys((current) => {
+      if (current.has(key)) return current;
+      const next = new Set(current);
+      next.add(key);
+      return next;
+    });
+  }, []);
   const [voiceStatus, setVoiceStatus] = useState<string | undefined>(undefined);
   const [voiceState, setVoiceState] = useState<DictationDto>(dictation.state);
   const [stagedAttachments, setStagedAttachments] = useState<AttachmentDto[]>([]);
@@ -193,6 +217,8 @@ export function ChatPanel({
   const previewUrlsRef = useRef(new Map<string, string>());
   const restoreGenerationRef = useRef(0);
   const dictationOriginRef = useRef<DictationOrigin | undefined>(undefined);
+  const [workingAnnouncement, setWorkingAnnouncement] = useState("");
+  const workingStateRef = useRef<{ selectionKey: string; active: boolean; name: string } | undefined>(undefined);
   const draftBotId = bot?.id;
   const draftThreadId = thread?.id;
   const selectedDraftRef = useRef({ botId: draftBotId, threadId: draftThreadId });
@@ -524,8 +550,43 @@ export function ChatPanel({
     () => (thread !== undefined ? getDelta(thread.id) : ""),
     () => "",
   );
-  const isStreaming = bot?.status === "working" || (thread !== undefined && delta.length > 0);
+  const selectedThreadIsActive =
+    thread?.latestTurn !== undefined && !isTerminalTurn(thread.latestTurn.status);
   const activeTurnCannotSteer = thread?.activeTurn !== undefined && !supportsSteering;
+  const composerIsDisabled = bot === undefined || !isAgentReady || activeTurnCannotSteer;
+  const workingSelectionKey = bot !== undefined && thread !== undefined ? `${bot.id}:${thread.id}` : undefined;
+  useEffect(() => {
+    if (workingSelectionKey === undefined || bot === undefined) {
+      workingStateRef.current = undefined;
+      setWorkingAnnouncement("");
+      return;
+    }
+
+    const previous = workingStateRef.current;
+    if (previous?.selectionKey !== workingSelectionKey) {
+      workingStateRef.current = { selectionKey: workingSelectionKey, active: selectedThreadIsActive, name: bot.name };
+      setWorkingAnnouncement(selectedThreadIsActive ? `${bot.name} is working` : "");
+      return;
+    }
+
+    workingStateRef.current = { selectionKey: workingSelectionKey, active: selectedThreadIsActive, name: bot.name };
+    if (previous.active !== selectedThreadIsActive) {
+      setWorkingAnnouncement(
+        selectedThreadIsActive ? `${bot.name} is working` : `${previous.name} is no longer working`,
+      );
+    } else if (previous.name !== bot.name && selectedThreadIsActive) {
+      setWorkingAnnouncement(`${bot.name} is working`);
+    }
+  }, [bot, selectedThreadIsActive, workingSelectionKey]);
+  useEffect(() => {
+    const editable = composerInputRef.current?.querySelector<HTMLElement>('[contenteditable]');
+    if (editable === undefined || editable === null) return;
+    if (composerIsDisabled) {
+      editable.setAttribute("aria-disabled", "true");
+    } else {
+      editable.removeAttribute("aria-disabled");
+    }
+  }, [composerIsDisabled]);
 
   const grouped = useMemo(() => groupMessages(messages), [messages]);
 
@@ -577,6 +638,27 @@ export function ChatPanel({
     [bot, thread, draft, onMessageSent, activeTurnCannotSteer],
   );
 
+  const failedTurn = thread?.latestTurn?.status === "failed" ? thread.latestTurn : undefined;
+  const failedTurnMessage = useMemo(() => {
+    const message = [...messages].reverse().find(
+      (candidate) => candidate.author.kind === "user" && candidate.text !== undefined,
+    );
+    return message?.attachments?.length ? undefined : message?.text;
+  }, [messages]);
+  const retryFailedTurn = useCallback(async (): Promise<void> => {
+    if (thread === undefined || failedTurn === undefined || failedTurnMessage === undefined || !isAgentReady) return;
+    setSubmitError(undefined);
+    try {
+      const response = await api.sendMessage(thread.id, {
+        text: failedTurnMessage,
+        clientTag: crypto.randomUUID(),
+      });
+      onMessageSent(response.threadId);
+    } catch (error) {
+      setSubmitError(apiErrorMessage(error, "Turn could not be retried."));
+    }
+  }, [thread, failedTurn, failedTurnMessage, isAgentReady, onMessageSent]);
+
   const rows = useMemo(() => {
     const out: ReactNode[] = [];
     for (const g of grouped) {
@@ -613,11 +695,6 @@ export function ChatPanel({
         <ChatMessage
           key={message.id}
           sender={sender}
-          avatar={
-            sender === "assistant" && bot !== undefined ? (
-              <AvatarView avatar={bot.avatar} name={bot.name} size="sm" activity={bot.status === "working" ? "working" : "selected"} />
-            ) : undefined
-          }
           data-testid={sender === "assistant" ? "assistant-message" : "user-message"}
         >
           <ChatMessageBubble variant="filled">
@@ -630,7 +707,49 @@ export function ChatPanel({
       );
     }
     return out;
-  }, [grouped, bot]);
+  }, [grouped]);
+  useEffect(() => {
+    if (agentReadiness?.status !== "ready") return;
+    const readinessKeyPrefix = `agent:${agentReadiness.id}:`;
+    setDismissedErrorKeys((current) => {
+      const next = new Set([...current].filter((key) => !key.startsWith(readinessKeyPrefix)));
+      return next.size === current.size ? current : next;
+    });
+  }, [agentReadiness?.id, agentReadiness?.status]);
+
+
+  const readinessError: ContextualErrorCard | undefined =
+    agentReadiness !== undefined && agentReadiness.status !== "ready"
+      ? {
+          key: `agent:${agentReadiness.id}:${agentReadiness.status}:${agentReadiness.reason ?? ""}:${agentReadiness.guidance ?? ""}`,
+          title: agentReadiness.status === "checking"
+            ? `Checking ${agentReadiness.displayName}`
+            : `${agentReadiness.displayName} isn’t ready`,
+          description: agentReadiness.status === "checking"
+            ? `Checking whether ${agentReadiness.displayName} can accept new work.`
+            : [...new Set(
+                [agentReadiness.reason, agentReadiness.guidance].filter(
+                  (message): message is string => message !== undefined && message.trim().length > 0,
+                ),
+              )].join(" "),
+          ...(onRetryAgentReadiness !== undefined ? { retry: onRetryAgentReadiness } : {}),
+        }
+      : undefined;
+  const submitErrorCard: ContextualErrorCard | undefined = submitError === undefined
+    ? undefined
+    : { key: `submit:${submitError}`, title: "Message wasn’t sent", description: submitError, retry: send };
+  const turnErrorCard: ContextualErrorCard | undefined = failedTurn === undefined
+    ? undefined
+    : {
+        key: `turn:${failedTurn.id}`,
+        title: "Turn failed",
+        description: failedTurn.reason ?? "The agent could not finish this turn.",
+        ...(failedTurnMessage !== undefined && isAgentReady ? { retry: retryFailedTurn } : {}),
+      };
+  const visibleContextualError = [readinessError, submitErrorCard, turnErrorCard].find(
+    (error): error is ContextualErrorCard =>
+      error !== undefined && !dismissedErrorKeys.has(error.key),
+  );
 
   const voiceMessage =
     voiceState.state === "recording"
@@ -639,20 +758,18 @@ export function ChatPanel({
         ? "Transcribing voice…"
         : voiceStatus;
   const composerStatus =
-    submitError !== undefined
-      ? { type: "error" as const, message: submitError }
-      : voiceMessage !== undefined
-        ? {
-            type: voiceState.state === "recording" || voiceState.state === "transcribing" ? ("warning" as const) : ("error" as const),
-            message: voiceMessage,
-          }
-        : voiceState.state === "unavailable"
-          ? { type: "warning" as const, message: voiceState.error ?? "Voice dictation isn’t available right now." }
-          : restoringAttachments
-            ? { type: "warning" as const, message: "Checking draft attachments…" }
-            : activeTurnCannotSteer
-              ? { type: "warning" as const, message: "This agent does not support steering an active turn." }
-              : undefined;
+    voiceMessage !== undefined
+      ? {
+          type: voiceState.state === "recording" || voiceState.state === "transcribing" ? ("warning" as const) : ("error" as const),
+          message: voiceMessage,
+        }
+      : voiceState.state === "unavailable"
+        ? { type: "warning" as const, message: voiceState.error ?? "Voice dictation isn’t available right now." }
+        : restoringAttachments
+          ? { type: "warning" as const, message: "Checking draft attachments…" }
+          : activeTurnCannotSteer
+            ? { type: "warning" as const, message: "This agent does not support steering an active turn." }
+            : undefined;
   const dictationLabel =
     voiceState.state === "recording"
       ? "Stop voice recording"
@@ -669,7 +786,7 @@ export function ChatPanel({
       variant="ghost"
       size="md"
       isIconOnly
-      isDisabled={bot === undefined || activeTurnCannotSteer || voiceState.state === "transcribing" || voiceState.state === "unavailable"}
+      isDisabled={bot === undefined || !isAgentReady || activeTurnCannotSteer || voiceState.state === "transcribing" || voiceState.state === "unavailable"}
       onClick={() => void (voiceState.state === "recording" ? stopDictation() : startDictation())}
       data-testid="dictation-button"
       data-state={voiceState.state}
@@ -735,6 +852,39 @@ export function ChatPanel({
 
   const composer = (
     <div {...stylex.props(styles.composerWrap)}>
+      {visibleContextualError !== undefined ? (
+        <Banner
+          status="error"
+          title={visibleContextualError.title}
+          description={visibleContextualError.description}
+          container="section"
+          endContent={
+            <HStack gap={1}>
+              {visibleContextualError.retry !== undefined ? (
+                <Button
+                  label="Retry"
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => void visibleContextualError.retry?.()}
+                />
+              ) : null}
+              <Button
+                label="Close"
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  if (submitErrorCard?.key === visibleContextualError.key) {
+                    setSubmitError(undefined);
+                  } else {
+                    dismissError(visibleContextualError.key);
+                  }
+                }}
+              />
+            </HStack>
+          }
+          data-testid="composer-error-card"
+        />
+      ) : null}
       <div
         {...stylex.props(styles.composerDropZone)}
         onDragOver={(event) => event.preventDefault()}
@@ -754,7 +904,14 @@ export function ChatPanel({
           value={draft.text}
           onChange={onDraftChange}
           onSubmit={() => void send()}
-          input={<ChatComposerInput ref={composerInputRef} onKeyUp={rememberCursor} onMouseUp={rememberCursor} />}
+          input={
+            <ChatComposerInput
+              ref={composerInputRef}
+              onKeyUp={rememberCursor}
+              onMouseUp={rememberCursor}
+              isDisabled={composerIsDisabled}
+            />
+          }
           {...(attachmentDrawer !== undefined ? { drawer: attachmentDrawer } : {})}
           headerActions={
             <Button
@@ -763,7 +920,7 @@ export function ChatPanel({
               variant="ghost"
               size="sm"
               isIconOnly
-              isDisabled={bot === undefined || activeTurnCannotSteer}
+              isDisabled={bot === undefined || !isAgentReady || activeTurnCannotSteer}
               onClick={() => fileInputRef.current?.click()}
               data-testid="attachment-picker"
             />
@@ -778,7 +935,7 @@ export function ChatPanel({
                   ? "Wait for this turn to finish"
                   : "Message…"
           }
-          isDisabled={bot === undefined || !isAgentReady || activeTurnCannotSteer}
+          isDisabled={composerIsDisabled}
           data-testid="composer"
           {...(composerStatus !== undefined ? { status: composerStatus } : {})}
         />
@@ -813,23 +970,32 @@ export function ChatPanel({
   ) : undefined;
 
   const transcriptContent = messagesLoading || messagesError !== undefined ? [] : [...rows];
-  if (isStreaming && bot !== undefined && !messagesLoading && messagesError === undefined) {
-    transcriptContent.push(
-      <ChatMessage
-        key="streaming-response"
-        sender="assistant"
-        avatar={<AvatarView avatar={bot.avatar} name={bot.name} size="sm" activity="streaming" />}
-        data-testid="streaming-message"
-      >
-        <ChatMessageBubble variant="filled">
-          {delta.length > 0 ? delta : <span {...stylex.props(styles.workingIndicator)}>{bot.name} is working…</span>}
-        </ChatMessageBubble>
-      </ChatMessage>,
-    );
+  if (selectedThreadIsActive && bot !== undefined && !messagesLoading && messagesError === undefined) {
+    if (delta.length > 0) {
+      transcriptContent.push(
+        <ChatMessage
+          key="streaming-response"
+          sender="assistant"
+          data-testid="streaming-message"
+        >
+          <ChatMessageBubble variant="filled">{delta}</ChatMessageBubble>
+        </ChatMessage>,
+      );
+    }
+    transcriptContent.push(<WorkingAvatarView key="working-avatar" avatar={bot.avatar} name={bot.name} />);
   }
 
   return (
     <div {...stylex.props(styles.fillColumn)} data-testid="chat-panel">
+      <VisuallyHidden
+        as="div"
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
+        data-testid="working-announcement"
+      >
+        {workingAnnouncement}
+      </VisuallyHidden>
       <ChatLayout
         {...(transcriptAttention !== null
           ? { ref: transcriptAttention.viewportRef, onScroll: transcriptAttention.onViewportScroll }
@@ -837,7 +1003,7 @@ export function ChatPanel({
         composer={composer}
       >
         <ChatMessageList
-          isStreaming={isStreaming && !messagesLoading && messagesError === undefined}
+          isStreaming={selectedThreadIsActive && !messagesLoading && messagesError === undefined}
           emptyState={transcriptEmptyState}
           data-testid="transcript"
         >

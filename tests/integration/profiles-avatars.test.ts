@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { rmSync } from "node:fs";
 import sharp from "../../apps/daemon/node_modules/sharp";
 import type { AgentId } from "../../packages/domain/src/index.ts";
-import { AVATAR_RENDERER_ID, AvatarRecipeDto, type BotDto } from "../../packages/protocol/src/index.ts";
+import { AVATAR_RENDERER_ID, AVATAR_STYLE_IDS, AvatarRecipeDto, type BotDto } from "../../packages/protocol/src/index.ts";
 import { handleAvatarRequest } from "../../apps/daemon/src/api/avatarRoutes.ts";
 import { AvatarService, type AvatarSupervisor } from "../../apps/daemon/src/modules/avatars/avatarService.ts";
 import { HttpError } from "../../apps/daemon/src/modules/bots/bots.ts";
@@ -84,18 +84,19 @@ function svgFromDataUri(dataUri: string | undefined): string {
 }
 
 describe("pinned local avatar renderers", () => {
-  test("current active recipes use native DiceBear animation with reduced-motion CSS", () => {
-    const recipe: AvatarRecipeDto = {
-      rendererVersion: AVATAR_RENDERER_ID,
-      style: "shapes",
-      seed: "animated-current",
-      options: {},
-    };
+  test("renders every supported current style with native DiceBear animation", () => {
+    for (const style of AVATAR_STYLE_IDS) {
+      const recipe: AvatarRecipeDto = {
+        rendererVersion: AVATAR_RENDERER_ID,
+        style,
+        seed: `animated-${style}`,
+        options: {},
+      };
 
-    const svg = svgFromDataUri(renderAvatarRecipe(recipe, "working"));
-    expect(svg).toContain("@keyframes");
-    expect(svg).toContain("@media (prefers-reduced-motion: no-preference)");
-    expect(svg).toContain("dbsh-medium");
+      const svg = svgFromDataUri(renderAvatarRecipe(recipe, "working"));
+      expect(svg).toContain("@keyframes");
+      expect(svg).toContain("@media (prefers-reduced-motion: no-preference)");
+    }
   });
 
   test("rejects recipes from unsupported renderer versions", () => {
@@ -126,7 +127,7 @@ describe("bot profile editing", () => {
     const initial = await api<BotDto>(h, "GET", `/api/bots/${botId}`);
     expect(initial.avatar).toEqual({
       kind: "generated",
-      recipe: { rendererVersion: AVATAR_RENDERER_ID, style: "shapes", seed: botId, options: {} },
+      recipe: { rendererVersion: AVATAR_RENDERER_ID, style: "pixelbot", seed: botId, options: {} },
     });
 
     const first = await avatars.generate(botId);
@@ -134,6 +135,8 @@ describe("bot profile editing", () => {
     expect(first.avatar.kind).toBe("generated");
     expect(second.avatar.kind).toBe("generated");
     if (first.avatar.kind === "generated" && second.avatar.kind === "generated") {
+      expect(first.avatar.recipe.style).toBe("clay");
+      expect(second.avatar.recipe.style).toBe("critters");
       expect(first.avatar.recipe.seed).toBe(createHash("sha256").update(`${botId}:1`).digest("hex"));
       expect(second.avatar.recipe.seed).toBe(createHash("sha256").update(`${botId}:2`).digest("hex"));
     }
@@ -243,14 +246,14 @@ describe("Agent-authored avatar recipe boundary", () => {
   test("runs outside Thread history and stores only a validated pinned recipe", async () => {
     const botId = await makeBot(h, "Agent Recipe Bot");
     agentFailure = undefined;
-    agentOutput = JSON.stringify({ style: "thumbs", seed: "calm-blue", options: {} });
+    agentOutput = JSON.stringify({ style: "clay", seed: "calm-blue", options: {} });
     const beforeThreads = await api<unknown[]>(h, "GET", `/api/bots/${botId}/threads`);
     const response = await avatarRequest("POST", `/api/bots/${botId}/avatar/recipe`, { json: { prompt: "calm blue teammate" } });
     expect(response.status).toBe(200);
     const updated = (await response.json()) as BotDto;
     expect(updated.avatar).toEqual({
       kind: "recipe",
-      recipe: { rendererVersion: AVATAR_RENDERER_ID, style: "thumbs", seed: "calm-blue", options: {} },
+      recipe: { rendererVersion: AVATAR_RENDERER_ID, style: "clay", seed: "calm-blue", options: {} },
     });
     expect(openedInstructions).toContain("Reply with exactly one JSON object");
     expect(closedSessions).toBeGreaterThan(0);
@@ -261,8 +264,8 @@ describe("Agent-authored avatar recipe boundary", () => {
     const botId = await makeBot(h, "Boundary Bot");
     const before = await api<BotDto>(h, "GET", `/api/bots/${botId}`);
     const hostileOutputs = [
-      JSON.stringify({ style: "adventurer", seed: "x", options: {} }),
-      JSON.stringify({ style: "shapes", seed: "x", options: { backgroundColor: "ff0000" } }),
+      JSON.stringify({ style: "micah", seed: "x", options: {} }),
+      JSON.stringify({ style: "clay", seed: "x", options: { backgroundColor: "ff0000" } }),
       "<svg><script>alert(1)</script></svg>",
       "<html><img src=https://example.test/avatar.png></html>",
       JSON.stringify({ style: "thumbs", seed: "https://example.test/avatar.png", options: {} }),

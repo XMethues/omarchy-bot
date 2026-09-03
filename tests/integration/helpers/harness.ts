@@ -15,7 +15,10 @@ export interface Harness {
   stop: () => Promise<void>;
 }
 
-export async function startDaemon(existingHome?: string): Promise<Harness> {
+export async function startDaemon(
+  existingHome?: string,
+  options: { botDeletionTerminalTimeoutMs?: number } = {},
+): Promise<Harness> {
   const home = existingHome ?? path.join(os.tmpdir(), `omarchy-bot-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   const state = path.join(os.tmpdir(), `omarchy-bot-test-state-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   mkdirSync(home, { recursive: true });
@@ -32,6 +35,9 @@ export async function startDaemon(existingHome?: string): Promise<Harness> {
   process.env.OMARCHY_BOT_STATE = state;
   process.env.OMARCHY_BOT_PORT = "0";
   process.env.OMARCHY_BOT_WORKERS_DIR = path.resolve(import.meta.dir, "../fake-workers");
+  process.env.OMARCHY_BOT_DELETION_TERMINAL_TIMEOUT_MS = String(
+    options.botDeletionTerminalTimeoutMs ?? 30_000,
+  );
 
   // Dynamic import keeps the harness the single boot seam for fresh and legacy homes.
   const { main } = await import("../../../apps/daemon/src/bootstrap/main.ts");

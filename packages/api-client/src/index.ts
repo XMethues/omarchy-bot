@@ -2,14 +2,12 @@ import type {
   AgentDto,
   AttachmentDto,
   AttachmentDraftTokenDto,
-  ArchiveBodyDto,
   AvatarRecipeBodyDto,
   BotDto,
   BotViewDto,
   ClientToServer,
   ComputerViewDto,
   CreateBotBodyDto,
-  DeleteBotBodyDto,
   DeleteBotResultDto,
   DictationDto,
   DictationResultDto,
@@ -79,10 +77,13 @@ export class ApiClient {
   listAgents(): Promise<AgentDto[]> {
     return this.req("/api/agents");
   }
+  recheckAgent(id: AgentDto["id"]): Promise<AgentDto> {
+    return this.req(`/api/agents/${id}/recheck`, { method: "POST" });
+  }
 
   // ----- bots -----
-  listBots(includeArchived = false): Promise<BotViewDto[]> {
-    return this.req(`/api/bots${includeArchived ? "?includeArchived=1" : ""}`);
+  listBots(): Promise<BotViewDto[]> {
+    return this.req("/api/bots");
   }
   createBot(body: CreateBotBodyDto): Promise<BotDto> {
     return this.req("/api/bots", { method: "POST", body: JSON.stringify(body) });
@@ -96,15 +97,10 @@ export class ApiClient {
   pinBot(id: string, body: PinBodyDto): Promise<BotDto> {
     return this.req(`/api/bots/${id}/pin`, { method: "POST", body: JSON.stringify(body) });
   }
-  archiveBot(id: string, body: ArchiveBodyDto = {}): Promise<BotDto> {
-    return this.req(`/api/bots/${id}/archive`, { method: "POST", body: JSON.stringify(body) });
-  }
-  restoreBot(id: string): Promise<BotDto> {
-    return this.req(`/api/bots/${id}/restore`, { method: "POST" });
-  }
-  async deleteBot(id: string, body: DeleteBotBodyDto): Promise<DeleteBotResultDto> {
+  async deleteBot(id: string): Promise<DeleteBotResultDto> {
     try {
-      return await this.req(`/api/bots/${id}`, { method: "DELETE", body: JSON.stringify(body) });
+      const response = await this.req<unknown>(`/api/bots/${id}`, { method: "DELETE", body: "{}" });
+      return DeleteBotResultSchema.parse(response);
     } catch (error) {
       if (error !== null && typeof error === "object" && "body" in error) {
         const result = DeleteBotResultSchema.safeParse(error.body);

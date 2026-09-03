@@ -1,5 +1,7 @@
 # 11: Permanently delete Bot-owned data
 
+> Superseded by [Binary Bot activity and direct deletion](../../bot-activity-lifecycle/spec.md): deletion is direct and limited to Omarchy Bot-owned data.
+
 **What to build:** Give users one truthful, confirmed permanent-delete operation for an archived Bot that removes all Omarchy Bot-owned data without modifying the referenced Agent installation.
 
 **Blocked by:** 05: Send and revisit managed attachments; 07: Edit Bot Profiles and avatars; 08: Archive and restore Bots safely

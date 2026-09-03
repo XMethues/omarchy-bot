@@ -19,6 +19,8 @@ export interface Config {
   /** TTL for bot-held computer leases; human leases never auto-expire. */
   leaseTtlMs: number;
   turnTimeoutMs: number;
+  /** Maximum time deletion waits for a cancelled Turn to report a terminal state. */
+  botDeletionTerminalTimeoutMs: number;
 }
 
 export function loadConfig(): Config {
@@ -40,6 +42,7 @@ export function loadConfig(): Config {
     port: Number(process.env.OMARCHY_BOT_PORT ?? 7321),
     leaseTtlMs: Number(process.env.OMARCHY_BOT_LEASE_TTL_MS ?? 120_000),
     turnTimeoutMs: Number(process.env.OMARCHY_BOT_TURN_TIMEOUT_MS ?? 600_000),
+    botDeletionTerminalTimeoutMs: Number(process.env.OMARCHY_BOT_DELETION_TERMINAL_TIMEOUT_MS ?? 30_000),
   };
   mkdirSync(dataDir, { recursive: true });
   mkdirSync(stateDir, { recursive: true });

@@ -1,5 +1,7 @@
 # AI teammate workspace
 
+> Bot activity presentation, archive/restore, and permanent-deletion decisions are superseded by [Binary Bot activity and direct deletion](../bot-activity-lifecycle/spec.md).
+
 Status: completed
 
 ## Problem Statement

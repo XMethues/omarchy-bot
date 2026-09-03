@@ -15,6 +15,7 @@ import { mkdirSync, mkdtempSync, writeFileSync, existsSync, rmSync } from "node:
 import os from "node:os";
 import path from "node:path";
 import { WorkerClient, sanitizedEnv } from "../../apps/daemon/src/supervision/workerClient.ts";
+import { isAgentCapabilityInventory } from "../../packages/agent-contract/src/agent-protocol.ts";
 import { RED_PIXEL_PNG, startConformanceDaemon, type ConformanceDaemon } from "./helpers.ts";
 import { normalizeSessionEvent } from "../../workers/pi/src/normalize.ts";
 
@@ -278,7 +279,34 @@ describe("pi conformance (10 steps, real model)", () => {
       });
       await pi.start();
       const reprobe = await pi.request({ type: "probe", requestId: crypto.randomUUID() }, 30_000);
-      expect((reprobe as { sdkOk?: boolean }).sdkOk).toBeTrue();
+      const probePayload: unknown = reprobe;
+      if (probePayload === null || typeof probePayload !== "object" || !("sdkOk" in probePayload) || !("capabilities" in probePayload)) {
+        throw new Error("Pi probe returned an invalid payload");
+      }
+      expect(probePayload.sdkOk).toBeTrue();
+      if (!isAgentCapabilityInventory(probePayload.capabilities)) {
+        throw new Error("Pi probe returned an invalid capability inventory");
+      }
+      const capabilities = probePayload.capabilities;
+      expect(capabilities).toMatchObject({
+        version: 1,
+        steering: true,
+        abort: true,
+        nativeThreadActions: ["resume", "history", "close"],
+        attachments: { text: true, maxTextBytes: 64 * 1024 },
+        nativeEventFamilies: ["message", "tool", "turn", "error"],
+      });
+      expect(Object.keys(capabilities ?? {}).sort()).toEqual([
+        "abort",
+        "attachments",
+        "nativeEventFamilies",
+        "nativeThreadActions",
+        "steering",
+        "version",
+      ]);
+      await expect(
+        pi.request({ type: "session.delete", nativeSessionId: "obsolete" }, 5_000),
+      ).rejects.toThrow("unsupported command");
       console.log("conformance: step 8 ok — worker restart clean (orphans checked in afterAll)");
 
       // ---- Step 9: capability inventory / event mapping ----

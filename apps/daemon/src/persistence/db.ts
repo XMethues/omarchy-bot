@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { AVATAR_RENDERER_ID } from "@omarchy-bot/protocol";
+import { AVATAR_RENDERER_ID, DEFAULT_AVATAR_STYLE_ID } from "@omarchy-bot/protocol";
 import type { Config } from "../bootstrap/config.ts";
 
 export const MIGRATIONS: { name: string; sql: string }[] = [
@@ -491,6 +491,99 @@ WHERE avatar_kind IN ('generated', 'recipe')
       END
     ELSE 1
   END;
+`,
+  },
+  {
+    // Preserve pre-cutover archived Shapes identities alongside valid current
+    // recipes; normalize ordinary and unsupported generated recipes to Pixelbot.
+    name: "0010-profile-avatar-styles",
+    sql: `
+UPDATE bots
+SET avatar_kind = 'generated',
+    avatar_recipe = json_object(
+      'rendererVersion', '${AVATAR_RENDERER_ID}',
+      'style', '${DEFAULT_AVATAR_STYLE_ID}',
+      'seed', id,
+      'options', json('{}')
+    )
+WHERE avatar_kind IN ('generated', 'recipe')
+  AND CASE
+    WHEN json_valid(avatar_recipe) = 1 THEN
+      CASE
+        WHEN json_type(avatar_recipe, '$') = 'object' THEN NOT (
+          json_extract(avatar_recipe, '$.rendererVersion') = '${AVATAR_RENDERER_ID}'
+          AND (
+            json_extract(avatar_recipe, '$.style') IN (
+              'clay', 'critters', 'gaze', 'initial-face', 'moods',
+              'pixelbot', 'sprouts', 'thumbs', 'voxel-art', 'voxel-bot'
+            )
+            OR (
+              archived = 1
+              AND json_extract(avatar_recipe, '$.style') = 'shapes'
+            )
+          )
+          AND json_type(avatar_recipe, '$.seed') = 'text'
+          AND json_type(avatar_recipe, '$.options') = 'object'
+        )
+        ELSE 1
+      END
+    ELSE 1
+  END;
+`,
+  },
+  {
+    // Recover every archived Bot into the ordinary population before dropping
+    // the lifecycle columns. Child rows keep the same Bot IDs throughout.
+    name: "0011-remove-bot-archive-lifecycle",
+    sql: `
+CREATE TABLE bots_visible (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  instructions TEXT NOT NULL DEFAULT '',
+  agent_id TEXT NOT NULL REFERENCES agents(id),
+  avatar_kind TEXT NOT NULL DEFAULT 'generated',
+  avatar_recipe TEXT NOT NULL DEFAULT '',
+  avatar_file TEXT,
+  pinned INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  provenance TEXT NOT NULL DEFAULT 'user_created'
+    CHECK (provenance IN ('user_created', 'legacy_conversation', 'legacy_inventory'))
+);
+INSERT INTO bots_visible (
+  id, name, instructions, agent_id, avatar_kind, avatar_recipe, avatar_file,
+  pinned, created_at, updated_at, provenance
+)
+SELECT
+  id, name, instructions, agent_id, avatar_kind, avatar_recipe, avatar_file,
+  pinned, created_at, updated_at, provenance
+FROM bots;
+
+DELETE FROM events WHERE type IN ('bot.archived', 'bot.restored');
+
+DROP TABLE bots;
+ALTER TABLE bots_visible RENAME TO bots;
+`,
+  },
+  {
+    // Native Session lifecycle is Agent-owned. Retain local Thread mappings,
+    // but discard obsolete Bot-deletion checkpoints that claimed native cleanup.
+    name: "0012-remove-native-session-deletion-checkpoints",
+    sql: `
+UPDATE bot_deletions
+SET failure_json = (
+  SELECT CASE
+    WHEN COUNT(*) = 0 THEN NULL
+    ELSE json_group_array(json(value))
+  END
+  FROM json_each(
+    CASE WHEN json_valid(bot_deletions.failure_json) THEN bot_deletions.failure_json ELSE '[]' END
+  )
+  WHERE COALESCE(json_extract(value, '$.stage'), '') <> 'native_session'
+)
+WHERE failure_json IS NOT NULL;
+
+DROP TABLE IF EXISTS bot_native_session_deletions;
 `,
   },
 ];

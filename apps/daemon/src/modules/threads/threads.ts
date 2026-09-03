@@ -18,6 +18,8 @@ interface TurnRow {
   id: string; thread_id: string; bot_id: string; status: string; worker_session_id: string | null; native_session_id: string; steer_count: number; started_at: string; finished_at: string | null; outcome_reason: string | null;
 }
 
+
+const NONTERMINAL_TURN_SQL = "status NOT IN ('completed','cancelled','failed')";
 export interface NativeThreadTitleUpdater {
   renameThread(input: {
     agentId: string;
@@ -60,6 +62,21 @@ export class ThreadsService {
     private readonly nativeOperations: NativeThreadOperationAdapters = NO_NATIVE_THREAD_OPERATIONS,
   ) {}
 
+  #toThreadDto(row: ThreadRow): ThreadDto {
+    const active = this.activeTurn(row.id);
+    const latest = this.latestTurn(row.id);
+    return {
+      id: row.id,
+      botId: row.bot_id,
+      title: row.title,
+      ...(row.cwd !== null ? { cwd: row.cwd } : {}),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      ...(active !== undefined ? { activeTurn: active } : {}),
+      ...(latest !== undefined ? { latestTurn: latest } : {}),
+    };
+  }
+
   /** Insert without events — used inside multi-row transactions. */
   insertThreadRow(threadId: string, botId: string, title: string, cwd?: string): void {
     const now = new Date().toISOString();
@@ -76,15 +93,8 @@ export class ThreadsService {
   }
 
   getThread(id: string): ThreadDto | undefined {
-    const r = this.db.query(`SELECT * FROM threads WHERE id = ?`).get(id) as ThreadRow | undefined;
-    if (!r) return undefined;
-    const active = this.activeTurn(id);
-    return {
-      id: r.id, botId: r.bot_id, title: r.title,
-      ...(r.cwd !== null ? { cwd: r.cwd } : {}),
-      createdAt: r.created_at, updatedAt: r.updated_at,
-      ...(active !== undefined ? { activeTurn: active } : {}),
-    };
+    const r = this.db.query(`SELECT * FROM threads WHERE id = ?`).get(id) as ThreadRow | null;
+    return r === null ? undefined : this.#toThreadDto(r);
   }
 
   listThreads(botId?: string): ThreadDto[] {
@@ -93,15 +103,7 @@ export class ThreadsService {
         ? this.db.query(`SELECT * FROM threads WHERE bot_id = ? ORDER BY updated_at DESC, created_at DESC, id DESC`).all(botId)
         : this.db.query(`SELECT * FROM threads ORDER BY updated_at DESC, created_at DESC, id DESC`).all()
     ) as ThreadRow[];
-    return rows.map((r) => {
-      const active = this.activeTurn(r.id);
-      return {
-        id: r.id, botId: r.bot_id, title: r.title,
-        ...(r.cwd !== null ? { cwd: r.cwd } : {}),
-        createdAt: r.created_at, updatedAt: r.updated_at,
-        ...(active !== undefined ? { activeTurn: active } : {}),
-      };
-    });
+    return rows.map((row) => this.#toThreadDto(row));
   }
 
   listThreadsForBot(botId: string, q?: string): ThreadDto[] {
@@ -255,16 +257,30 @@ export class ThreadsService {
 
   activeTurn(threadId: string): TurnDto | undefined {
     const r = this.db
-      .query(`SELECT * FROM turns WHERE thread_id = ? AND status NOT IN ('completed','cancelled','failed') ORDER BY started_at DESC LIMIT 1`)
+      .query(`SELECT * FROM turns WHERE thread_id = ? AND ${NONTERMINAL_TURN_SQL} ORDER BY started_at DESC LIMIT 1`)
+      .get(threadId) as TurnRow | undefined;
+    return r ? this.turnToDto(r) : undefined;
+  }
+
+  latestTurn(threadId: string): TurnDto | undefined {
+    const r = this.db
+      .query(`SELECT * FROM turns WHERE thread_id = ? ORDER BY started_at DESC, rowid DESC LIMIT 1`)
       .get(threadId) as TurnRow | undefined;
     return r ? this.turnToDto(r) : undefined;
   }
 
   activeTurnForBot(botId: string): TurnDto | undefined {
     const r = this.db
-      .query(`SELECT * FROM turns WHERE bot_id = ? AND status NOT IN ('completed','cancelled','failed') ORDER BY started_at DESC LIMIT 1`)
+      .query(`SELECT * FROM turns WHERE bot_id = ? AND ${NONTERMINAL_TURN_SQL} ORDER BY started_at DESC LIMIT 1`)
       .get(botId) as TurnRow | undefined;
     return r ? this.turnToDto(r) : undefined;
+  }
+
+  activeTurnIdsForBot(botId: string): string[] {
+    const rows = this.db
+      .query(`SELECT id FROM turns WHERE bot_id = ? AND ${NONTERMINAL_TURN_SQL} ORDER BY started_at, id`)
+      .all(botId) as Array<{ id: string }>;
+    return rows.map((row) => row.id);
   }
 
   turnToDto(r: TurnRow): TurnDto {

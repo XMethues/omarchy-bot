@@ -1,39 +1,40 @@
 import type { Database } from "bun:sqlite";
-import type { AgentId } from "@omarchy-bot/domain";
-import type { DeleteBotFailureDto, DeleteBotResultDto } from "@omarchy-bot/protocol";
+import type { DeleteBotFailureDto, DeleteBotResultDto, TurnDto } from "@omarchy-bot/protocol";
 import type { AttachmentsService } from "../attachments/attachments.ts";
 import type { AvatarService } from "../avatars/avatarService.ts";
 import type { EventLog } from "../events/eventLog.ts";
-import type { AgentsRegistry } from "../agents/registry.ts";
-import type { Supervisor } from "../../supervision/supervisor.ts";
 import { HttpError } from "./bots.ts";
 
 interface DeletionBotRow {
-  id: string;
   name: string;
-  agent_id: string;
   avatar_kind: string;
   avatar_file: string | null;
-  archived: number;
-}
-
-interface NativeSessionRow {
-  native_session_id: string;
 }
 
 interface CountRow {
   count: number;
+}
+interface BotComputerCleanup {
+  removeBot(botId: string): void;
+  resumeQueueAfterBotRemoval(): void;
+}
+interface BotTurnAborter {
+  abortTurn(turnId: string, reason: string): Promise<void>;
+  waitForTerminal(turnId: string, timeoutMs?: number): Promise<TurnDto>;
+}
+interface BotThreadTurns {
+  activeTurnIdsForBot(botId: string): string[];
 }
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-
 /**
- * Coordinates irreversible Bot-owned cleanup. External/native/filesystem work
- * finishes before the SQLite delete transaction, so any failure retains an
- * archived Bot that can be retried without claiming success.
+ * Coordinates irreversible Bot-owned cleanup. Filesystem work finishes before
+ * the SQLite delete transaction, so any local failure keeps a visible Bot
+ * record that can be retried without claiming success. Agent workers and
+ * Agent-owned Native Sessions are deliberately outside this boundary.
  */
 export class BotDeletionService {
   constructor(
@@ -41,18 +42,72 @@ export class BotDeletionService {
     private readonly events: EventLog,
     private readonly attachments: AttachmentsService,
     private readonly avatars: AvatarService,
-    private readonly agents: AgentsRegistry,
-    private readonly supervisor: Supervisor,
+    private readonly turns: BotTurnAborter,
+    private readonly threads: BotThreadTurns,
+    private readonly computer: BotComputerCleanup,
+    private readonly terminalWaitTimeoutMs = 30_000,
   ) {}
 
-  async delete(botId: string, confirmName: string): Promise<DeleteBotResultDto> {
-    const bot = this.db.query(`SELECT id, name, agent_id, avatar_kind, avatar_file, archived FROM bots WHERE id = ?`)
+  async delete(botId: string): Promise<DeleteBotResultDto> {
+    const bot = this.db.query(`SELECT name, avatar_kind, avatar_file FROM bots WHERE id = ?`)
       .get(botId) as DeletionBotRow | null;
     if (bot === null) throw new HttpError(404, `unknown bot ${botId}`);
-    if (!bot.archived) throw new HttpError(409, "only archived bots can be permanently deleted");
-    if (confirmName !== bot.name) throw new HttpError(400, "confirmation name does not match the archived bot");
 
     this.#claim(botId);
+
+    const activeTurnIds = this.threads.activeTurnIdsForBot(botId);
+
+    if (activeTurnIds.length > 0) {
+      const cancellationResults = await Promise.allSettled(
+        activeTurnIds.map((turnId) => this.turns.abortTurn(turnId, "bot deleted")),
+      );
+      const cancellationFailures = cancellationResults.flatMap((result, index) =>
+        result.status === "rejected"
+          ? [{
+              stage: "turn_cancellation" as const,
+              resource: activeTurnIds[index]!,
+              message: errorMessage(result.reason),
+            }]
+          : []);
+      if (cancellationFailures.length > 0) {
+        return this.#barrierFailure(botId, bot.name, cancellationFailures);
+      }
+
+      const terminalResults = await Promise.allSettled(
+        activeTurnIds.map((turnId) => this.turns.waitForTerminal(turnId, this.terminalWaitTimeoutMs)),
+      );
+      const terminalFailures = terminalResults.flatMap((result, index) =>
+        result.status === "rejected"
+          ? [{
+              stage: "terminal_wait" as const,
+              resource: activeTurnIds[index]!,
+              message: errorMessage(result.reason),
+            }]
+          : []);
+      const stillActive = this.threads.activeTurnIdsForBot(botId);
+      for (const turnId of stillActive) {
+        if (terminalFailures.some((failure) => failure.resource === turnId)) continue;
+        terminalFailures.push({
+          stage: "terminal_wait",
+          resource: turnId,
+          message: `turn ${turnId} remained active after cancellation`,
+        });
+      }
+      if (terminalFailures.length > 0) {
+        return this.#barrierFailure(botId, bot.name, terminalFailures);
+      }
+    }
+
+    try {
+      this.computer.removeBot(botId);
+    } catch (error) {
+      return this.#barrierFailure(botId, bot.name, [{
+        stage: "database",
+        resource: botId,
+        message: `computer state cleanup failed: ${errorMessage(error)}`,
+      }]);
+    }
+
 
     const threadCount = this.#count(`SELECT COUNT(*) AS count FROM threads WHERE bot_id = ?`, botId);
     const messageCount = this.#count(
@@ -61,71 +116,21 @@ export class BotDeletionService {
     );
     const turnCount = this.#count(`SELECT COUNT(*) AS count FROM turns WHERE bot_id = ?`, botId);
     const attachmentCount = this.#count(`SELECT COUNT(*) AS count FROM attachments WHERE bot_id = ?`, botId);
-    const nativeSessions = this.db.query(
-      `SELECT native_session_id FROM thread_sessions
-       WHERE thread_id IN (SELECT id FROM threads WHERE bot_id = ?) AND native_session_id <> ''
-       UNION
-       SELECT native_session_id FROM turns WHERE bot_id = ? AND native_session_id <> ''`,
-    ).all(botId, botId) as NativeSessionRow[];
 
-    let nativeSupported = false;
-    let nativeRemoved = 0;
-    let nativeSkipped = 0;
     let attachmentFilesRemoved = 0;
     let avatarRemoved = false;
     const failures: DeleteBotFailureDto[] = [];
 
-    if (nativeSessions.length > 0) {
-      const capabilities = this.agents.capabilityInventory(bot.agent_id as AgentId);
-      if (capabilities === undefined) {
-        failures.push({
-          stage: "native_session",
-          resource: bot.agent_id,
-          message: "validated agent capabilities are unavailable",
-        });
-      } else if (!capabilities.sessionDeletion) {
-        nativeSkipped = nativeSessions.length;
-      } else {
-        nativeSupported = true;
-        try {
-          const worker = await this.supervisor.agentWorker(bot.agent_id as AgentId);
-          const completed = new Set(
-            (this.db.query(`SELECT native_session_id FROM bot_native_session_deletions WHERE bot_id = ?`)
-              .all(botId) as NativeSessionRow[]).map((row) => row.native_session_id),
-          );
-          for (const session of nativeSessions) {
-            if (completed.has(session.native_session_id)) {
-              nativeRemoved += 1;
-              continue;
-            }
-            try {
-              await worker.request({ type: "session.delete", nativeSessionId: session.native_session_id }, 30_000);
-              this.db.query(
-                `INSERT OR IGNORE INTO bot_native_session_deletions (bot_id, native_session_id, deleted_at) VALUES (?, ?, ?)`,
-              ).run(botId, session.native_session_id, new Date().toISOString());
-              nativeRemoved += 1;
-            } catch (error) {
-              failures.push({ stage: "native_session", resource: session.native_session_id, message: errorMessage(error) });
-            }
-          }
-        } catch (error) {
-          failures.push({ stage: "native_session", resource: bot.agent_id, message: errorMessage(error) });
-        }
-      }
-    }
+    const attachmentCleanup = this.attachments.deleteOwnedFiles(botId);
+    attachmentFilesRemoved = attachmentCleanup.removed;
+    failures.push(...attachmentCleanup.failures.map((failure) => ({ stage: "attachment" as const, ...failure })));
 
-    if (failures.length === 0) {
-      const attachmentCleanup = this.attachments.deleteOwnedFiles(botId);
-      attachmentFilesRemoved = attachmentCleanup.removed;
-      failures.push(...attachmentCleanup.failures.map((failure) => ({ stage: "attachment" as const, ...failure })));
-
-      if (bot.avatar_kind === "upload" && bot.avatar_file !== null) {
-        try {
-          await this.avatars.deleteUploadedFile(bot.avatar_file);
-          avatarRemoved = true;
-        } catch (error) {
-          failures.push({ stage: "avatar", resource: bot.avatar_file, message: errorMessage(error) });
-        }
+    if (bot.avatar_kind === "upload" && bot.avatar_file !== null) {
+      try {
+        await this.avatars.deleteUploadedFile(bot.avatar_file);
+        avatarRemoved = true;
+      } catch (error) {
+        failures.push({ stage: "avatar", resource: bot.avatar_file, message: errorMessage(error) });
       }
     }
 
@@ -140,9 +145,7 @@ export class BotDeletionService {
           turns: 0,
           attachments: attachmentFilesRemoved,
           avatar: avatarRemoved,
-          nativeSessions: nativeRemoved,
         },
-        nativeSessionCleanup: { supported: nativeSupported, skipped: nativeSkipped },
         failures,
       };
       this.#recordFailure(botId, failures);
@@ -159,9 +162,7 @@ export class BotDeletionService {
         turns: turnCount,
         attachments: attachmentCount,
         avatar: avatarRemoved,
-        nativeSessions: nativeRemoved,
       },
-      nativeSessionCleanup: { supported: nativeSupported, skipped: nativeSkipped },
       failures: [],
     };
 
@@ -171,8 +172,15 @@ export class BotDeletionService {
           `DELETE FROM events WHERE
              (aggregate_type = 'bot' AND aggregate_id = ?)
              OR (aggregate_type = 'thread' AND aggregate_id IN (SELECT id FROM threads WHERE bot_id = ?))
-             OR (aggregate_type = 'turn' AND aggregate_id IN (SELECT id FROM turns WHERE bot_id = ?))`,
-        ).run(botId, botId, botId);
+             OR (aggregate_type = 'turn' AND aggregate_id IN (SELECT id FROM turns WHERE bot_id = ?))
+             OR (
+               aggregate_type = 'computer'
+               AND (
+                 aggregate_id = ?
+                 OR json_extract(CASE WHEN json_valid(payload) THEN payload ELSE '{}' END, '$.botId') = ?
+               )
+             )`,
+        ).run(botId, botId, botId, botId, botId);
         this.db.query(`DELETE FROM messages WHERE thread_id IN (SELECT id FROM threads WHERE bot_id = ?)`).run(botId);
         this.db.query(`DELETE FROM attachments WHERE bot_id = ?`).run(botId);
         this.db.query(`DELETE FROM thread_sessions WHERE thread_id IN (SELECT id FROM threads WHERE bot_id = ?)`).run(botId);
@@ -180,13 +188,11 @@ export class BotDeletionService {
         this.db.query(`DELETE FROM computer_leases WHERE holder_bot_id = ?`).run(botId);
         this.db.query(`DELETE FROM threads WHERE bot_id = ?`).run(botId);
         this.db.query(`DELETE FROM bot_state WHERE bot_id = ?`).run(botId);
-        this.db.query(`DELETE FROM bot_native_session_deletions WHERE bot_id = ?`).run(botId);
         this.db.query(`DELETE FROM bot_deletions WHERE bot_id = ?`).run(botId);
         this.db.query(`DELETE FROM bots WHERE id = ?`).run(botId);
         this.events.append("bot", botId, "bot.deleted", deleted);
       });
       commit();
-      return deleted;
     } catch (error) {
       const databaseFailure: DeleteBotFailureDto = { stage: "database", resource: botId, message: errorMessage(error) };
       this.#recordFailure(botId, [databaseFailure]);
@@ -197,11 +203,35 @@ export class BotDeletionService {
         failures: [databaseFailure],
       };
     }
+    this.computer.resumeQueueAfterBotRemoval();
+    return deleted;
   }
 
   #count(sql: string, botId: string): number {
     const row = this.db.query(sql).get(botId) as CountRow;
     return row.count;
+  }
+
+
+  #barrierFailure(
+    botId: string,
+    botName: string,
+    failures: DeleteBotFailureDto[],
+  ): DeleteBotResultDto {
+    this.#recordFailure(botId, failures);
+    return {
+      status: "failed",
+      botId,
+      botName,
+      removed: {
+        threads: 0,
+        messages: 0,
+        turns: 0,
+        attachments: 0,
+        avatar: false,
+      },
+      failures,
+    };
   }
 
   #claim(botId: string): void {

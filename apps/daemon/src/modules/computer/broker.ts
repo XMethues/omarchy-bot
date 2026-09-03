@@ -92,6 +92,30 @@ export class ComputerBroker {
     };
   }
 
+  /** Drop runtime-only computer claims so a terminal Turn cannot be resumed after deletion starts. */
+  removeBot(botId: string): void {
+    let changed = false;
+    const retainedQueue = this.#queue.filter((entry) => entry.actor.botId !== botId);
+    if (retainedQueue.length !== this.#queue.length) {
+      this.#queue = retainedQueue;
+      changed = true;
+    }
+    if (this.#parkedForHuman?.actor.botId === botId) {
+      this.#parkedForHuman = undefined;
+      changed = true;
+    }
+    if (this.#parkedForEmergency?.actor.botId === botId) {
+      this.#parkedForEmergency = undefined;
+      changed = true;
+    }
+    if (changed) this.events.append("computer", "state", "computer.state.changed", {});
+  }
+
+  /** A successful deletion may have released the persisted lease; advance an unrelated waiter. */
+  resumeQueueAfterBotRemoval(): void {
+    if (this.#lease() === undefined) void this.#grantNext();
+  }
+
   /** Bot requests the exclusive input lease. Queues as waiting_for_computer when held. */
   async acquire(actor: { botId: string }, turnId: string | undefined, ttlMs = this.cfg.leaseTtlMs): Promise<{ granted: boolean; token?: string; queued: boolean }> {
     if (this.#emergencyStopped) return { granted: false, queued: false };

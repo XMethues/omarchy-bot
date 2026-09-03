@@ -111,7 +111,7 @@ export function ConversationHeader({
                     avatar={bot.avatar}
                     name={bot.name}
                     size="sm"
-                    activity={bot.status === "working" ? "working" : "selected"}
+                    presentation="static"
                     decorative
                   />
                   <Text as="h1" type="body" weight="medium" maxLines={1}>

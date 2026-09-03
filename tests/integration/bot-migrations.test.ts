@@ -1,11 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { Database } from "bun:sqlite";
 import { MIGRATIONS, openDb } from "../../apps/daemon/src/persistence/db.ts";
 import { renderAvatarRecipe } from "../../apps/web/src/components/avatarRenderer.ts";
 import { AVATAR_RENDERER_ID, AvatarRecipeDto } from "../../packages/protocol/src/index.ts";
+import { api, startDaemon, type Harness } from "./helpers/harness.ts";
 
 function databaseThrough(migrationName: string): { db: Database; dbPath: string; home: string } {
   const home = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-migrations-"));
@@ -75,7 +76,7 @@ describe("integration: Bot provenance migrations", () => {
         for (const bot of bots) {
           expect(AvatarRecipeDto.parse(JSON.parse(bot.avatar_recipe))).toEqual({
             rendererVersion: AVATAR_RENDERER_ID,
-            style: "shapes",
+            style: "pixelbot",
             seed: bot.id,
             options: {},
           });
@@ -120,7 +121,7 @@ describe("integration: Bot provenance migrations", () => {
           {
             id: "bot_legacy",
             avatar_kind: "generated",
-            avatar_recipe: `{"rendererVersion":"${currentRenderer}","style":"shapes","seed":"bot_legacy","options":{}}`,
+            avatar_recipe: `{"rendererVersion":"${currentRenderer}","style":"pixelbot","seed":"bot_legacy","options":{}}`,
           },
         ]);
       } finally {
@@ -139,7 +140,7 @@ describe("integration: Bot provenance migrations", () => {
   test("repairs shorthand v10 avatar recipes after old 0005 was already recorded", () => {
     const { db, dbPath, home } = databaseThrough("0005-created-bots-animated-avatars");
     const now = "2026-09-01T00:02:00.000Z";
-    const shorthandRecipe = ` {"options":{"title":"kept"},"seed":"already-upgraded","style":"shapes","rendererVersion":"10.7.0"} `;
+    const shorthandRecipe = ` {"options":{"title":"kept"},"seed":"already-upgraded","style":"pixelbot","rendererVersion":"10.7.0"} `;
 
     try {
       db.query(`INSERT INTO agents (id, display_name, status, updated_at) VALUES ('pi', 'Pi', 'ready', ?)`).run(now);
@@ -157,10 +158,10 @@ describe("integration: Bot provenance migrations", () => {
         expect(repaired).toEqual({
           options: { title: "kept" },
           seed: "already-upgraded",
-          style: "shapes",
+          style: "pixelbot",
           rendererVersion: AVATAR_RENDERER_ID,
         });
-        expect(renderAvatarRecipe(repaired, "idle")).not.toBeUndefined();
+        expect(renderAvatarRecipe(repaired, "static")).not.toBeUndefined();
         expect(
           migrated.query(`SELECT name FROM schema_migrations WHERE name = '0005-created-bots-animated-avatars'`).get(),
         ).not.toBeNull();
@@ -202,7 +203,7 @@ describe("integration: Bot provenance migrations", () => {
         expect(bots[0]?.provenance).toBe("legacy_conversation");
         expect(JSON.parse(bots[0]!.avatar_recipe)).toMatchObject({
           rendererVersion: AVATAR_RENDERER_ID,
-          style: "shapes",
+          style: "pixelbot",
           options: {},
         });
       } finally {
@@ -213,6 +214,192 @@ describe("integration: Bot provenance migrations", () => {
         db.close();
       } catch {
         // finishMigrations already closed the setup connection.
+      }
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("integration: archived Bot cutover", () => {
+  test("restores every legacy Bot, preserves owned data, and removes obsolete lifecycle storage", async () => {
+    const { db, home } = databaseThrough("0009-current-avatar-renderer-only");
+    const now = "2026-09-01T00:02:00.000Z";
+    const botId = "bot_archived_legacy";
+    const threadId = "thread_archived_legacy";
+    const attachmentId = "att_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const attachmentRelPath = path.join("managed", attachmentId);
+    const avatarFile = `${botId}.png`;
+    const visibleRecipe = JSON.stringify({
+      rendererVersion: AVATAR_RENDERER_ID,
+      style: "pixelbot",
+      seed: "bot_visible_legacy",
+      options: {},
+    });
+    const archivedShapesRecipe =
+      ` {"options":{},"seed":"preserved-shape-seed","style":"shapes","rendererVersion":"${AVATAR_RENDERER_ID}"} `;
+    let h: Harness | undefined;
+
+    try {
+      db.query(`INSERT INTO agents (id, display_name, status, updated_at) VALUES ('pi', 'Pi', 'ready', ?)`).run(now);
+      db.query(
+        `INSERT INTO bots (
+           id, name, instructions, agent_id, avatar_kind, avatar_recipe, avatar_file,
+           pinned, archived, archived_at, created_at, updated_at, provenance
+         ) VALUES (?, 'Recovered teammate', 'Keep these instructions', 'pi', 'upload', '', ?, 1, 1, ?, ?, ?, 'user_created')`,
+      ).run(botId, avatarFile, now, now, now);
+      db.query(
+        `INSERT INTO bots (
+           id, name, instructions, agent_id, avatar_kind, avatar_recipe, avatar_file,
+           pinned, archived, archived_at, created_at, updated_at, provenance
+         ) VALUES (
+           'bot_visible_legacy', 'Previously visible teammate', '', 'pi', 'generated', ?,
+           NULL, 1, 0, NULL, '2026-08-01T00:00:00.000Z', '2026-08-01T00:00:00.000Z', 'user_created'
+         )`,
+      ).run(visibleRecipe);
+      db.query(
+        `INSERT INTO bots (
+           id, name, instructions, agent_id, avatar_kind, avatar_recipe, avatar_file,
+           pinned, archived, archived_at, created_at, updated_at, provenance
+         ) VALUES (
+           'bot_archived_shapes', 'Recovered Shapes', 'Keep this Shapes identity', 'pi',
+           'recipe', ?, NULL, 0, 1, ?, '2026-07-01T00:00:00.000Z', ?, 'user_created'
+         )`,
+      ).run(archivedShapesRecipe, now, now);
+      db.query(
+        `INSERT INTO bot_state (bot_id, last_activity_at)
+         VALUES ('bot_archived_shapes', '2026-07-01T00:00:00.000Z')`,
+      ).run();
+      db.query(
+        `INSERT INTO bot_state (bot_id, last_activity_at)
+         VALUES ('bot_visible_legacy', '2026-08-01T00:00:00.000Z')`,
+      ).run();
+      db.query(
+        `INSERT INTO bot_state (
+           bot_id, last_activity_at, preview_text, preview_at, unread_count, unread_thread_id
+         ) VALUES (?, ?, 'Preserved preview', ?, 1, ?)`,
+      ).run(botId, now, now, threadId);
+      db.query(
+        `INSERT INTO threads (id, bot_id, title, cwd, created_at, updated_at)
+         VALUES (?, ?, 'Preserved conversation', '/tmp/preserved', ?, ?)`,
+      ).run(threadId, botId, now, now);
+      db.query(
+        `INSERT INTO messages (id, thread_id, seq, author_kind, kind, text, payload, created_at)
+         VALUES ('message_archived_legacy', ?, 1, 'user', 'text', 'Preserved message', NULL, ?)`,
+      ).run(threadId, now);
+      db.query(
+        `INSERT INTO turns (
+           id, thread_id, bot_id, status, worker_session_id, native_session_id,
+           steer_count, started_at, finished_at, outcome_reason
+         ) VALUES ('turn_archived_legacy', ?, ?, 'completed', 'worker-legacy', 'native-legacy', 0, ?, ?, NULL)`,
+      ).run(threadId, botId, now, now);
+      db.query(
+        `INSERT INTO thread_sessions (thread_id, native_session_id, updated_at)
+         VALUES (?, 'native-legacy', ?)`,
+      ).run(threadId, now);
+      db.query(
+        `INSERT INTO attachments (
+           id, kind, bot_id, thread_id, message_id, name, media_type, size,
+           rel_path, source_sha256, created_at, draft_token
+         ) VALUES (?, 'managed', ?, ?, 'message_archived_legacy', 'preserved.txt',
+           'text/plain', 15, ?, 'legacy-sha', ?, NULL)`,
+      ).run(attachmentId, botId, threadId, attachmentRelPath, now);
+      db.query(
+        `INSERT INTO bot_deletions (bot_id, state, failure_json, started_at, updated_at)
+         VALUES (?, 'failed', ?, ?, ?)`,
+      ).run(
+        botId,
+        JSON.stringify([
+          { stage: "native_session", resource: "native-checkpoint", message: "obsolete native retry" },
+          { stage: "database", resource: botId, message: "preserved local retry" },
+        ]),
+        now,
+        now,
+      );
+      db.query(
+        `INSERT INTO bot_native_session_deletions (bot_id, native_session_id, deleted_at)
+         VALUES (?, 'native-checkpoint', ?)`,
+      ).run(botId, now);
+      db.query(
+        `INSERT INTO events (
+           event_id, schema_version, occurred_at, aggregate_type, aggregate_id, type, payload
+         ) VALUES
+           ('event-archived', 1, ?, 'bot', ?, 'bot.archived', '{}'),
+           ('event-restored', 1, ?, 'bot', ?, 'bot.restored', '{}'),
+           ('event-profile', 1, ?, 'bot', ?, 'bot.updated', '{"name":"Recovered teammate"}')`,
+      ).run(now, botId, now, botId, now, botId);
+
+      mkdirSync(path.join(home, "avatars"), { recursive: true });
+      mkdirSync(path.join(home, "attachments", "managed"), { recursive: true });
+      writeFileSync(path.join(home, "avatars", avatarFile), "preserved avatar");
+      writeFileSync(path.join(home, "attachments", attachmentRelPath), "preserved bytes");
+      db.close();
+
+      h = await startDaemon(home);
+      const bots = await api<Array<Record<string, unknown>>>(h, "GET", "/api/bots");
+      expect(bots.map((bot) => bot.id)).toEqual([botId, "bot_visible_legacy", "bot_archived_shapes"]);
+      expect(bots[0]).toMatchObject({
+        id: botId,
+        name: "Recovered teammate",
+        instructions: "Keep these instructions",
+        pinned: true,
+        lastActivityAt: now,
+        status: "inactive",
+        previewText: "Preserved preview",
+      });
+      for (const bot of bots) expect(bot).not.toHaveProperty("archived");
+
+      const shapesRow = h.svc.db
+        .query(`SELECT avatar_recipe FROM bots WHERE id = 'bot_archived_shapes'`)
+        .get() as { avatar_recipe: string } | null;
+      expect(shapesRow?.avatar_recipe).toBe(archivedShapesRecipe);
+      const shapesRecipe = AvatarRecipeDto.parse(JSON.parse(shapesRow!.avatar_recipe));
+      expect(bots.find((bot) => bot.id === "bot_archived_shapes")).toMatchObject({
+        name: "Recovered Shapes",
+        instructions: "Keep this Shapes identity",
+        avatar: { kind: "recipe", recipe: shapesRecipe },
+      });
+      expect(renderAvatarRecipe(shapesRecipe, "static")).not.toBeUndefined();
+
+      const threads = await api<Array<Record<string, unknown>>>(h, "GET", `/api/bots/${botId}/threads`);
+      expect(threads).toContainEqual(expect.objectContaining({ id: threadId, title: "Preserved conversation" }));
+      const messages = await api<Array<Record<string, unknown>>>(h, "GET", `/api/threads/${threadId}/messages`);
+      expect(messages).toContainEqual(expect.objectContaining({ text: "Preserved message" }));
+      expect(h.svc.threads.getNativeSession(threadId)).toBe("native-legacy");
+
+      const attachment = await fetch(`${h.baseUrl}/api/attachments/${attachmentId}`);
+      expect(attachment.status).toBe(200);
+      expect(await attachment.text()).toBe("preserved bytes");
+      const avatar = await fetch(`${h.baseUrl}/api/bots/${botId}/avatar`);
+      expect(avatar.status).toBe(200);
+      expect(await avatar.text()).toBe("preserved avatar");
+
+      const columns = h.svc.db.query<{ name: string }, []>(`PRAGMA table_info(bots)`).all().map((column) => column.name);
+      expect(columns).not.toContain("archived");
+      expect(columns).not.toContain("archived_at");
+      const tables = h.svc.db
+        .query<{ name: string }, []>(`SELECT name FROM sqlite_master WHERE type = 'table'`)
+        .all()
+        .map((table) => table.name);
+      expect(tables).not.toContain("bot_native_session_deletions");
+      const deletionRetry = h.svc.db
+        .query<{ failure_json: string | null }, [string]>(
+          `SELECT failure_json FROM bot_deletions WHERE bot_id = ?`,
+        )
+        .get(botId);
+      expect(JSON.parse(deletionRetry?.failure_json ?? "null")).toEqual([
+        { stage: "database", resource: botId, message: "preserved local retry" },
+      ]);
+      expect(
+        h.svc.db.query(`SELECT type FROM events WHERE aggregate_id = ? ORDER BY type`).all(botId) as { type: string }[],
+      ).toEqual([{ type: "bot.updated" }]);
+    } finally {
+      if (h !== undefined) await h.stop();
+      else {
+        try {
+          db.close();
+        } catch {
+          // The setup connection was already closed before daemon startup.
+        }
       }
       rmSync(home, { recursive: true, force: true });
     }

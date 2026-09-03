@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import type { BotDto, BotViewDto, ThreadDto } from "../../packages/protocol/src/index.ts";
-import { api, makeBot, sendToBot, startDaemon, waitThreadIdle, type Harness } from "./helpers/harness.ts";
+import { BotActivityEventPayload, BotActivityStatusSchema, type BotDto, type BotViewDto, type ThreadDto } from "../../packages/protocol/src/index.ts";
+import { api, apiStatus, makeBot, sendToBot, sendToThread, startDaemon, waitThreadIdle, type Harness } from "./helpers/harness.ts";
 
 describe("Sidebar attention", () => {
   let h: Harness;
@@ -34,8 +34,8 @@ describe("Sidebar attention", () => {
 
   test("keeps the latest Agent output while a user follow-up is in flight", async () => {
     const botId = await makeBot(h, "Output preview");
-    h.svc.bots.recordActivity(botId, "thread-preview", "Agent result remains visible", true);
-    h.svc.bots.recordActivity(botId, "thread-preview", "User follow-up must not replace output", false);
+    h.svc.bots.recordAssistantOutput(botId, "thread-preview", "Agent result remains visible");
+    h.svc.bots.recordUserMessage(botId, "thread-preview");
 
     const bot = await api<BotViewDto>(h, "GET", `/api/bots/${botId}`);
     expect(bot.previewText).toBe("Agent result remains visible");
@@ -62,9 +62,9 @@ describe("Sidebar attention", () => {
     const oldestPinnedId = await makeBot(h, "Old pinned");
     const newestUnpinnedId = await makeBot(h, "New unpinned");
     const middlePinnedId = await makeBot(h, "Middle pinned");
-    h.svc.bots.recordActivity(oldestPinnedId, "thread-old", "old", false);
-    h.svc.bots.recordActivity(newestUnpinnedId, "thread-new", "new", false);
-    h.svc.bots.recordActivity(middlePinnedId, "thread-middle", "middle", false);
+    h.svc.bots.recordUserMessage(oldestPinnedId, "thread-old");
+    h.svc.bots.recordUserMessage(newestUnpinnedId, "thread-new");
+    h.svc.bots.recordUserMessage(middlePinnedId, "thread-middle");
     h.svc.db.query("UPDATE bot_state SET last_activity_at = ? WHERE bot_id = ?").run("2026-01-01T00:00:00.000Z", oldestPinnedId);
     h.svc.db.query("UPDATE bot_state SET last_activity_at = ? WHERE bot_id = ?").run("2026-01-03T00:00:00.000Z", newestUnpinnedId);
     h.svc.db.query("UPDATE bot_state SET last_activity_at = ? WHERE bot_id = ?").run("2026-01-02T00:00:00.000Z", middlePinnedId);
@@ -99,13 +99,107 @@ describe("Sidebar attention", () => {
     expect(untouched.unreadCount).toBe(1);
   });
 
-  test("excludes archived Bots from the active attention ordering", async () => {
-    const activeBotId = await makeBot(h, "Still active");
-    const archivedBotId = await makeBot(h, "Hidden archive");
-    await api<BotDto>(h, "POST", `/api/bots/${archivedBotId}/pin`, { pinned: true });
-    await api<BotDto>(h, "POST", `/api/bots/${archivedBotId}/archive`, {});
+});
 
-    const active = await api<BotViewDto[]>(h, "GET", "/api/bots");
-    expect(active.map((bot) => bot.id)).toEqual([activeBotId]);
+describe("binary Bot Activity", () => {
+  let h: Harness;
+
+  beforeEach(async () => {
+    h = await startDaemon();
+  });
+
+  afterEach(async () => {
+    await h.stop();
+  });
+
+  test("publishes only active and inactive through every Turn transition", async () => {
+    const botId = await makeBot(h, "Lifecycle Bot");
+    expect((await api<BotViewDto>(h, "GET", `/api/bots/${botId}`)).status).toBe("inactive");
+    expect(BotActivityStatusSchema.safeParse("active").success).toBeTrue();
+    expect(BotActivityStatusSchema.safeParse("inactive").success).toBeTrue();
+    for (const removed of ["idle", "working", "waiting", "needs_you", "error", "unavailable"]) {
+      expect(BotActivityStatusSchema.safeParse(removed).success).toBeFalse();
+    }
+
+    const cancelled = await sendToBot(h, botId, "hang");
+    expect((await api<BotViewDto>(h, "GET", `/api/bots/${botId}`)).status).toBe("active");
+
+    h.svc.turns.parkForHuman(cancelled.turnId);
+    expect((await api<BotViewDto>(h, "GET", `/api/bots/${botId}`)).status).toBe("active");
+    h.svc.turns.resumeAfterHuman(cancelled.turnId);
+    h.svc.turns.parkForComputer(cancelled.turnId);
+    expect((await api<BotViewDto>(h, "GET", `/api/bots/${botId}`)).status).toBe("active");
+    h.svc.turns.resumeAfterComputer(cancelled.turnId);
+
+    await h.svc.turns.abortTurn(cancelled.turnId, "integration cancellation");
+    await h.svc.turns.waitForTerminal(cancelled.turnId);
+    expect((await api<BotViewDto>(h, "GET", `/api/bots/${botId}`)).status).toBe("inactive");
+
+    const completed = await sendToThread(h, cancelled.threadId, "say: completed");
+    expect((await api<BotViewDto>(h, "GET", `/api/bots/${botId}`)).status).toBe("active");
+    await waitThreadIdle(h, completed.threadId);
+    const completedThread = await api<ThreadDto>(h, "GET", `/api/threads/${completed.threadId}`);
+    expect(completedThread.latestTurn?.status).toBe("completed");
+    expect((await api<BotViewDto>(h, "GET", `/api/bots/${botId}`)).status).toBe("inactive");
+
+    const failed = await sendToThread(h, cancelled.threadId, "fail");
+    expect((await api<BotViewDto>(h, "GET", `/api/bots/${botId}`)).status).toBe("active");
+    await waitThreadIdle(h, failed.threadId);
+    const failedThread = await api<ThreadDto>(h, "GET", `/api/threads/${failed.threadId}`);
+    expect(failedThread.latestTurn).toMatchObject({ status: "failed", reason: "fake failure" });
+    expect((await api<BotViewDto>(h, "GET", `/api/bots/${botId}`)).status).toBe("inactive");
+
+    const messages = await api<Array<{ author: { kind: string }; text?: string }>>(
+      h,
+      "GET",
+      `/api/threads/${failed.threadId}/messages`,
+    );
+    expect(messages.some((message) => message.author.kind === "system" && message.text?.includes("fake failure"))).toBeFalse();
+
+    const activityEvents = h.svc.events
+      .replay(0, h.svc.events.oldestCursor())
+      .events
+      .filter((event) => event.aggregateId === botId && event.type === "bot.activity");
+    expect(activityEvents.length).toBeGreaterThan(0);
+    expect(activityEvents.every((event) => BotActivityEventPayload.safeParse(event.payload).success)).toBeTrue();
+  });
+
+  test("stays active until concurrent Threads have all become terminal", async () => {
+    const botId = await makeBot(h, "Concurrent Bot");
+    const first = await sendToBot(h, botId, "hang");
+    const secondThread = h.svc.threads.createThread(botId, { title: "Parallel work" });
+    const second = await sendToThread(h, secondThread.id, "hang");
+
+    expect((await api<BotViewDto>(h, "GET", `/api/bots/${botId}`)).status).toBe("active");
+    await h.svc.turns.abortTurn(first.turnId, "first done");
+    await h.svc.turns.waitForTerminal(first.turnId);
+    expect((await api<BotViewDto>(h, "GET", `/api/bots/${botId}`)).status).toBe("active");
+
+    await h.svc.turns.abortTurn(second.turnId, "second done");
+    await h.svc.turns.waitForTerminal(second.turnId);
+    expect((await api<BotViewDto>(h, "GET", `/api/bots/${botId}`)).status).toBe("inactive");
+  });
+
+  test("keeps Agent Readiness separate while rejecting creation and sends on a non-ready Agent", async () => {
+    const botId = await makeBot(h, "Readiness Bot");
+    h.svc.agents.markOffline("pi", "credentials expired");
+
+    expect((await api<BotViewDto>(h, "GET", `/api/bots/${botId}`)).status).toBe("inactive");
+    expect((await apiStatus(h, "POST", "/api/bots", {
+      name: "Rejected Bot",
+      agentId: "pi",
+    })).status).toBe(400);
+    expect((await apiStatus(h, "POST", `/api/bots/${botId}/messages`, { text: "must not start" })).status).toBe(409);
+
+    await h.svc.agents.recheck("pi");
+    const active = await sendToBot(h, botId, "hang");
+    h.svc.agents.markOffline("pi", "runtime disconnected");
+    expect((await api<BotViewDto>(h, "GET", `/api/bots/${botId}`)).status).toBe("active");
+
+    await h.svc.agents.recheck("pi");
+    expect((await api<BotViewDto>(h, "GET", `/api/bots/${botId}`)).status).toBe("active");
+    await h.svc.turns.abortTurn(active.turnId, "cleanup");
+    await h.svc.turns.waitForTerminal(active.turnId);
+    expect((await api<BotViewDto>(h, "GET", `/api/bots/${botId}`)).status).toBe("inactive");
   });
 });

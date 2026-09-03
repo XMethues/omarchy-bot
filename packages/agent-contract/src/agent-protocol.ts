@@ -23,8 +23,7 @@ export type AgentCommand =
   | { type: "message.steer"; requestId: string; sessionId: string; text: string }
   | { type: "turn.abort"; requestId: string; sessionId: string }
   | { type: "session.history"; requestId: string; sessionId: string }
-  | { type: "session.close"; requestId: string; sessionId: string }
-  | { type: "session.delete"; requestId: string; nativeSessionId: string };
+  | { type: "session.close"; requestId: string; sessionId: string };
 
 export interface WorkerUserMessage {
   text: string;
@@ -51,7 +50,6 @@ export interface AgentCapabilityInventory {
   version: typeof AGENT_CAPABILITY_INVENTORY_VERSION;
   steering: boolean;
   abort: boolean;
-  sessionDeletion: boolean;
   nativeThreadActions: NativeThreadAction[];
   attachments: {
     text: boolean;
@@ -69,7 +67,7 @@ export function isAgentCapabilityInventory(value: unknown): value is AgentCapabi
   return inventory.version === AGENT_CAPABILITY_INVENTORY_VERSION &&
     typeof inventory.steering === "boolean" &&
     typeof inventory.abort === "boolean" &&
-    typeof inventory.sessionDeletion === "boolean" &&
+    !("sessionDeletion" in inventory) &&
     Array.isArray(inventory.nativeThreadActions) &&
     inventory.nativeThreadActions.every((action) => NATIVE_THREAD_ACTIONS.includes(action)) &&
     attachments !== null &&

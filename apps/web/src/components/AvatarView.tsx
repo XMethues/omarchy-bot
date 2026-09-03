@@ -1,48 +1,45 @@
 import * as stylex from "@stylexjs/stylex";
 import type { JSX } from "react";
 import type { AvatarDto } from "@omarchy-bot/protocol";
-import { Avatar, AvatarStatusDot } from "@astryxdesign/core/Avatar";
+import { Avatar } from "@astryxdesign/core/Avatar";
 import { HStack } from "@astryxdesign/core/HStack";
-import { renderAvatarRecipe, type AvatarActivity } from "./avatarRenderer.ts";
+import { renderAvatarRecipe, type AvatarPresentation } from "./avatarRenderer.ts";
 
-export type { AvatarActivity } from "./avatarRenderer.ts";
+export type { AvatarPresentation } from "./avatarRenderer.ts";
 
 interface AvatarViewBaseProps {
   avatar: AvatarDto;
   name: string;
   size?: "xsm" | "sm" | "md" | "lg" | number;
-  activity?: AvatarActivity;
+  presentation?: AvatarPresentation;
+  tooltip?: string | boolean;
 }
 
 export type AvatarViewProps =
   | (AvatarViewBaseProps & { decorative: true; label?: never })
   | (AvatarViewBaseProps & { decorative?: false; label?: string });
 
-const breathe = stylex.keyframes({
-  "0%, 100%": { transform: "scale(1)" },
-  "50%": { transform: "scale(1.045)" },
+const workingPulse = stylex.keyframes({
+  "0%, 100%": { transform: "scale(1)", opacity: 0.88 },
+  "50%": { transform: "scale(1.05)", opacity: 1 },
 });
 
 const styles = stylex.create({
-  selected: {
-    animationName: { default: breathe, "@media (prefers-reduced-motion: reduce)": "none" },
-    animationDuration: "calc(var(--duration-slow-max) * 1.8)",
-    animationTimingFunction: "var(--ease-standard)",
-    animationIterationCount: "infinite",
-  },
   working: {
-    animationName: { default: breathe, "@media (prefers-reduced-motion: reduce)": "none" },
+    animationName: { default: workingPulse, "@media (prefers-reduced-motion: reduce)": "none" },
     animationDuration: "var(--duration-slow-max)",
     animationTimingFunction: "var(--ease-standard)",
     animationIterationCount: "infinite",
   },
-  streaming: {
-    animationName: { default: breathe, "@media (prefers-reduced-motion: reduce)": "none" },
-    animationDuration: "var(--duration-slow-min)",
-    animationTimingFunction: "var(--ease-standard)",
-    animationIterationCount: "infinite",
-  },
 });
+function avatarSource(avatar: AvatarDto, presentation: AvatarPresentation): string | undefined {
+  if (avatar.kind !== "upload") return renderAvatarRecipe(avatar.recipe, presentation);
+  return /^\/api\/bots\/[\w-]+\/avatar$/.test(avatar.url) ? avatar.url : undefined;
+}
+
+function avatarTestId(avatar: AvatarDto): string {
+  return avatar.kind === "upload" ? "avatar-upload" : `avatar-${avatar.recipe.style}`;
+}
 
 /**
  * Safe Bot avatar rendering. Recipe data is rendered by pinned local DiceBear
@@ -52,35 +49,18 @@ export function AvatarView({
   avatar,
   name,
   size = "md",
-  activity = "idle",
+  presentation = "static",
   decorative = false,
   label,
+  tooltip,
 }: AvatarViewProps): JSX.Element {
-  const active = activity !== "idle";
-  const status = active ? (
-    <AvatarStatusDot
-      variant={activity === "selected" ? "neutral" : "success"}
-      label={activity === "selected" ? "Selected" : activity === "streaming" ? "Streaming" : "Working"}
-    />
-  ) : undefined;
-  const uploadedUrl = avatar.kind === "upload" && /^\/api\/bots\/[\w-]+\/avatar$/.test(avatar.url) ? avatar.url : undefined;
-  const src = avatar.kind === "upload" ? uploadedUrl : renderAvatarRecipe(avatar.recipe, activity);
-  const motionStyle =
-    avatar.kind !== "upload"
-      ? undefined
-      : activity === "streaming"
-        ? styles.streaming
-        : activity === "working"
-          ? styles.working
-          : activity === "selected"
-            ? styles.selected
-            : undefined;
+  const src = avatarSource(avatar, presentation);
+  const motionStyle = presentation === "working" && avatar.kind === "upload" ? styles.working : undefined;
 
   return (
     <HStack
       as="span"
-      {...(motionStyle !== undefined ? { xstyle: motionStyle } : {})}
-      data-avatar-activity={activity}
+      data-avatar-presentation={presentation}
       data-testid="avatar-view"
     >
       <Avatar
@@ -89,10 +69,32 @@ export function AvatarView({
           ? { "aria-hidden": "true" as const, "aria-label": "", role: "presentation" as const, tooltip: false as const }
           : {})}
         {...(!decorative && label !== undefined ? { alt: label } : {})}
+        {...(!decorative && tooltip !== undefined ? { tooltip } : {})}
         {...(src !== undefined ? { src } : {})}
+        {...(motionStyle !== undefined ? { xstyle: motionStyle } : {})}
         size={size}
-        {...(status !== undefined ? { status } : {})}
-        data-testid={avatar.kind === "upload" ? "avatar-upload" : `avatar-${avatar.recipe.style}`}
+        data-testid={avatarTestId(avatar)}
+      />
+    </HStack>
+  );
+}
+
+export function WorkingAvatarView({ avatar, name }: { avatar: AvatarDto; name: string }): JSX.Element {
+  const explanation = `${name} is working`;
+  const src = avatarSource(avatar, "working");
+  const motionStyle = avatar.kind === "upload" ? styles.working : undefined;
+
+  return (
+    <HStack paddingInline={2} vAlign="center" data-testid="working-avatar">
+      <Avatar
+        name={name}
+        alt={explanation}
+        tooltip={explanation}
+        {...(src !== undefined ? { src } : {})}
+        {...(motionStyle !== undefined ? { xstyle: motionStyle } : {})}
+        size="sm"
+        data-avatar-presentation="working"
+        data-testid={avatarTestId(avatar)}
       />
     </HStack>
   );

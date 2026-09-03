@@ -62,7 +62,7 @@ describe("agent capability inventory", () => {
     rmSync(h.home, { recursive: true, force: true });
   });
 
-  test("probe inventory is the only source for REST attachment acceptance", async () => {
+  test("reduced probe and command contracts preserve remaining capability policy", async () => {
     const worker = await h.svc.supervisor.agentWorker("pi");
     const initialProbe = await worker.request({ type: "probe" }, 30_000) as {
       capabilities: AgentCapabilityInventory;
@@ -71,11 +71,14 @@ describe("agent capability inventory", () => {
       version: 1,
       steering: true,
       abort: true,
-      sessionDeletion: true,
       nativeThreadActions: ["resume", "history", "close"],
       attachments: { text: true, image: true },
       nativeEventFamilies: ["message", "tool", "turn", "error", "native"],
     });
+    expect(initialProbe.capabilities).not.toHaveProperty("sessionDeletion");
+    await expect(
+      worker.request({ type: "session.delete", nativeSessionId: "fake://obsolete" }, 30_000),
+    ).rejects.toThrow("unknown command session.delete");
 
     const botId = await makeBot(h, "Capability Bot");
     const draftToken = crypto.randomUUID();
@@ -156,6 +159,13 @@ describe("agent capability inventory", () => {
     expect(h.svc.agents.capabilityInventory("pi")?.steering).toBeTrue();
 
     try {
+      setProbeControl(h, { fakeProbe: "obsolete-session-deletion" });
+      const obsolete = await h.svc.agents.recheck("pi");
+      expect(obsolete.status).toBe("incompatible");
+      expect(obsolete.capabilities).toBeUndefined();
+      expect(h.svc.agents.capabilityInventory("pi")).toBeUndefined();
+      expect((await piAgent(h)).capabilities).toBeUndefined();
+
       setProbeControl(h, { fakeProbe: "invalid" });
       const invalid = await h.svc.agents.recheck("pi");
       expect(invalid.status).toBe("incompatible");
@@ -265,6 +275,15 @@ describe("agent capability inventory", () => {
         waitThreadIdle(h, first.threadId, 10_000),
         waitThreadIdle(h, second.threadId, 10_000),
       ]);
+      for (const threadId of [first.threadId, second.threadId]) {
+        const thread = await api<{ latestTurn?: { status: string; reason?: string } }>(h, "GET", `/api/threads/${threadId}`);
+        expect(thread.latestTurn?.status).toBe("failed");
+        expect(thread.latestTurn?.reason).toContain("timed out after");
+        const transcript = await api<Array<{ author: { kind: string }; text?: string }>>(h, "GET", `/api/threads/${threadId}/messages`);
+        expect(transcript.some((message) =>
+          message.author.kind === "system" && message.text?.includes("timed out after") === true
+        )).toBeFalse();
+      }
       expect((await piAgent(h)).status).toBe("ready");
     } finally {
       h.svc.cfg.turnTimeoutMs = previousTimeout;
@@ -283,13 +302,20 @@ describe("agent capability inventory", () => {
       });
       await waitThreadIdle(h, sent.threadId, 10_000);
 
-      const thread = await api<{ activeTurn?: unknown }>(h, "GET", `/api/threads/${sent.threadId}`);
+      const thread = await api<{
+        activeTurn?: unknown;
+        latestTurn?: { status: string; reason?: string };
+      }>(h, "GET", `/api/threads/${sent.threadId}`);
       expect(thread.activeTurn).toBeUndefined();
+      expect(thread.latestTurn?.status).toBe("failed");
+      expect(thread.latestTurn?.reason).toContain("timed out after");
       const pi = await piAgent(h);
       expect(pi.status).toBe("offline");
       expect(pi.capabilities).toBeUndefined();
-      const transcript = await api<Array<{ text?: string }>>(h, "GET", `/api/threads/${sent.threadId}/messages`);
-      expect(transcript.some((message) => message.text?.includes("timed out after") === true)).toBeTrue();
+      const transcript = await api<Array<{ author: { kind: string }; text?: string }>>(h, "GET", `/api/threads/${sent.threadId}/messages`);
+      expect(transcript.some((message) =>
+        message.author.kind === "system" && message.text?.includes("timed out after") === true
+      )).toBeFalse();
     } finally {
       h.svc.cfg.turnTimeoutMs = previousTimeout;
       setProbeControl(h);

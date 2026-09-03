@@ -1,42 +1,56 @@
 import { Avatar as CurrentAvatar, Style as CurrentStyle } from "@dicebear/core";
-import { AVATAR_RENDERER_ID, type AvatarRecipeDto } from "@omarchy-bot/protocol";
+import { AVATAR_RENDERER_ID, AVATAR_STYLE_IDS, type AvatarRecipeDto } from "@omarchy-bot/protocol";
+import currentClayDefinition from "@dicebear/styles/clay.json";
+import currentCrittersDefinition from "@dicebear/styles/critters.json";
+import currentGazeDefinition from "@dicebear/styles/gaze.json";
+import currentInitialFaceDefinition from "@dicebear/styles/initial-face.json";
+import currentMoodsDefinition from "@dicebear/styles/moods.json";
 import currentPixelbotDefinition from "@dicebear/styles/pixelbot.json";
 import currentShapesDefinition from "@dicebear/styles/shapes.json";
+import currentSproutsDefinition from "@dicebear/styles/sprouts.json";
 import currentThumbsDefinition from "@dicebear/styles/thumbs.json";
+import currentVoxelArtDefinition from "@dicebear/styles/voxel-art.json";
+import currentVoxelBotDefinition from "@dicebear/styles/voxel-bot.json";
 
-export type AvatarActivity = "idle" | "selected" | "working" | "streaming";
+export type AvatarPresentation = "static" | "ambient" | "working";
 
-type AnimationVariant = "slowest" | "medium" | "fast";
+type AnimationVariant = "fast" | "medium";
 
-const currentStyles = {
+const currentStyles: Record<(typeof AVATAR_STYLE_IDS)[number], CurrentStyle> = {
+  clay: new CurrentStyle(currentClayDefinition),
+  critters: new CurrentStyle(currentCrittersDefinition),
+  gaze: new CurrentStyle(currentGazeDefinition),
+  "initial-face": new CurrentStyle(currentInitialFaceDefinition),
+  moods: new CurrentStyle(currentMoodsDefinition),
   pixelbot: new CurrentStyle(currentPixelbotDefinition),
   shapes: new CurrentStyle(currentShapesDefinition),
+  sprouts: new CurrentStyle(currentSproutsDefinition),
   thumbs: new CurrentStyle(currentThumbsDefinition),
-} as const;
+  "voxel-art": new CurrentStyle(currentVoxelArtDefinition),
+  "voxel-bot": new CurrentStyle(currentVoxelBotDefinition),
+};
 
 const MAX_CACHE_ENTRIES = 256;
 const svgCache = new Map<string, string>();
 
-function animationVariant(activity: AvatarActivity): AnimationVariant | undefined {
-  switch (activity) {
-    case "selected":
-      return "slowest";
-    case "working":
+function animationVariant(presentation: AvatarPresentation): AnimationVariant | undefined {
+  switch (presentation) {
+    case "ambient":
       return "medium";
-    case "streaming":
+    case "working":
       return "fast";
-    case "idle":
+    case "static":
       return undefined;
   }
 }
 
-function cacheKey(recipe: AvatarRecipeDto, activity: AvatarActivity): string {
+function cacheKey(recipe: AvatarRecipeDto, presentation: AvatarPresentation): string {
   return JSON.stringify([
     recipe.rendererVersion,
     recipe.style,
     recipe.seed,
     Object.entries(recipe.options).sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0),
-    activity,
+    presentation,
   ]);
 }
 
@@ -49,9 +63,9 @@ function remember(key: string, dataUri: string): string {
   return dataUri;
 }
 
-function renderCurrent(recipe: AvatarRecipeDto, activity: AvatarActivity): string {
+function renderCurrent(recipe: AvatarRecipeDto, presentation: AvatarPresentation): string {
   const style = currentStyles[recipe.style];
-  const variant = animationVariant(activity);
+  const variant = animationVariant(presentation);
   const options = variant === undefined
     ? { ...(recipe.options as object), seed: recipe.seed }
     : { ...(recipe.options as object), seed: recipe.seed, animationVariant: variant };
@@ -59,8 +73,8 @@ function renderCurrent(recipe: AvatarRecipeDto, activity: AvatarActivity): strin
 }
 
 /** Render a validated recipe with the application's sole pinned renderer. */
-export function renderAvatarRecipe(recipe: AvatarRecipeDto, activity: AvatarActivity): string {
-  const key = cacheKey(recipe, activity);
+export function renderAvatarRecipe(recipe: AvatarRecipeDto, presentation: AvatarPresentation): string {
+  const key = cacheKey(recipe, presentation);
   const cached = svgCache.get(key);
   if (cached !== undefined) {
     svgCache.delete(key);
@@ -68,5 +82,5 @@ export function renderAvatarRecipe(recipe: AvatarRecipeDto, activity: AvatarActi
     return cached;
   }
 
-  return remember(key, renderCurrent(recipe, activity));
+  return remember(key, renderCurrent(recipe, presentation));
 }

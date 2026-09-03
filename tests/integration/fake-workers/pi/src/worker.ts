@@ -13,7 +13,7 @@
  *
  * Stays alive until stdin closes (daemon lifecycle contract).
  */
-import { appendFileSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import {
   AGENT_CAPABILITY_INVENTORY_VERSION,
@@ -29,20 +29,40 @@ const write = (msg: unknown): void => {
 write({ type: "hello", v: 1, worker: "agent:pi", pid: process.pid });
 const heartbeat = setInterval(() => write({ type: "heartbeat" }), 5_000);
 heartbeat.unref?.();
+const workerHome = dataDir();
+if (workerHome !== undefined) {
+  appendFileSync(path.join(workerHome, "fake-agent-worker-starts.log"), `${process.pid}\n`);
+}
+
+const nativeSessionLog = workerHome === undefined
+  ? undefined
+  : path.join(workerHome, "fake-agent-native-sessions.log");
+const nativeSessions = new Set(
+  nativeSessionLog !== undefined && existsSync(nativeSessionLog)
+    ? readFileSync(nativeSessionLog, "utf8").split("\n").filter((id) => id.length > 0)
+    : [],
+);
+
+function rememberNativeSession(nativeSessionId: string): void {
+  if (nativeSessions.has(nativeSessionId)) return;
+  nativeSessions.add(nativeSessionId);
+  if (nativeSessionLog !== undefined) appendFileSync(nativeSessionLog, `${nativeSessionId}\n`);
+}
 
 const AGENT_VERSION = "fake-pi-1";
 
 interface FakeProbeControl {
   ok?: unknown;
   image?: unknown;
-  fakeProbe?: "invalid" | "offline";
+  fakeProbe?: "invalid" | "offline" | "obsolete-session-deletion";
   fakeCapabilities?: {
     steering?: boolean;
     abort?: boolean;
-    sessionDeletion?: boolean;
     nativeThreadActions?: Array<"resume" | "history" | "close" | "rename" | "delete" | "fork" | "compact">;
     nativeEventFamilies?: string[];
   };
+  fakeAbortBehavior?: "fail_once" | "ignore_once";
+  fakeAbortReleaseFile?: string;
 }
 
 function dataDir(): string | undefined {
@@ -64,7 +84,6 @@ function capabilitiesFor(control: FakeProbeControl): AgentCapabilityInventory {
     version: AGENT_CAPABILITY_INVENTORY_VERSION,
     steering: control.fakeCapabilities?.steering ?? true,
     abort: control.fakeCapabilities?.abort ?? true,
-    sessionDeletion: control.fakeCapabilities?.sessionDeletion ?? true,
     nativeThreadActions: control.fakeCapabilities?.nativeThreadActions ?? ["resume", "history", "close"],
     attachments: { text: true, image: control.ok === true && control.image === "verified" },
     nativeEventFamilies: control.fakeCapabilities?.nativeEventFamilies ?? ["message", "tool", "turn", "error", "native"],
@@ -78,7 +97,7 @@ function recordCommand(command: "message.steer" | "turn.abort"): void {
   if (root !== undefined) appendFileSync(path.join(root, "fake-worker-commands.log"), `${command}\n`);
 }
 
-let sessionCounter = 0;
+let sessionCounter = nativeSessions.size;
 interface FakeAttachment {
   id: string;
   name: string;
@@ -93,6 +112,9 @@ interface FakeSession {
   steerReply?: ((text: string) => void) | undefined;
 }
 const sessions = new Map<string, FakeSession>();
+const failedOnce = new Set<string>();
+const failedAbortOnce = new Set<string>();
+const ignoredAbortOnce = new Set<string>();
 
 const respond = (requestId: string, payload: unknown): void => {
   write({ requestId, ok: true, payload });
@@ -120,6 +142,16 @@ readJsonl(Bun.stdin.stream(), (raw) => {
         });
         break;
       }
+      if (control.fakeProbe === "obsolete-session-deletion") {
+        respond(msg.requestId!, {
+          agentId: "pi",
+          installed: true,
+          sdkOk: true,
+          agentVersion: AGENT_VERSION,
+          capabilities: { ...capabilitiesFor(control), sessionDeletion: true },
+        });
+        break;
+      }
       currentCapabilities = capabilitiesFor(control);
       respond(msg.requestId!, {
         agentId: "pi",
@@ -132,16 +164,21 @@ readJsonl(Bun.stdin.stream(), (raw) => {
     }
     case "session.open": {
       const id = `s${++sessionCounter}`;
+      const nativeSessionId = `fake://${id}`;
       sessions.set(id, { aborted: false, streaming: false });
-      respond(msg.requestId!, { sessionId: id, nativeSessionId: `fake://${id}` });
+      rememberNativeSession(nativeSessionId);
+      respond(msg.requestId!, { sessionId: id, nativeSessionId });
       break;
     }
     case "session.resume": {
-      // A resumed native session keeps its native id — like real pi sessions.
-      const resumed = (msg as unknown as { nativeSessionId: string }).nativeSessionId;
+      const nativeSessionId = msg.nativeSessionId;
+      if (typeof nativeSessionId !== "string" || !nativeSessions.has(nativeSessionId)) {
+        respondError(msg.requestId!, `native session not found: ${String(nativeSessionId)}`);
+        break;
+      }
       const id = `s${++sessionCounter}`;
       sessions.set(id, { aborted: false, streaming: false });
-      respond(msg.requestId!, { sessionId: id, nativeSessionId: resumed });
+      respond(msg.requestId!, { sessionId: id, nativeSessionId });
       break;
     }
     case "message.send": {
@@ -215,6 +252,22 @@ readJsonl(Bun.stdin.stream(), (raw) => {
           write({ type: "event", event: { type: "message.delta", sessionId, text: "tool finished" } });
           await Bun.sleep(150);
           write({ type: "event", event: { type: "turn.completed", sessionId } });
+          respond(msg.requestId!, { accepted: true });
+          return;
+        }
+        if (text === "fail-once") {
+          if (!failedOnce.has(text)) {
+            failedOnce.add(text);
+            write({ type: "event", event: { type: "error", sessionId, message: "fake failure", retryable: true } });
+          } else {
+            write({ type: "event", event: { type: "message.delta", sessionId, text: "recovered" } });
+            write({ type: "event", event: { type: "turn.completed", sessionId } });
+          }
+          respond(msg.requestId!, { accepted: true });
+          return;
+        }
+        if (text === "timeout-failure") {
+          write({ type: "event", event: { type: "error", sessionId, message: "timed out after 30s", retryable: true } });
           respond(msg.requestId!, { accepted: true });
           return;
         }
@@ -298,15 +351,43 @@ readJsonl(Bun.stdin.stream(), (raw) => {
     case "turn.abort": {
       recordCommand("turn.abort");
       const { sessionId } = msg as unknown as { sessionId: string };
-      const s = sessions.get(sessionId);
-      if (s?.streaming) {
+      const control = probeControl();
+      if (control.fakeAbortBehavior === "fail_once" && !failedAbortOnce.has(sessionId)) {
+        failedAbortOnce.add(sessionId);
+        respondError(msg.requestId!, "simulated turn abort failure");
+        break;
+      }
+      if (control.fakeAbortBehavior === "ignore_once" && !ignoredAbortOnce.has(sessionId)) {
+        ignoredAbortOnce.add(sessionId);
+        respond(msg.requestId!, { aborted: true });
+        break;
+      }
+
+      const cancel = (): void => {
+        const s = sessions.get(sessionId);
+        if (!s?.streaming) return;
         s.aborted = true;
         s.streaming = false;
         s.steerReply?.("");
         s.steerReply = undefined;
         s.directive = undefined;
         write({ type: "event", event: { type: "turn.cancelled", sessionId } });
+      };
+      const root = dataDir();
+      if (
+        root !== undefined
+        && typeof control.fakeAbortReleaseFile === "string"
+        && control.fakeAbortReleaseFile.length > 0
+      ) {
+        respond(msg.requestId!, { aborted: true });
+        void (async () => {
+          const releasePath = path.join(root, control.fakeAbortReleaseFile!);
+          while (!existsSync(releasePath)) await Bun.sleep(10);
+          cancel();
+        })();
+        break;
       }
+      cancel();
       respond(msg.requestId!, { aborted: true });
       break;
     }
@@ -321,15 +402,6 @@ readJsonl(Bun.stdin.stream(), (raw) => {
     case "session.close":
       respond(msg.requestId!, {});
       break;
-    case "session.delete": {
-      const nativeSessionId = typeof msg.nativeSessionId === "string" ? msg.nativeSessionId : "";
-      if (nativeSessionId.includes("fail-delete")) {
-        respondError(msg.requestId!, `native session deletion failed for ${nativeSessionId}`);
-      } else {
-        respond(msg.requestId!, { deleted: true });
-      }
-      break;
-    }
     default:
       if (msg.requestId) respondError(msg.requestId, `unknown command ${msg.type}`);
   }

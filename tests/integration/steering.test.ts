@@ -195,7 +195,7 @@ describe("integration: native turn steering", () => {
     await waitThreadIdle(h, sent.threadId);
   });
 
-  test("undeclared steering and abort are rejected before persistence or worker dispatch", async () => {
+  test("undeclared steering is rejected before persistence or worker dispatch", async () => {
     setCapabilities({
       steering: false,
       abort: false,
@@ -215,7 +215,6 @@ describe("integration: native turn steering", () => {
 
       const beforeMessages = await messages(sent.threadId);
       const steerCommands = workerCommandCount("message.steer");
-      const abortCommands = workerCommandCount("turn.abort");
 
       const steer = await apiStatus(h, "POST", `/api/threads/${sent.threadId}/messages`, { text: "not persisted" });
       expect(steer).toEqual({
@@ -225,15 +224,6 @@ describe("integration: native turn steering", () => {
       expect(await messages(sent.threadId)).toEqual(beforeMessages);
       expect(workerCommandCount("message.steer")).toBe(steerCommands);
 
-      const archive = await apiStatus(h, "POST", `/api/bots/${botId}/archive`, { confirmStop: true });
-      expect(archive).toEqual({
-        status: 409,
-        body: { error: "turn abort is not supported by pi" },
-      });
-      expect(rowForTurn(sent.turnId).status).toBe("working");
-      expect(workerCommandCount("turn.abort")).toBe(abortCommands);
-      const bot = await api<{ archived: boolean }>(h, "GET", `/api/bots/${botId}`);
-      expect(bot.archived).toBeFalse();
     } finally {
       setCapabilities({
         steering: true,

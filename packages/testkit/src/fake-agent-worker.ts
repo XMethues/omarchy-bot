@@ -73,7 +73,6 @@ readJsonl(Bun.stdin.stream(), async (raw) => {
           version: AGENT_CAPABILITY_INVENTORY_VERSION,
           steering: true,
           abort: true,
-          sessionDeletion: true,
           nativeThreadActions: ["resume", "history", "close"],
           attachments: { text: false, image: false },
           nativeEventFamilies: ["message", "tool", "turn", "error"],
@@ -115,11 +114,10 @@ readJsonl(Bun.stdin.stream(), async (raw) => {
       sessions.delete(cmd.sessionId);
       result(cmd.requestId, true, { done: true });
       break;
-    case "session.delete":
-      result(cmd.requestId, true, { deleted: true });
-      break;
-    default:
-      out({ type: "event", event: { type: "error", message: `unknown command`, retryable: false } });
+    default: {
+      const unknown = cmd as { requestId?: string };
+      result(unknown.requestId ?? "unknown", false, "unsupported command");
+    }
   }
 }, () => {
   stderr("stdin closed; exiting");

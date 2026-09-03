@@ -131,24 +131,58 @@ export function saveDraft(
   }
 }
 
+export interface ClearedBotDrafts {
+  entries: ReadonlyArray<{ key: string; value: string }>;
+}
+
+/**
+ * Remove every draft owned by a Bot and retain the exact browser-local values
+ * so a failed server-side deletion barrier can restore them.
+ */
+export function takeDraftsByBot(
+  botId: string,
+  storage: StorageLike | undefined = windowSessionStorage(),
+): ClearedBotDrafts | undefined {
+  if (storage === undefined) return { entries: [] };
+  const prefix = `${DRAFT_STORAGE_PREFIX}${botId}:`;
+  const entries: Array<{ key: string; value: string }> = [];
+
+  try {
+    for (let index = 0; index < storage.length; index += 1) {
+      const key = storage.key(index);
+      if (!key?.startsWith(prefix)) continue;
+      const value = storage.getItem(key);
+      if (value !== null) entries.push({ key, value });
+    }
+    for (const entry of entries) storage.removeItem(entry.key);
+    return { entries };
+  } catch {
+    try {
+      for (const entry of entries) storage.setItem(entry.key, entry.value);
+    } catch {
+      // The caller reports that browser-local cleanup could not be verified.
+    }
+    return undefined;
+  }
+}
+
+export function restoreDrafts(
+  snapshot: ClearedBotDrafts,
+  storage: StorageLike | undefined = windowSessionStorage(),
+): boolean {
+  if (storage === undefined) return snapshot.entries.length === 0;
+  try {
+    for (const entry of snapshot.entries) storage.setItem(entry.key, entry.value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Remove every draft owned by a Bot without touching similarly prefixed IDs. */
 export function clearDraftsByBot(
   botId: string,
   storage: StorageLike | undefined = windowSessionStorage(),
 ): boolean {
-  if (storage === undefined) return true;
-  const prefix = `${DRAFT_STORAGE_PREFIX}${botId}:`;
-
-  try {
-    const keys: string[] = [];
-    for (let index = 0; index < storage.length; index += 1) {
-      const key = storage.key(index);
-      if (key?.startsWith(prefix)) keys.push(key);
-    }
-    for (const key of keys) storage.removeItem(key);
-    return true;
-  } catch {
-    // A caller performing permanent deletion must keep the archived record when cleanup cannot be verified.
-    return false;
-  }
+  return takeDraftsByBot(botId, storage) !== undefined;
 }

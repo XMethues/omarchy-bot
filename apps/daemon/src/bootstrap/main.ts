@@ -51,9 +51,18 @@ export async function main(): Promise<{ stop: () => Promise<void>; port: number;
   const attachments = new AttachmentsService(db, cfg.attachmentsDir, agents);
   attachments.gcStaged();
   const avatars = new AvatarService(bots, supervisor, cfg.avatarsDir);
-  const botDeletions = new BotDeletionService(db, events, attachments, avatars, agents, supervisor);
   const turns = new TurnService(db, events, threads, agents, bots, attachments, supervisor, cfg);
   const computer = new ComputerBroker(db, events, turns, supervisor, cfg);
+  const botDeletions = new BotDeletionService(
+    db,
+    events,
+    attachments,
+    avatars,
+    turns,
+    threads,
+    computer,
+    cfg.botDeletionTerminalTimeoutMs,
+  );
 
   agents.init();
 

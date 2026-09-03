@@ -1,6 +1,7 @@
 import type { EventEnvelope } from "@omarchy-bot/protocol";
 import { api } from "./api.ts";
 import { clearDelta, pushDelta } from "./live.ts";
+import { clearDraftsByBot } from "./drafts.ts";
 
 export type QueryTag =
   | "agents"
@@ -107,11 +108,15 @@ function route(envelope: EventEnvelope, invalidate: Invalidate): void {
     case "bot.created":
     case "bot.updated":
     case "bot.activity":
+    case "bot.attention":
     case "bot.pinned":
-    case "bot.archived":
-    case "bot.restored":
-    case "bot.deleted":
     case "bot.read":
+      invalidate("bots");
+      return;
+    case "bot.deleted":
+      if (envelope.aggregateType === "bot") clearDraftsByBot(envelope.aggregateId);
+      invalidate("messages");
+      invalidate("threads");
       invalidate("bots");
       return;
     case "thread.created":

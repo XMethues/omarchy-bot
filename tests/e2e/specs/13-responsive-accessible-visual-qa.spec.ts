@@ -15,7 +15,7 @@ const desktopViewport = { width: 1440, height: 900 };
 const reducedMotionViewport = { width: 1024, height: 768 };
 const narrowViewport = { width: 390, height: 780 };
 
-type BotStatus = "idle" | "working";
+type BotStatus = "inactive" | "active";
 type ComputerState = "idle" | "bot-using" | "unavailable";
 
 interface SeedOptions {
@@ -44,7 +44,6 @@ function botFixtures(primaryStatus: BotStatus) {
       agentId: "pi",
       avatar: avatar("ticket-13-release-partner"),
       pinned: true,
-      archived: false,
       createdAt: FIXED_EARLY,
       updatedAt: FIXED_LATE,
       status: primaryStatus,
@@ -58,13 +57,12 @@ function botFixtures(primaryStatus: BotStatus) {
       name: "Offline Researcher",
       instructions: "Collect primary-source research.",
       agentId: "claude",
-      avatar: avatar("ticket-13-offline-researcher"),
+      avatar: { kind: "upload", url: `/api/bots/${SECONDARY_BOT_ID}/avatar` },
       pinned: false,
-      archived: false,
       createdAt: FIXED_EARLY,
       updatedAt: FIXED_EARLY,
-      status: "unavailable",
-      unreadCount: 0,
+      status: "active",
+      unreadCount: 2,
       previewText: "Waiting for its agent.",
       previewAt: FIXED_EARLY,
       lastActivityAt: FIXED_EARLY,
@@ -77,8 +75,11 @@ async function fulfillJson(route: Route, body: unknown): Promise<void> {
 }
 
 async function seedWorkspaceApi(page: Page, options: SeedOptions = {}): Promise<void> {
-  const bots = options.empty ? [] : botFixtures(options.primaryStatus ?? "idle");
+  const bots = options.empty ? [] : botFixtures(options.primaryStatus ?? "active");
 
+  await page.route(`**/api/bots/${SECONDARY_BOT_ID}/avatar`, (route) =>
+    route.fulfill({ status: 200, contentType: "image/png", body: ONE_PIXEL_PNG }),
+  );
   await page.route("**/api/agents", (route) =>
     fulfillJson(route, [
       {
@@ -90,7 +91,6 @@ async function seedWorkspaceApi(page: Page, options: SeedOptions = {}): Promise<
           version: 1,
           steering: true,
           abort: true,
-          sessionDeletion: false,
           nativeThreadActions: ["resume", "history", "close"],
           attachments: { text: true, image: false, maxTextBytes: 64 * 1024 },
           nativeEventFamilies: ["message", "tool", "turn", "error"],
@@ -101,6 +101,7 @@ async function seedWorkspaceApi(page: Page, options: SeedOptions = {}): Promise<
         displayName: "Claude",
         version: "fixture",
         status: "offline",
+        reason: "Claude worker is disconnected.",
         guidance: "Reconnect Claude before sending a message.",
       },
     ]),
@@ -119,15 +120,26 @@ async function seedWorkspaceApi(page: Page, options: SeedOptions = {}): Promise<
     await fulfillJson(
       route,
       botId === PRIMARY_BOT_ID
-        ? [
-            {
+        ? (() => {
+            const turn = {
+              id: "turn_ticket13_release_review",
+              threadId: THREAD_ID,
+              botId: PRIMARY_BOT_ID,
+              status: options.primaryStatus === "inactive" ? "completed" : "working",
+              steerCount: 0,
+              startedAt: FIXED_LATE,
+              ...(options.primaryStatus === "inactive" ? { finishedAt: FIXED_LATE } : {}),
+            };
+            return [{
               id: THREAD_ID,
               botId: PRIMARY_BOT_ID,
               title: "Release readiness review",
               createdAt: FIXED_EARLY,
               updatedAt: FIXED_LATE,
-            },
-          ]
+              latestTurn: turn,
+              ...(options.primaryStatus === "inactive" ? {} : { activeTurn: turn }),
+            }];
+          })()
         : [],
     );
   });
@@ -290,7 +302,7 @@ test.describe("ticket 13 responsive, accessible, and visual QA", () => {
     await expectWorkspaceContract(page);
     await expectNoSeriousOrCriticalViolations(page, "Populated workspace");
   });
-  test("renders stateful DiceBear avatars without animating idle bots", async ({ page }) => {
+  test("renders independent Sidebar, Header, history, and current-Turn avatar treatments", async ({ page }) => {
     await page.setViewportSize(desktopViewport);
     await page.emulateMedia({ colorScheme: "dark", reducedMotion: "no-preference" });
     await seedWorkspaceApi(page);
@@ -315,19 +327,34 @@ test.describe("ticket 13 responsive, accessible, and visual QA", () => {
     expect(Number(await selectedName.evaluate((element) => getComputedStyle(element).fontWeight))).toBeGreaterThanOrEqual(600);
     expect(selectedPreviewBox.y).toBeGreaterThan(selectedNameBox.y);
 
+    await expect(selectedAvatar).toHaveAttribute("data-avatar-presentation", "ambient");
     const selectedImage = selectedAvatar.getByTestId("avatar-pixelbot").locator("img");
     const selectedSrc = await selectedImage.getAttribute("src");
     expect(selectedSrc).toMatch(/^data:image\/svg\+xml/);
     const selectedSvg = decodeURIComponent(selectedSrc!.slice(selectedSrc!.indexOf(",") + 1));
     expect(selectedSvg).toContain("@keyframes");
     expect(selectedSvg).toContain("prefers-reduced-motion");
+    await expect(selectedRow.getByTestId("sidebar-activity-point")).toBeVisible();
 
-    const idleAvatar = page.getByTestId(`sidebar-bot-${SECONDARY_BOT_ID}`).getByTestId("avatar-view");
-    const idleSrc = await idleAvatar.getByTestId("avatar-pixelbot").locator("img").getAttribute("src");
-    const idleSvg = decodeURIComponent(idleSrc!.slice(idleSrc!.indexOf(",") + 1));
-    expect(idleSvg).not.toContain("@keyframes");
-    await expect(page.getByTestId(`sidebar-bot-${SECONDARY_BOT_ID}`)
-      .getByRole("img", { name: "Unavailable" })).toHaveCount(0);
+    const uploadedRow = page.getByTestId(`sidebar-bot-${SECONDARY_BOT_ID}`);
+    await expect(uploadedRow.getByTestId("avatar-upload").locator("img"))
+      .toHaveAttribute("src", `/api/bots/${SECONDARY_BOT_ID}/avatar`);
+    await expect(uploadedRow.getByTestId("avatar-upload")).toHaveCSS("animation-name", "none");
+    await expect(uploadedRow.getByTestId("sidebar-activity-point")).toBeVisible();
+    await expect(uploadedRow.getByTestId(`sidebar-unread-${SECONDARY_BOT_ID}`)).toBeVisible();
+
+    const headerAvatar = page.getByTestId("profile-open").getByTestId("avatar-view");
+    await expect(headerAvatar).toHaveAttribute("data-avatar-presentation", "static");
+    const headerSvg = await headerAvatar.getByTestId("avatar-pixelbot").locator("img").getAttribute("src");
+    expect(decodeURIComponent(headerSvg!.slice(headerSvg!.indexOf(",") + 1))).not.toContain("@keyframes");
+
+    const historicalMessage = page.getByTestId("assistant-message").last();
+    await expect(historicalMessage.getByTestId("avatar-view")).toHaveCount(0);
+    const workingAvatar = page.getByTestId("working-avatar");
+    const [historicalBox, workingBox] = await Promise.all([historicalMessage.boundingBox(), workingAvatar.boundingBox()]);
+    expect(historicalBox).not.toBeNull();
+    expect(workingBox).not.toBeNull();
+    expect(workingBox!.y).toBeGreaterThanOrEqual(historicalBox!.y + historicalBox!.height);
   });
 
 
@@ -400,12 +427,12 @@ test.describe("ticket 13 responsive, accessible, and visual QA", () => {
 
     await page.getByRole("button", { name: "Offline Researcher", exact: true }).click();
     await expect(page.getByRole("heading", { level: 1, name: "Offline Researcher" })).toBeVisible();
-    await expect(page.getByText("Agent unavailable", { exact: true })).toBeVisible();
+    await expect(page.getByText("Claude isn’t ready", { exact: true })).toBeVisible();
     const conversationWorkspace = page.getByLabel("Conversation workspace");
-    const unavailableNotice = conversationWorkspace.getByRole("alert").filter({ hasText: "Agent unavailable" });
+    const unavailableNotice = conversationWorkspace.getByTestId("composer-error-card");
+    await expect(unavailableNotice).toContainText("Claude worker is disconnected.");
     await expect(unavailableNotice).toContainText("Reconnect Claude before sending a message.");
     await expect(conversationWorkspace.getByRole("alert")).toHaveCount(1);
-    await expect(page.getByTestId("composer")).not.toContainText("This bot can’t send messages until its agent is ready.");
     await expect(page.getByRole("textbox", { name: "Message input" })).toHaveAttribute("contenteditable", "false");
 
     await page.getByRole("button", { name: "Open computer", exact: true }).click();
@@ -589,11 +616,13 @@ test.describe("ticket 13 responsive, accessible, and visual QA", () => {
   test("matches the fixed reduced-motion workspace", async ({ page }) => {
     await page.setViewportSize(reducedMotionViewport);
     await page.emulateMedia({ colorScheme: "dark", reducedMotion: "reduce" });
-    await seedWorkspaceApi(page, { primaryStatus: "working" });
+    await seedWorkspaceApi(page, { primaryStatus: "active" });
     await gotoSeededWorkspace(page);
 
-    const workingAvatar = page.getByTestId(`sidebar-bot-${PRIMARY_BOT_ID}`).getByTestId("avatar-view");
+    const workingAvatar = page.getByTestId("working-avatar");
     await expect(workingAvatar.getByTestId("avatar-pixelbot")).toHaveCSS("animation-name", "none");
+    await expect(workingAvatar.getByRole("img", { name: "Release Partner is working" })).toBeVisible();
+    await expect(workingAvatar).toBeVisible();
     await captureWorkspace(page, "ticket-13-workspace-reduced-motion-dark.png");
   });
 });

@@ -11,7 +11,7 @@ Each adapter maintains a versioned **Agent Capability Inventory**. The inventory
 - chooses the richest official integration surface available;
 - preserves native events and controls rather than reducing every Agent to the smallest common protocol;
 - does not inject an independent `ask`/`trusted` policy or approval gate;
-- does not emulate unsupported native session actions;
+- treats Native Sessions as Agent-owned, so Bot deletion removes local mappings without invoking an Agent worker or deleting native data;
 - marks an Agent unavailable when its installed version fails its adapter conformance suite.
 
 ## Adapter baseline
@@ -26,13 +26,13 @@ A usable conversation adapter must prove the operations required by its own offi
 - accept the attachment forms claimed by that adapter;
 - close and recover without orphaning the worker.
 
-Steer, fork, compact, rename, native delete, subagents, plans, usage, and other advanced operations are inventory entries, not fabricated common features. The UI surfaces them contextually when the active adapter reports tested support.
+Steer, fork, compact, rename, Thread delete, subagents, plans, usage, and other advanced operations are inventory entries, not fabricated common features. The UI surfaces them contextually when the active adapter reports tested support.
 
 ## Official integration surfaces
 
 | Agent | Primary official surface | Adapter state | Notes |
 | --- | --- | --- | --- |
-| Pi | `@earendil-works/pi-coding-agent` TypeScript SDK | Implemented | Native sessions, streaming, tools, internal abort, history, attachments, SDK steering, and native session deletion are available. |
+| Pi | `@earendil-works/pi-coding-agent` TypeScript SDK | Implemented | Native sessions, streaming, tools, internal abort, history, attachments, and SDK steering are available. |
 | OMP | `@oh-my-pi/pi-coding-agent` Bun SDK | Pending | Use the in-process SDK behind an isolated Bun worker; preserve extensions, skills, tools, and session events. |
 | Codex | `codex app-server --stdio` | Pending | Use `thread/start|resume`, `turn/start|interrupt`, generated protocol types, and structured server events. |
 | Claude Code | `@anthropic-ai/claude-agent-sdk` | Pending | Use `query()`, async multi-turn input, resume, interrupt, hooks, partial messages, and native tool decisions. |
@@ -53,7 +53,6 @@ interface AgentCapabilityInventory {
   version: 1;
   steering: boolean;
   abort: boolean;
-  sessionDeletion: boolean;
   nativeThreadActions: Array<
     "resume" | "history" | "close" | "rename" | "delete" | "fork" | "compact"
   >;
@@ -87,8 +86,7 @@ type AgentCommand =
   | { type: "message.steer"; requestId: string; sessionId: string; text: string }
   | { type: "turn.abort"; requestId: string; sessionId: string }
   | { type: "session.history"; requestId: string; sessionId: string }
-  | { type: "session.close"; requestId: string; sessionId: string }
-  | { type: "session.delete"; requestId: string; nativeSessionId: string };
+  | { type: "session.close"; requestId: string; sessionId: string };
 ```
 
 The exact accepted commands are versioned. An adapter may report an operation unavailable; it may not silently route it through a weaker headless or PTY transport.
@@ -99,7 +97,9 @@ Native events carry `agentId`, capability name, payload, and sensitivity. Secret
 
 ### Pi
 
-Use `createAgentSession`, `DefaultResourceLoader`, `SessionManager.create/open`, and the SDK event subscription. Load the user's native Pi resources. Use `session.steer(...)` for messages sent during active work and `session.abort()` only for internal cancellation such as archiving or deleting an active Bot.
+Use `createAgentSession`, `DefaultResourceLoader`, `SessionManager.create/open`, and the SDK event subscription. Load the user's native Pi resources. Use `session.steer(...)` for messages sent during active work and `session.abort()` only for explicit local operations that must terminate work, such as deleting an active Bot.
+
+Pi Native Sessions are Agent-owned continuation state. Omarchy Bot does not advertise or invoke Native Session deletion; deleting a Bot leaves that native state intact.
 
 ### Codex
 

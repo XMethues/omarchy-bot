@@ -112,7 +112,7 @@ describe("integration: bots API", () => {
     expect(bots.length).toBeGreaterThan(0);
     for (const b of bots) {
       expect(b.id.startsWith("bot_")).toBeTrue();
-      expect(["idle", "working", "waiting", "needs_you", "error", "unavailable"]).toContain(b.status);
+      expect(["active", "inactive"]).toContain(b.status);
       expect(typeof b.unreadCount).toBe("number");
     }
   });
@@ -167,12 +167,14 @@ describe("integration: chat through a bot", () => {
     expect(msgs.some((message) => message.author.kind === "user")).toBeTrue();
   });
 
-  test("a failed turn leaves a failed status note in the transcript", async () => {
+  test("a failed turn exposes its terminal reason without adding an operational history message", async () => {
     const botId = await makeBot(h, "Fails");
     const sent = await sendToBot(h, botId, "fail");
     await waitThreadIdle(h, sent.threadId);
+    const thread = await api<{ latestTurn?: { status: string; reason?: string } }>(h, "GET", `/api/threads/${sent.threadId}`);
+    expect(thread.latestTurn).toEqual(expect.objectContaining({ status: "failed", reason: "fake failure" }));
     const msgs = await messages(sent.threadId);
-    expect(msgs.some((m) => m.author.kind === "system" && m.kind === "event" && (m.text ?? "").includes("error: fake failure"))).toBeTrue();
+    expect(msgs.some((m) => m.author.kind === "system" && (m.text ?? "").includes("fake failure"))).toBeFalse();
   });
 
   test("sending while a turn is active steers instead of starting a turn", async () => {
@@ -198,7 +200,7 @@ describe("integration: chat through a bot", () => {
     await until(async () => (await api<{ activeTurn?: unknown }>(h, "GET", `/api/threads/${sent.threadId}`)).activeTurn !== undefined);
     const res = await apiStatus(h, "POST", `/api/threads/${sent.threadId}/messages`, { text: "redirect" });
     expect(res.status).toBe(409);
-    // Internal cancellation remains available to archive/delete/timeout flows.
+    // Internal cancellation remains available to delete and timeout flows.
     await h.svc.turns.abortTurn(sent.turnId, "test cleanup");
     await waitThreadIdle(h, sent.threadId);
     const msgs = await messages(sent.threadId);

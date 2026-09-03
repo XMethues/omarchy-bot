@@ -13,8 +13,8 @@ export interface AgentReadiness {
   guidance?: string;
 }
 
-/** Bot activity as derived from its active turn + Agent readiness. */
-export type BotActivityStatus = "idle" | "working" | "waiting" | "needs_you" | "error" | "unavailable";
+/** Whether any Thread belonging to the Bot has a nonterminal Turn. */
+export type BotActivityStatus = "active" | "inactive";
 
 export interface AvatarRecipe {
   rendererVersion: string;
@@ -35,8 +35,6 @@ export interface Bot {
   agentId: AgentId;
   avatar: Avatar;
   pinned: boolean;
-  archived: boolean;
-  archivedAt?: string;
   createdAt: string;
   updatedAt: string;
 }

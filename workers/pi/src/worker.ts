@@ -167,7 +167,6 @@ async function handleMessage(cmd: AgentCommand): Promise<void> {
             version: AGENT_CAPABILITY_INVENTORY_VERSION,
             steering: true,
             abort: true,
-            sessionDeletion: false,
             nativeThreadActions: ["resume", "history", "close"],
             attachments: {
               text: true,
@@ -278,15 +277,13 @@ async function handleMessage(cmd: AgentCommand): Promise<void> {
         reply({ requestId: cmd.requestId, ok: true, payload: { closed: true } });
         return;
       }
-      case "session.delete": {
-        // Honest capability answer: pi has no native session deletion.
-        reply({ requestId: cmd.requestId, ok: false, error: "pi does not support native session deletion" });
-        return;
-      }
       default: {
-        const never: never = cmd;
-        void never;
-        reply({ requestId: "unknown", ok: false, error: "unsupported command" });
+        const unknown = cmd as { requestId?: string };
+        reply({
+          requestId: unknown.requestId ?? "unknown",
+          ok: false,
+          error: "unsupported command",
+        });
       }
     }
   } catch (err) {

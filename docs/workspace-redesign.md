@@ -4,6 +4,8 @@ Status: implemented; design accepted on 2026-09-02
 
 This document defines the accepted product and interaction design. Earlier architecture drafts remain research inputs only where they do not conflict with this specification.
 
+> Bot activity, avatar activity presentation, archive/restore, and permanent-deletion decisions are superseded by [Binary Bot activity and direct deletion](../.scratch/bot-activity-lifecycle/spec.md).
+
 ## 1. Product model
 
 ### Bot and Agent
@@ -29,8 +31,9 @@ This document defines the accepted product and interaction design. Earlier archi
 - Omarchy Bot preserves each Agent's native capabilities and native approval behavior.
 - It does not add an `ask`/`trusted` policy, capability filter, permission manifest, or parallel approval gate.
 - Every adapter owns a compact `AgentCapabilityInventory` returned by the probe protocol and derived from the official interface plus conformance probes.
-- The inventory is the sole support-policy source for steering, abort, session deletion, Thread actions, accepted attachment modalities, and native event families.
+- The inventory is the sole support-policy source for steering, abort, Thread actions, accepted attachment modalities, and native event families.
 - Contextual native operations are shown and executed according to that inventory. Unsupported operations are rejected rather than simulated; Pi image input is not claimed while its provider conformance reports images unsupported.
+- Bot deletion removes Omarchy Bot-owned data and local Agent-session mappings only. It neither acquires an Agent worker nor deletes Agent-owned Native Sessions.
 
 ## 2. Information architecture
 

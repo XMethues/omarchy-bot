@@ -1,3 +1,5 @@
+import { readFileSync, writeFileSync } from "node:fs";
+import path from "node:path";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
 async function createBot(page: Page, name: string): Promise<string> {
@@ -34,6 +36,27 @@ async function waitForPersistedThread(page: Page): Promise<string> {
   return threadId;
 }
 
+function fakeProbeFile(): string {
+  const state = JSON.parse(
+    readFileSync(path.resolve(import.meta.dirname, "../.daemon.json"), "utf8"),
+  ) as { runDir: string };
+  return path.join(state.runDir, "data", "conformance", "pi-fake-pi-1.json");
+}
+
+function setFakeProbe(control: Record<string, unknown>): void {
+  writeFileSync(fakeProbeFile(), JSON.stringify({ ok: true, ...control }));
+}
+
+async function expectCardAboveComposer(page: Page): Promise<void> {
+  const card = page.getByTestId("composer-error-card");
+  const composer = page.getByTestId("composer");
+  await expect(card).toBeVisible();
+  const [cardBox, composerBox] = await Promise.all([card.boundingBox(), composer.boundingBox()]);
+  expect(cardBox).not.toBeNull();
+  expect(composerBox).not.toBeNull();
+  expect(cardBox!.y + cardBox!.height).toBeLessThanOrEqual(composerBox!.y);
+}
+
 test.describe("chat through a bot", () => {
   test("abandons a blank draft without creating a thread", async ({ page, request }) => {
     await page.goto("/");
@@ -55,7 +78,16 @@ test.describe("chat through a bot", () => {
     await send(page, "say: hello streaming");
     const threadId = await waitForPersistedThread(page);
     await expect(page.getByTestId("streaming-message")).toContainText(/hel|hello streaming/);
+    const streamingMessage = page.getByTestId("streaming-message");
+    const workingAvatar = page.getByTestId("working-avatar");
+    await expect(workingAvatar).toBeVisible();
+    const [streamingBox, workingBox] = await Promise.all([streamingMessage.boundingBox(), workingAvatar.boundingBox()]);
+    expect(streamingBox).not.toBeNull();
+    expect(workingBox).not.toBeNull();
+    expect(workingBox!.y).toBeGreaterThanOrEqual(streamingBox!.y + streamingBox!.height);
     await expect(page.getByTestId("assistant-message").last()).toContainText("hello streaming", { timeout: 15_000 });
+    await expect(page.getByTestId("working-avatar")).toHaveCount(0);
+    await expect(page.getByTestId("assistant-message").last().getByTestId("avatar-view")).toHaveCount(0);
     await expect(page.getByRole("button", { name: "Open conversation history" })).toHaveText("say: hello streaming");
 
     await page.reload();
@@ -89,12 +121,103 @@ test.describe("chat through a bot", () => {
     await expect(page.getByTestId("assistant-message").last()).toContainText("tool finished");
   });
 
-  test("renders a failed turn as an inline transcript note", async ({ page }) => {
+  test("shows failed Turns once above the Composer and supports retry and close", async ({ page, request }) => {
     await page.goto("/");
     await createBot(page, "Failure Bot");
+    await send(page, "fail-once");
+    const threadId = await waitForPersistedThread(page);
+
+    await expectCardAboveComposer(page);
+    const card = page.getByTestId("composer-error-card");
+    await expect(card).toContainText("fake failure");
+    await expect(page.getByText("error: fake failure")).toHaveCount(0);
+    const messages = await request.get(`/api/threads/${threadId}/messages`);
+    expect((await messages.json()) as Array<{ author: { kind: string }; text?: string }>).not.toContainEqual(
+      expect.objectContaining({ author: { kind: "system" }, text: expect.stringContaining("fake failure") }),
+    );
+
+    await card.getByRole("button", { name: "Retry" }).click();
+    await expect(page.getByTestId("assistant-message").last()).toContainText("recovered", { timeout: 15_000 });
+    await expect(card).toHaveCount(0);
+
     await send(page, "fail");
-    await waitForPersistedThread(page);
-    await expect(page.getByText("error: fake failure")).toBeVisible({ timeout: 15_000 });
+    await expectCardAboveComposer(page);
+    await page.getByTestId("composer-error-card").getByRole("button", { name: "Close" }).click();
+    await expect(page.getByTestId("composer-error-card")).toHaveCount(0);
+
+    await page.getByRole("button", { name: "Open conversation history" }).click();
+    await page.getByRole("button", { name: "New conversation" }).click();
+    await send(page, "timeout-failure");
+    const timeoutThreadId = await waitForPersistedThread(page);
+    await expectCardAboveComposer(page);
+    const timeoutCard = page.getByTestId("composer-error-card");
+    await expect(timeoutCard).toContainText("timed out after 30s");
+    await expect(timeoutCard.getByRole("button", { name: "Retry" })).toBeVisible();
+    await expect(timeoutCard.getByRole("button", { name: "Close" })).toBeVisible();
+    const timeoutMessages = await request.get(`/api/threads/${timeoutThreadId}/messages`);
+    expect((await timeoutMessages.json()) as Array<{ author: { kind: string }; text?: string }>).not.toContainEqual(
+      expect.objectContaining({ author: { kind: "system" }, text: expect.stringContaining("timed out after") }),
+    );
+    setFakeProbe({ fakeProbe: "offline" });
+    try {
+      expect((await request.post("/api/agents/pi/recheck")).ok()).toBe(true);
+      await expect(timeoutCard).toContainText("fake probe offline");
+      await timeoutCard.getByRole("button", { name: "Close" }).click();
+      await expect(timeoutCard).toContainText("Turn failed");
+      await expect(timeoutCard).toContainText("timed out after 30s");
+      await timeoutCard.getByRole("button", { name: "Close" }).click();
+      await expect(timeoutCard).toHaveCount(0);
+    } finally {
+      setFakeProbe({});
+      await request.post("/api/agents/pi/recheck");
+    }
+
+    await page.getByRole("button", { name: "Open conversation history" }).click();
+    await page.getByRole("button", { name: /fail-once/ }).click();
+    await expect(page).toHaveURL(new RegExp(`thread=${threadId}`));
+    await expect(page.getByTestId("composer-error-card")).toHaveCount(0);
+
+    await page.getByRole("button", { name: "Open conversation history" }).click();
+    await page.getByRole("button", { name: /timeout-failure/ }).click();
+    await expect(page).toHaveURL(new RegExp(`thread=${timeoutThreadId}`));
+    await expect(page.getByTestId("composer-error-card")).toHaveCount(0);
+  });
+
+  test("disables sending and shows readiness reason and recovery above the Composer", async ({ page, request }) => {
+    await page.goto("/");
+    await createBot(page, "Readiness Bot");
+    setFakeProbe({ fakeProbe: "offline" });
+    try {
+      expect((await request.post("/api/agents/pi/recheck")).ok()).toBe(true);
+      await expectCardAboveComposer(page);
+      const card = page.getByTestId("composer-error-card");
+      await expect(card).toContainText("fake probe offline");
+      await expect(card).toContainText("Restart the daemon or check the worker logs.");
+      await expect(composerInput(page)).toHaveAttribute("aria-disabled", "true");
+      await expect(composerInput(page)).toHaveAttribute("contenteditable", "false");
+
+      await card.getByRole("button", { name: "Close" }).click();
+      await expect(card).toHaveCount(0);
+      await expect(composerInput(page)).toHaveAttribute("aria-disabled", "true");
+
+      setFakeProbe({});
+      expect((await request.post("/api/agents/pi/recheck")).ok()).toBe(true);
+      await expect(composerInput(page)).not.toHaveAttribute("aria-disabled");
+
+      setFakeProbe({ fakeProbe: "offline" });
+      expect((await request.post("/api/agents/pi/recheck")).ok()).toBe(true);
+      await expectCardAboveComposer(page);
+      await expect(card).toContainText("fake probe offline");
+
+      setFakeProbe({});
+      await card.getByRole("button", { name: "Retry" }).click();
+      await expect(composerInput(page)).not.toHaveAttribute("aria-disabled");
+      await expect(composerInput(page)).toHaveAttribute("contenteditable", "true");
+      await expect(card).toHaveCount(0);
+    } finally {
+      setFakeProbe({});
+      await request.post("/api/agents/pi/recheck");
+    }
   });
 
   test("keeps the composer enabled for steering and has no global TopNav or Stop control", async ({ page }) => {
@@ -108,7 +231,7 @@ test.describe("chat through a bot", () => {
 
     await send(page, "steer-echo");
     await waitForPersistedThread(page);
-    await expect(page.getByTestId("streaming-message")).toBeVisible();
+    await expect(page.getByTestId("working-avatar")).toBeVisible();
     await expect(composerInput(page)).toBeEnabled();
 
     await send(page, "redirect e2e");

@@ -1,7 +1,16 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { Database } from "bun:sqlite";
 import type { AgentId } from "@omarchy-bot/domain";
-import { AVATAR_RENDERER_ID, type AvatarDto, type AvatarRecipeDto, type BotDto, type BotViewDto, type TurnDto } from "@omarchy-bot/protocol";
+import {
+  AVATAR_RENDERER_ID,
+  AVATAR_STYLE_IDS,
+  DEFAULT_AVATAR_STYLE_ID,
+  type AvatarDto,
+  type AvatarRecipeDto,
+  type BotActivityEventPayload,
+  type BotDto,
+  type BotViewDto,
+} from "@omarchy-bot/protocol";
 import type { EventLog } from "../events/eventLog.ts";
 import type { AgentsRegistry } from "../agents/registry.ts";
 import type { ThreadsService } from "../threads/threads.ts";
@@ -9,7 +18,7 @@ import type { ThreadsService } from "../threads/threads.ts";
 interface BotRow {
   id: string; name: string; instructions: string; agent_id: string;
   avatar_kind: string; avatar_recipe: string; avatar_file: string | null;
-  pinned: number; archived: number; archived_at: string | null;
+  pinned: number;
   created_at: string; updated_at: string;
 }
 interface BotStateRow {
@@ -17,14 +26,10 @@ interface BotStateRow {
   unread_count: number; unread_thread_id: string | null;
 }
 
-export interface BotTurnAborter {
-  abortTurn(turnId: string, reason: string): Promise<void>;
-  waitForTerminal(turnId: string): Promise<TurnDto>;
-}
 
 /** A new Bot ships with a deterministic generated avatar recipe. */
 export function defaultAvatarRecipe(botId: string): string {
-  return JSON.stringify({ rendererVersion: AVATAR_RENDERER_ID, style: "shapes", seed: botId, options: {} });
+  return JSON.stringify({ rendererVersion: AVATAR_RENDERER_ID, style: DEFAULT_AVATAR_STYLE_ID, seed: botId, options: {} });
 }
 
 export class HttpError extends Error {
@@ -35,8 +40,8 @@ export class HttpError extends Error {
 
 /**
  * User-created Bots. Each Bot references exactly one Agent; the reference is
- * immutable (ADR 0002). Activity status is derived from the Bot's turns and
- * its Agent's readiness — never stored.
+ * immutable (ADR 0002). Binary activity is derived from all of the Bot's
+ * nonterminal Turns and never from Agent Readiness.
  */
 export class BotsService {
   constructor(
@@ -107,15 +112,13 @@ export class BotsService {
         : { kind: r.avatar_kind === "recipe" ? "recipe" : "generated", recipe: JSON.parse(r.avatar_recipe || defaultAvatarRecipe(r.id)) };
     return {
       id: r.id, name: r.name, instructions: r.instructions, agentId: r.agent_id as AgentId,
-      avatar, pinned: Boolean(r.pinned), archived: Boolean(r.archived),
+      avatar, pinned: Boolean(r.pinned),
       createdAt: r.created_at, updatedAt: r.updated_at,
     };
   }
 
-  list(opts: { includeArchived?: boolean } = {}): BotViewDto[] {
-    const rows = this.db
-      .query(opts.includeArchived ? `SELECT * FROM bots` : `SELECT * FROM bots WHERE archived = 0`)
-      .all() as BotRow[];
+  list(): BotViewDto[] {
+    const rows = this.db.query(`SELECT * FROM bots`).all() as BotRow[];
     const views = rows.map((r) => this.#toView(r));
     views.sort(
       (a, b) =>
@@ -128,20 +131,8 @@ export class BotsService {
 
   #toView(r: BotRow): BotViewDto {
     const st = this.#stateRow(r.id);
-    const active = this.threads.activeTurnForBot(r.id);
-    const agentReady = this.agents.status(r.agent_id as AgentId) === "ready";
-    let status: BotViewDto["status"] = "idle";
-    if (active !== undefined) {
-      status =
-        active.status === "working" ? "working"
-        : active.status === "waiting_for_input" ? "needs_you"
-        : active.status === "failed" ? "error"
-        : "waiting";
-    } else if (!agentReady) {
-      status = "unavailable";
-    } else if (st?.last_activity_at && Date.now() - new Date(st.last_activity_at).getTime() < 60_000 && this.#recentlyFailed(r.id)) {
-      status = "error";
-    }
+    const status: BotViewDto["status"] =
+      this.threads.activeTurnForBot(r.id) === undefined ? "inactive" : "active";
     return {
       ...this.#toDto(r),
       status,
@@ -153,17 +144,20 @@ export class BotsService {
     };
   }
 
-  #recentlyFailed(botId: string): boolean {
-    const r = this.db
-      .query(`SELECT status FROM turns WHERE bot_id = ? AND finished_at IS NOT NULL ORDER BY started_at DESC LIMIT 1`)
-      .get(botId) as { status: string } | undefined;
-    return r?.status === "failed";
-  }
 
   getView(id: string): BotViewDto {
     const r = this.#row(id);
     if (!r) throw new HttpError(404, `unknown bot ${id}`);
     return this.#toView(r);
+  }
+
+  recordActivityStatus(botId: string, threadId: string, turnId: string): void {
+    const payload: BotActivityEventPayload = {
+      status: this.getView(botId).status,
+      threadId,
+      turnId,
+    };
+    this.events.append("bot", botId, "bot.activity", payload);
   }
 
   /** Agent reference is fixed: any attempt to change it is a 400. */
@@ -186,47 +180,6 @@ export class BotsService {
     this.events.append("bot", id, "bot.pinned", { pinned });
     return bot;
   }
-  /**
-   * Archive hides a Bot without changing its Threads, Agent reference, or
-   * native sessions. Active turns must reach a persisted terminal state first.
-   */
-  async archive(id: string, body: { confirmStop?: boolean }, turns: BotTurnAborter): Promise<BotDto> {
-    const row = this.#row(id);
-    if (!row) throw new HttpError(404, `unknown bot ${id}`);
-    if (row.archived) return this.#toDto(row);
-
-    const activeTurns = this.threads
-      .listThreads(id)
-      .flatMap((thread) => thread.activeTurn === undefined ? [] : [thread.activeTurn]);
-    if (activeTurns.length > 0 && body.confirmStop !== true) {
-      throw new HttpError(409, "working", { confirmRequired: true });
-    }
-    if (activeTurns.length > 0) {
-      await Promise.all(activeTurns.map((turn) => turns.abortTurn(turn.id, "bot archived")));
-      await Promise.all(activeTurns.map((turn) => turns.waitForTerminal(turn.id)));
-    }
-
-    const now = new Date().toISOString();
-    this.db.query(`UPDATE bots SET archived = 1, archived_at = ?, updated_at = ? WHERE id = ?`).run(now, now, id);
-    const archived = this.getDto(id);
-    this.events.append("bot", id, "bot.archived", archived);
-    return archived;
-  }
-
-  restore(id: string): BotDto {
-    const row = this.#row(id);
-    if (!row) throw new HttpError(404, `unknown bot ${id}`);
-    if (this.db.query(`SELECT bot_id FROM bot_deletions WHERE bot_id = ?`).get(id) !== null) {
-      throw new HttpError(409, "permanent deletion cleanup must be retried before this bot can be restored");
-    }
-    if (!row.archived) return this.#toDto(row);
-
-    const now = new Date().toISOString();
-    this.db.query(`UPDATE bots SET archived = 0, archived_at = NULL, updated_at = ? WHERE id = ?`).run(now, id);
-    const restored = this.getDto(id);
-    this.events.append("bot", id, "bot.restored", restored);
-    return restored;
-  }
 
   agentId(id: string): AgentId {
     const r = this.#row(id);
@@ -248,7 +201,7 @@ export class BotsService {
     const variation = generated.count + 1;
     const recipe: AvatarRecipeDto = {
       rendererVersion: AVATAR_RENDERER_ID,
-      style: "shapes",
+      style: AVATAR_STYLE_IDS[(variation - 1) % AVATAR_STYLE_IDS.length] ?? DEFAULT_AVATAR_STYLE_ID,
       seed: createHash("sha256").update(`${id}:${variation}`).digest("hex"),
       options: {},
     };
@@ -278,32 +231,32 @@ export class BotsService {
       .run(kind, recipe === undefined ? "" : JSON.stringify(recipe), avatarFile, now, id);
   }
 
-  recordActivity(botId: string, threadId: string, text: string, assistantMessage: boolean): void {
+  recordAssistantOutput(botId: string, threadId: string, text: string): void {
     const now = new Date().toISOString();
-    if (assistantMessage) {
-      const preview = text.replace(/\s+/g, " ").trim().slice(0, 120);
-      this.db
-        .query(`INSERT INTO bot_state (bot_id, last_activity_at, preview_text, preview_at, unread_count, unread_thread_id)
-                VALUES (?, ?, ?, ?, 1, ?)
-                ON CONFLICT(bot_id) DO UPDATE SET
-                  last_activity_at = excluded.last_activity_at,
-                  preview_text = excluded.preview_text,
-                  preview_at = excluded.preview_at,
-                  unread_count = bot_state.unread_count + 1,
-                  unread_thread_id = excluded.unread_thread_id`)
-        .run(botId, now, preview, now, threadId);
-      this.events.append("bot", botId, "bot.activity", { threadId, preview, at: now });
-      return;
-    }
+    const preview = text.replace(/\s+/g, " ").trim().slice(0, 120);
+    this.db
+      .query(`INSERT INTO bot_state (bot_id, last_activity_at, preview_text, preview_at, unread_count, unread_thread_id)
+              VALUES (?, ?, ?, ?, 1, ?)
+              ON CONFLICT(bot_id) DO UPDATE SET
+                last_activity_at = excluded.last_activity_at,
+                preview_text = excluded.preview_text,
+                preview_at = excluded.preview_at,
+                unread_count = bot_state.unread_count + 1,
+                unread_thread_id = excluded.unread_thread_id`)
+      .run(botId, now, preview, now, threadId);
+    this.events.append("bot", botId, "bot.attention", { threadId, preview, at: now });
+  }
 
-    // User input changes recency without replacing the latest Agent output.
+  /** User input changes recency without replacing the latest Agent output. */
+  recordUserMessage(botId: string, threadId: string): void {
+    const now = new Date().toISOString();
     this.db
       .query(`INSERT INTO bot_state (bot_id, last_activity_at)
               VALUES (?, ?)
               ON CONFLICT(bot_id) DO UPDATE SET
                 last_activity_at = excluded.last_activity_at`)
       .run(botId, now);
-    this.events.append("bot", botId, "bot.activity", { threadId, at: now });
+    this.events.append("bot", botId, "bot.attention", { threadId, at: now });
   }
 
   #recordUnreadOutput(botId: string, threadId: string): void {
@@ -316,7 +269,7 @@ export class BotsService {
                 unread_count = bot_state.unread_count + 1,
                 unread_thread_id = excluded.unread_thread_id`)
       .run(botId, now, threadId);
-    this.events.append("bot", botId, "bot.activity", { threadId, at: now });
+    this.events.append("bot", botId, "bot.attention", { threadId, at: now });
   }
 
   clearUnread(botId: string, threadId: string): BotViewDto {

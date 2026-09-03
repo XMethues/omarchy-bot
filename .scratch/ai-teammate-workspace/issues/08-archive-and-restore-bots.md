@@ -1,5 +1,7 @@
 # 08: Archive and restore Bots safely
 
+> Superseded by [Binary Bot activity and direct deletion](../../bot-activity-lifecycle/spec.md): Bots no longer have an archived lifecycle state.
+
 **What to build:** Let users remove a Bot from active navigation without losing it, stop hidden work deliberately, and restore the Bot later from Settings.
 
 **Blocked by:** 02: Chat through a user-created Bot

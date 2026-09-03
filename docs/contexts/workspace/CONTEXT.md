@@ -8,6 +8,19 @@ The end-user context for creating AI teammates and working with them through con
 A persistent assistant created and named by the user, with its own job instructions, configuration, and identity. Each Bot uses one Agent; multiple Bots may use the same Agent. Ambiguous legacy rows are conservatively treated as Bots until evidence permits another classification; enabled Agent inventory is never itself a Bot.
 _Avoid_: Agent Bot, runtime Bot, Agent instance
 
+**Bot Activity**:
+Whether a Bot has at least one Active Turn in any of its Threads. A Bot is `active` or `inactive`; Agent readiness, selection, unreadness, and ambient avatar motion are separate concepts.
+_Avoid_: Online status, presence, availability
+
+**Bot Lifecycle**:
+A Bot exists from creation until permanent deletion. It has no disabled or archived form.
+_Avoid_: Bot enablement, archived Bot, offline Bot
+
+**Bot Deletion**:
+Irreversible removal of a Bot and the data Omarchy Bot owns for it. Agent-owned Native Sessions are outside this boundary.
+_Avoid_: Archive, disable, Agent data erasure
+
+
 **Bot Provenance**:
 Internal evidence for why a persisted Bot exists: `user_created`, `legacy_conversation`, or `legacy_inventory`. Provenance makes migration conservative: only proven `legacy_inventory` rows may be removed, while ambiguous rows are preserved.
 _Avoid_: Agent type, user-facing Bot category
@@ -23,6 +36,10 @@ _Avoid_: Agent-generated SVG, avatar capability, multiple active renderer versio
 **Thread**:
 A conversation between the user and one Bot. A Bot may have multiple Threads; selecting a Bot opens its most recently active Thread.
 _Avoid_: Bot, Agent, task
+
+**Active Turn**:
+A Turn that has not completed, been cancelled, or failed. Waiting for user input or computer access remains active.
+_Avoid_: Online Bot, currently selected Thread
 
 **Composer Draft**:
 Unsent text and staged attachments belonging to one Thread within one application window. Switching Bots or Threads hides the draft without moving it; returning restores it. Drafts do not synchronize between windows.

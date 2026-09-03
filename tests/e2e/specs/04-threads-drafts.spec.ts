@@ -108,17 +108,4 @@ test.describe("thread history and window drafts", () => {
     }
   });
 
-  test("cleans stale window drafts when their owning bot is archived", async ({ page }) => {
-    await page.goto("/");
-    const botId = await createBot(page, "Archived Draft E2E Bot");
-    await composerInput(page).fill("must not resurface");
-    const key = `draft:v1:${botId}:blank`;
-    await expect.poll(() => page.evaluate((storageKey) => sessionStorage.getItem(storageKey), key)).not.toBeNull();
-
-    const response = await page.request.post(`/api/bots/${botId}/archive`, { data: {} });
-    expect(response.ok()).toBeTruthy();
-    await page.reload();
-
-    await expect.poll(() => page.evaluate((storageKey) => sessionStorage.getItem(storageKey), key)).toBeNull();
-  });
 });

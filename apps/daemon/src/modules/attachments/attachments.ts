@@ -125,7 +125,7 @@ export class AttachmentsService {
   }
 
   async stage(botId: string, draftToken: string, file: File): Promise<AttachmentDto> {
-    const bot = this.db.query("SELECT id, agent_id FROM bots WHERE id = ? AND archived = 0").get(botId) as {
+    const bot = this.db.query("SELECT id, agent_id FROM bots WHERE id = ?").get(botId) as {
       id: string;
       agent_id: AgentId;
     } | null;
@@ -203,7 +203,7 @@ export class AttachmentsService {
       throw new HttpError(400, "attachmentIds must not contain duplicates");
     }
 
-    const bot = this.db.query("SELECT agent_id FROM bots WHERE id = ? AND archived = 0").get(input.botId) as {
+    const bot = this.db.query("SELECT agent_id FROM bots WHERE id = ?").get(input.botId) as {
       agent_id: AgentId;
     } | null;
     if (!bot) throw new HttpError(404, `unknown bot ${input.botId}`);

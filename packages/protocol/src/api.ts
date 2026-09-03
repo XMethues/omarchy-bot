@@ -36,7 +36,20 @@ export type AgentDto = z.infer<typeof AgentDto>;
 
 // ----- Avatars -----
 export const AVATAR_RENDERER_ID = "dicebear-core@10.7.0+styles@10.6.0" as const;
-export const AVATAR_STYLE_IDS = ["shapes", "pixelbot", "thumbs"] as const;
+export const AVATAR_STYLE_IDS = [
+  "clay",
+  "critters",
+  "gaze",
+  "initial-face",
+  "moods",
+  "pixelbot",
+  "shapes",
+  "sprouts",
+  "thumbs",
+  "voxel-art",
+  "voxel-bot",
+] as const;
+export const DEFAULT_AVATAR_STYLE_ID = "pixelbot" as const satisfies (typeof AVATAR_STYLE_IDS)[number];
 
 
 const AvatarOptionValueDto = z.union([
@@ -69,13 +82,12 @@ export const BotDto = z.object({
   agentId: z.enum(AGENT_IDS),
   avatar: AvatarDto,
   pinned: z.boolean(),
-  archived: z.boolean(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
 export type BotDto = z.infer<typeof BotDto>;
 
-export const BotActivityStatusSchema = z.enum(["idle", "working", "waiting", "needs_you", "error", "unavailable"]);
+export const BotActivityStatusSchema = z.enum(["active", "inactive"]);
 export type BotActivityStatusDto = z.infer<typeof BotActivityStatusSchema>;
 
 /** Sidebar-facing Bot projection: identity + live activity + preview/unread. */
@@ -111,6 +123,13 @@ export const TurnDto = z.object({
   finishedAt: z.string().optional(),
   reason: z.string().optional(),
 });
+
+export const BotActivityEventPayload = z.object({
+  status: BotActivityStatusSchema,
+  threadId: z.string(),
+  turnId: z.string(),
+});
+export type BotActivityEventPayload = z.infer<typeof BotActivityEventPayload>;
 export type TurnDto = z.infer<typeof TurnDto>;
 
 export const ThreadDto = z.object({
@@ -121,6 +140,8 @@ export const ThreadDto = z.object({
   createdAt: z.string(),
   updatedAt: z.string(),
   activeTurn: TurnDto.optional(),
+  /** Most recently started Turn, retained after it becomes terminal. */
+  latestTurn: TurnDto.optional(),
 });
 export type ThreadDto = z.infer<typeof ThreadDto>;
 
@@ -203,17 +224,14 @@ export type PatchBotBodyDto = z.infer<typeof PatchBotBody>;
 export const PinBody = z.object({ pinned: z.boolean() });
 export type PinBodyDto = z.infer<typeof PinBody>;
 
-export const ArchiveBody = z.object({ confirmStop: z.boolean().optional() });
-export type ArchiveBodyDto = z.infer<typeof ArchiveBody>;
-
-export const DeleteBotBody = z.object({ confirmName: z.string() });
+export const DeleteBotBody = z.object({}).strict();
 export type DeleteBotBodyDto = z.infer<typeof DeleteBotBody>;
 
 export const DeleteBotFailureDto = z.object({
-  stage: z.enum(["native_session", "attachment", "avatar", "database"]),
+  stage: z.enum(["turn_cancellation", "terminal_wait", "attachment", "avatar", "database"]),
   resource: z.string(),
   message: z.string(),
-});
+}).strict();
 export type DeleteBotFailureDto = z.infer<typeof DeleteBotFailureDto>;
 
 export const DeleteBotResultDto = z.object({
@@ -226,14 +244,9 @@ export const DeleteBotResultDto = z.object({
     turns: z.number().int().nonnegative(),
     attachments: z.number().int().nonnegative(),
     avatar: z.boolean(),
-    nativeSessions: z.number().int().nonnegative(),
-  }),
-  nativeSessionCleanup: z.object({
-    supported: z.boolean(),
-    skipped: z.number().int().nonnegative(),
-  }),
+  }).strict(),
   failures: z.array(DeleteBotFailureDto),
-});
+}).strict();
 export type DeleteBotResultDto = z.infer<typeof DeleteBotResultDto>;
 
 export const AvatarRecipeBody = z.object({ prompt: z.string().trim().min(1).max(2000) });

@@ -4,7 +4,7 @@ import { HttpError } from "../modules/bots/bots.ts";
 
 const JSON_HEADERS = { "content-type": "application/json" };
 
-/** DELETE is intentionally separate from PATCH/archive: it is irreversible and returns a detailed cleanup result. */
+/** Irreversible Bot deletion returns the complete local cleanup result. */
 export async function handleBotDeletionRequest(
   req: Request,
   deletions: BotDeletionService,
@@ -18,7 +18,7 @@ export async function handleBotDeletionRequest(
   });
   const body = DeleteBotBody.safeParse(raw);
   if (!body.success) throw new HttpError(400, body.error.issues[0]?.message ?? "invalid body");
-  const result = await deletions.delete(match[1]!, body.data.confirmName);
+  const result = await deletions.delete(match[1]!);
   return new Response(JSON.stringify(result), {
     status: result.status === "deleted" ? 200 : 409,
     headers: JSON_HEADERS,
