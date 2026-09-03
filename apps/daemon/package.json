@@ -9,6 +9,7 @@
     "omarchy-bot-daemon": "./src/bootstrap/main.ts"
   },
   "scripts": {
+    "build": "bun native/pointer-helper/build.ts",
     "dev": "bun --watch src/bootstrap/main.ts",
     "start": "bun src/bootstrap/main.ts"
   },

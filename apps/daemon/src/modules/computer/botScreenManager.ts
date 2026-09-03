@@ -15,6 +15,11 @@ export interface BotScreenActionResult {
   windowList?: unknown;
 }
 
+export type BotScreenPointerEvent =
+  | { type: "motion"; x: number; y: number }
+  | { type: "button"; x: number; y: number; button: "left" | "middle" | "right"; state: "pressed" | "released" }
+  | { type: "scroll"; x: number; y: number; deltaX: number; deltaY: number };
+
 export interface BotScreenInputLease {
   surfaceId: SurfaceId;
   holder: { botId: string } | "human";
@@ -34,13 +39,23 @@ export interface BotScreenProvision {
 export interface BotScreenProjectionSource {
   surfaceId: SurfaceId;
   runtimeGeneration: number;
+  geometryGeneration: number;
+  logicalWidth: number;
+  logicalHeight: number;
+  videoWidth: number;
+  videoHeight: number;
+  scale: number;
   capture(): Promise<BotScreenCapture>;
+  pointer(event: BotScreenPointerEvent): Promise<void>;
+  releasePointer(): Promise<void>;
 }
 
 /** Internal platform seam. Runtime handles keep process and socket facts private. */
 export interface BotScreenRuntime {
   capture(): Promise<BotScreenCapture>;
   act(action: ComputerAction, lease?: BotScreenInputLease): Promise<BotScreenActionResult>;
+  pointer(event: BotScreenPointerEvent): Promise<void>;
+  releasePointer(): Promise<void>;
   /** Resolves only when the runtime exits; deliberate stops are ignored by the manager. */
   exited: Promise<Error>;
   stop(): Promise<void>;
@@ -67,6 +82,7 @@ interface SurfaceRow {
 
 interface RuntimeEntry {
   start: Promise<BotScreenRuntime>;
+  provision: BotScreenProvision;
   runtime?: BotScreenRuntime;
 }
 
@@ -113,6 +129,7 @@ export class BotScreenManager {
       refreshRate: row.refresh_rate,
     };
     const entryToStart: RuntimeEntry = {
+      provision,
       start: Promise.resolve().then(() => this.adapter.start(provision)),
     };
     this.#entries.set(owner.surfaceId, entryToStart);
@@ -157,21 +174,35 @@ export class BotScreenManager {
       const entry = this.#entries.get(owner.surfaceId);
       if (runtime === undefined || entry?.runtime !== runtime) return undefined;
       const generation = this.#row(owner.surfaceId).runtime_generation;
+      const geometryGeneration = 1;
+      const { logicalWidth, logicalHeight, scale } = entry.provision;
+      const currentRuntime = async (): Promise<BotScreenRuntime> => {
+        const row = this.#row(owner.surfaceId);
+        if (
+          row.lifecycle_state !== "ready"
+          || row.runtime_generation !== generation
+          || this.#entries.get(owner.surfaceId) !== entry
+          || entry.runtime !== runtime
+        ) {
+          throw new Error("Screen Projection source is stale");
+        }
+        return runtime;
+      };
       return {
         surfaceId: owner.surfaceId,
         runtimeGeneration: generation,
+        geometryGeneration,
+        logicalWidth,
+        logicalHeight,
+        videoWidth: Math.round(logicalWidth * scale),
+        videoHeight: Math.round(logicalHeight * scale),
+        scale,
         capture: () =>
-          this.#serialize(owner.surfaceId, async () => {
-            const row = this.#row(owner.surfaceId);
-            if (
-              row.lifecycle_state !== "ready"
-              || row.runtime_generation !== generation
-              || this.#entries.get(owner.surfaceId) !== entry
-            ) {
-              throw new Error("Screen Projection source is stale");
-            }
-            return runtime.capture();
-          }),
+          this.#serialize(owner.surfaceId, async () => (await currentRuntime()).capture()),
+        pointer: (event) =>
+          this.#serialize(owner.surfaceId, async () => (await currentRuntime()).pointer(event)),
+        releasePointer: () =>
+          this.#serialize(owner.surfaceId, async () => (await currentRuntime()).releasePointer()),
       };
     });
   }

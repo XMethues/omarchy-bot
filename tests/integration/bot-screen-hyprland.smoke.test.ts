@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { existsSync, statSync } from "node:fs";
+import { existsSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { SurfaceId } from "../../packages/domain/src/ids.ts";
 import { api, makeBot, startDaemon, type Harness } from "./helpers/harness.ts";
@@ -28,6 +28,24 @@ async function hostClientAddresses(): Promise<string[]> {
 
 function sha256(bytes: Uint8Array): string {
   return new Bun.CryptoHasher("sha256").update(bytes).digest("hex");
+}
+
+async function differingPixels(first: Uint8Array, second: Uint8Array, directory: string): Promise<number> {
+  const firstPath = path.join(directory, "pointer-isolation-before.png");
+  const secondPath = path.join(directory, "pointer-isolation-after.png");
+  writeFileSync(firstPath, first);
+  writeFileSync(secondPath, second);
+  const comparison = Bun.spawn(["compare", "-metric", "AE", firstPath, secondPath, "null:"], {
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [status, metric] = await Promise.all([
+    comparison.exited,
+    new Response(comparison.stderr).text(),
+  ]);
+  if (status !== 0 && status !== 1) throw new Error(`ImageMagick comparison failed with status ${status}`);
+  return Number(metric.trim().split(/\s+/, 1)[0]);
 }
 
 async function waitUntilReady(harness: Harness, botId: string, surfaceId: string): Promise<void> {
@@ -109,6 +127,27 @@ platformTest("two real nested Hyprland Screens act and capture concurrently with
     expect(sha256(previews[0]!)).not.toBe(sha256(previews[1]!));
     const hostCapture = await runBytes(["grim", "-"]);
     expect(previews.every((preview) => sha256(preview) !== sha256(hostCapture))).toBeTrue();
+
+    const hostPointerBefore = await run(["hyprctl", "-j", "cursorpos"]);
+    const sources = await Promise.all(owners.map((owner) => harness.svc.screens.projectionSource(owner)));
+    expect(sources.every((source) => source !== undefined)).toBeTrue();
+    const firstSource = sources[0]!;
+    const secondSource = sources[1]!;
+    const secondBeforePointer = (await secondSource.capture()).bytes;
+
+    await firstSource.pointer({ type: "motion", x: 100, y: 120 });
+    await firstSource.pointer({ type: "button", x: 100, y: 120, button: "left", state: "pressed" });
+    await firstSource.pointer({ type: "button", x: 100, y: 120, button: "left", state: "released" });
+    await firstSource.pointer({ type: "button", x: 80, y: 100, button: "left", state: "pressed" });
+    await firstSource.pointer({ type: "motion", x: 600, y: 180 });
+    await firstSource.pointer({ type: "button", x: 600, y: 180, button: "left", state: "released" });
+    await firstSource.pointer({ type: "scroll", x: 600, y: 180, deltaX: 0, deltaY: -720 });
+    const secondAfterFirstInput = (await secondSource.capture()).bytes;
+    expect(await differingPixels(secondBeforePointer, secondAfterFirstInput, harness.home)).toBeLessThan(10_000);
+    await secondSource.pointer({ type: "motion", x: 700, y: 400 });
+    await Promise.all([firstSource.releasePointer(), secondSource.releasePointer()]);
+
+    expect(await run(["hyprctl", "-j", "cursorpos"])).toBe(hostPointerBefore);
 
     for (const [index, owner] of owners.entries()) {
       harness.svc.computer.release(owner, leases[index]!.token!);

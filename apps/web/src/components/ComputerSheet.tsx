@@ -1,4 +1,10 @@
-import type { JSX, RefObject } from "react";
+import type {
+  JSX,
+  MouseEvent as ReactMouseEvent,
+  PointerEvent as ReactPointerEvent,
+  RefObject,
+  WheelEvent as ReactWheelEvent,
+} from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import * as stylex from "@stylexjs/stylex";
 import { Maximize2 } from "lucide-react";
@@ -230,6 +236,8 @@ export function ComputerSheet({
   const [projectionAttempt, setProjectionAttempt] = useState(0);
   const connectionRef = useRef<ScreenProjectionConnection | undefined>(undefined);
   const frameUrlRef = useRef<string | undefined>(undefined);
+  const expandedRef = useRef<HTMLDialogElement | null>(null);
+  const pressedPointersRef = useRef(new Map<number, number>());
 
   const replaceFrame = useCallback((frame: Blob | undefined): void => {
     if (frameUrlRef.current !== undefined) URL.revokeObjectURL(frameUrlRef.current);
@@ -268,6 +276,7 @@ export function ComputerSheet({
 
   useEffect(() => {
     if (isSmallScreen && previewExpanded) setPreviewExpanded(false);
+    if (!previewExpanded || isSmallScreen) pressedPointersRef.current.clear();
     connectionRef.current?.setMode(previewExpanded && !isSmallScreen ? "expanded" : "preview");
   }, [isSmallScreen, previewExpanded]);
 
@@ -280,6 +289,47 @@ export function ComputerSheet({
     return () => window.removeEventListener("keydown", onKeyDown, true);
   }, [closePanel, isSmallScreen, open, previewExpanded]);
 
+  const sendExpandedMotion = (event: ReactPointerEvent<HTMLDialogElement>): void => {
+    const image = event.currentTarget.querySelector("img");
+    const overControl = event.target instanceof Element && event.target.closest("button") !== null;
+    if (image === null || (overControl && !pressedPointersRef.current.has(event.pointerId))) return;
+    connectionRef.current?.pointerMotion(
+      event.clientX,
+      event.clientY,
+      image,
+      pressedPointersRef.current.has(event.pointerId),
+    );
+  };
+  const pressExpandedPointer = (event: ReactPointerEvent<HTMLDialogElement>): void => {
+    if (event.target instanceof Element && event.target.closest("button") !== null) return;
+    const image = event.currentTarget.querySelector("img");
+    if (image === null || event.button < 0 || event.button > 2) return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    pressedPointersRef.current.set(event.pointerId, event.button);
+    connectionRef.current?.pointerButton(event.clientX, event.clientY, image, event.button, "pressed");
+  };
+  const releaseExpandedPointer = (event: ReactPointerEvent<HTMLDialogElement>): void => {
+    const button = pressedPointersRef.current.get(event.pointerId);
+    const image = event.currentTarget.querySelector("img");
+    if (button === undefined || image === null) return;
+    event.preventDefault();
+    pressedPointersRef.current.delete(event.pointerId);
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    connectionRef.current?.pointerButton(event.clientX, event.clientY, image, button, "released");
+  };
+  const scrollExpandedPointer = (event: ReactWheelEvent<HTMLDialogElement>): void => {
+    if (event.target instanceof Element && event.target.closest("button") !== null) return;
+    const image = event.currentTarget.querySelector("img");
+    if (image === null) return;
+    event.preventDefault();
+    connectionRef.current?.pointerScroll(event.clientX, event.clientY, image, event.deltaX, event.deltaY);
+  };
+  const suppressExpandedMenu = (event: ReactMouseEvent<HTMLDialogElement>): void => {
+    if (!(event.target instanceof Element) || event.target.closest("button") === null) event.preventDefault();
+  };
   const content = (
     <ComputerSheetContent
       {...contentProps}
@@ -295,14 +345,25 @@ export function ComputerSheet({
   );
   const lightbox = frameUrl === undefined ? null : (
     <Lightbox
+      ref={expandedRef}
       isOpen={!isSmallScreen && previewExpanded}
       onOpenChange={setPreviewExpanded}
       media={{
         src: frameUrl,
         alt: `Expanded computer preview for ${bot.name}`,
-        caption: `${bot.name} computer — read-only Screen Projection`,
+        caption: `${bot.name} computer — pointer Web Control`,
       }}
-      hasZoom
+      {...(previewExpanded
+        ? {
+            onPointerMove: sendExpandedMotion,
+            onPointerDown: pressExpandedPointer,
+            onPointerUp: releaseExpandedPointer,
+            onPointerCancel: releaseExpandedPointer,
+            onWheel: scrollExpandedPointer,
+            onContextMenu: suppressExpandedMenu,
+            "data-testid": "expanded-web-control",
+          }
+        : {})}
     />
   );
 

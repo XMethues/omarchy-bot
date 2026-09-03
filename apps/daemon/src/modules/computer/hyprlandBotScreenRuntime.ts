@@ -11,10 +11,12 @@ import {
 import path from "node:path";
 import type { ComputerAction } from "@omarchy-bot/domain";
 import type { SurfaceComputerWorker, Supervisor } from "../../supervision/supervisor.ts";
+import { ensurePointerHelper } from "../../../native/pointer-helper/build.ts";
 import type {
   BotScreenActionResult,
   BotScreenCapture,
   BotScreenInputLease,
+  BotScreenPointerEvent,
   BotScreenProvision,
   BotScreenRuntime,
   BotScreenRuntimeAdapter,
@@ -28,6 +30,7 @@ interface HyprlandAdapterOptions {
   hyprlandBin?: string;
   hyprctlBin?: string;
   grimBin?: string;
+  pointerHelperBin?: string;
   applicationBin?: string;
   computerWorkers: Pick<Supervisor, "startComputerWorker">;
 }
@@ -39,6 +42,7 @@ interface CommandResult {
 }
 
 type ScreenProcess = Bun.Subprocess<"ignore", "ignore", "ignore">;
+type PointerProcess = Bun.Subprocess<"pipe", "pipe", "pipe">;
 
 function executable(name: string | undefined, fallback: string): string | undefined {
   const candidate = name ?? fallback;
@@ -74,6 +78,125 @@ async function terminate(child: ScreenProcess): Promise<void> {
   if (stopped) return;
   signalProcessTree(child, "SIGKILL");
   await child.exited;
+}
+
+class WlrVirtualPointerInput {
+  readonly exited: Promise<Error>;
+  #reader: ReadableStreamDefaultReader<Uint8Array>;
+  #decoder = new TextDecoder();
+  #buffer = "";
+  #sequence = 0;
+  #operations: Promise<void> = Promise.resolve();
+  #stopped = false;
+
+  private constructor(
+    private readonly process: PointerProcess,
+    private readonly logicalWidth: number,
+    private readonly logicalHeight: number,
+  ) {
+    this.#reader = process.stdout.getReader();
+    this.exited = process.exited.then((status) => new Error(`Bot Screen pointer helper exited with status ${status}`));
+  }
+
+  static async start(
+    binary: string,
+    outputName: string,
+    env: Record<string, string>,
+    logicalWidth: number,
+    logicalHeight: number,
+  ): Promise<WlrVirtualPointerInput> {
+    const process = Bun.spawn([binary, outputName], {
+      env,
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const input = new WlrVirtualPointerInput(process, logicalWidth, logicalHeight);
+    const ready = await Promise.race([
+      input.#readLine(),
+      process.exited.then(async (status) => {
+        const stderr = await new Response(process.stderr).text();
+        throw new Error(
+          `Bot Screen pointer helper exited with status ${status}${stderr.trim() === "" ? "" : `: ${stderr.trim()}`}`,
+        );
+      }),
+      Bun.sleep(5_000).then(() => {
+        throw new Error("Bot Screen pointer helper did not become ready");
+      }),
+    ]);
+    if (ready !== "READY") {
+      process.kill("SIGTERM");
+      throw new Error("Bot Screen pointer helper returned an invalid readiness response");
+    }
+    return input;
+  }
+
+  pointer(event: BotScreenPointerEvent): Promise<void> {
+    if (event.type === "motion") {
+      return this.#command(
+        `motion ${++this.#sequence} ${event.x} ${event.y} ${this.logicalWidth} ${this.logicalHeight}`,
+        this.#sequence,
+      );
+    }
+    const motionSequence = ++this.#sequence;
+    const motion = this.#command(
+      `motion ${motionSequence} ${event.x} ${event.y} ${this.logicalWidth} ${this.logicalHeight}`,
+      motionSequence,
+    );
+    const eventSequence = ++this.#sequence;
+    const transition = event.type === "button"
+      ? `button ${eventSequence} ${event.button === "left" ? 272 : event.button === "right" ? 273 : 274} ${
+        event.state === "pressed" ? 1 : 0
+      }`
+      : `scroll ${eventSequence} ${event.deltaX} ${event.deltaY}`;
+    return motion.then(() => this.#command(transition, eventSequence));
+  }
+
+  release(): Promise<void> {
+    const sequence = ++this.#sequence;
+    return this.#command(`release ${sequence}`, sequence);
+  }
+
+  async stop(): Promise<void> {
+    if (this.#stopped) return;
+    await this.release().catch(() => {});
+    this.#stopped = true;
+    this.process.stdin.end();
+    const exited = await Promise.race([
+      this.process.exited.then(() => true),
+      Bun.sleep(1_000).then(() => false),
+    ]);
+    if (!exited) {
+      this.process.kill("SIGTERM");
+      await this.process.exited;
+    }
+  }
+
+  #command(line: string, sequence: number): Promise<void> {
+    const operation = this.#operations.then(async () => {
+      if (this.#stopped || this.process.exitCode !== null) throw new Error("Bot Screen pointer helper is not running");
+      this.process.stdin.write(`${line}\n`);
+      await this.process.stdin.flush();
+      const response = await this.#readLine();
+      if (response !== `OK ${sequence}`) throw new Error("Bot Screen pointer helper rejected an input event");
+    });
+    this.#operations = operation.catch(() => {});
+    return operation;
+  }
+
+  async #readLine(): Promise<string> {
+    for (;;) {
+      const newline = this.#buffer.indexOf("\n");
+      if (newline >= 0) {
+        const line = this.#buffer.slice(0, newline);
+        this.#buffer = this.#buffer.slice(newline + 1);
+        return line;
+      }
+      const chunk = await this.#reader.read();
+      if (chunk.done) throw new Error("Bot Screen pointer helper closed its protocol stream");
+      this.#buffer += this.#decoder.decode(chunk.value, { stream: true });
+    }
+  }
 }
 
 function explicitEnvironment(input: {
@@ -190,6 +313,7 @@ export class HyprlandBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter 
 
     let applicationProcess: ScreenProcess | undefined;
     let computerWorker: SurfaceComputerWorker | undefined;
+    let pointerInput: WlrVirtualPointerInput | undefined;
     try {
       const ready = await this.#discover(socketRuntimeDir, compositor);
       const childEnv = explicitEnvironment({
@@ -201,11 +325,13 @@ export class HyprlandBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter 
         instanceSignature: ready.instanceSignature,
       });
       const outputName = `BOT-${provision.surfaceId.slice(-12).toUpperCase()}`;
+      const videoWidth = Math.round(provision.logicalWidth * provision.scale);
+      const videoHeight = Math.round(provision.logicalHeight * provision.scale);
       await this.#hyprctl(hyprctl, childEnv, ["output", "create", "headless", outputName]);
       await this.#hyprctl(hyprctl, childEnv, [
         "keyword",
         "monitor",
-        `${outputName},${provision.logicalWidth}x${provision.logicalHeight}@${provision.refreshRate},0x0,${provision.scale}`,
+        `${outputName},${videoWidth}x${videoHeight}@${provision.refreshRate},0x0,${provision.scale}`,
       ]);
 
       const monitors = await this.#monitors(hyprctl, childEnv);
@@ -215,6 +341,18 @@ export class HyprlandBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter 
         }
       }
       await this.#waitForHeadlessOutput(hyprctl, childEnv, outputName);
+      const pointerHelper = this.options.pointerHelperBin === undefined
+        ? await ensurePointerHelper()
+        : executable(this.options.pointerHelperBin, this.options.pointerHelperBin);
+      if (pointerHelper === undefined) throw new Error("the Bot Screen pointer helper is unavailable");
+      const startedPointerInput = await WlrVirtualPointerInput.start(
+        pointerHelper,
+        outputName,
+        childEnv,
+        provision.logicalWidth,
+        provision.logicalHeight,
+      );
+      pointerInput = startedPointerInput;
 
       applicationProcess = Bun.spawn([application], {
         env: childEnv,
@@ -234,6 +372,7 @@ export class HyprlandBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter 
         compositor.exited.then((status) => new Error(`nested Hyprland exited with status ${status}`)),
         applicationProcess.exited.then((status) => new Error(`Bot Screen application exited with status ${status}`)),
         startedComputerWorker.exited,
+        startedPointerInput.exited,
       ]);
 
       let stopped = false;
@@ -278,10 +417,13 @@ export class HyprlandBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter 
       return {
         capture,
         act,
+        pointer: (event) => startedPointerInput.pointer(event),
+        releasePointer: () => startedPointerInput.release(),
         exited,
         stop: async () => {
           if (stopped) return;
           stopped = true;
+          await startedPointerInput.stop().catch(() => {});
           await Promise.allSettled([
             startedComputerWorker.stop(),
             ...(applicationProcess === undefined ? [] : [terminate(applicationProcess)]),
@@ -293,6 +435,7 @@ export class HyprlandBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter 
       };
     } catch (error) {
       await computerWorker?.stop().catch(() => {});
+      await pointerInput?.stop().catch(() => {});
       await Promise.allSettled([
         ...(applicationProcess === undefined ? [] : [terminate(applicationProcess)]),
         terminate(compositor),

@@ -6,13 +6,19 @@ import {
   SCREEN_FRAME_CHANNEL,
   SCREEN_INPUT_CHANNEL,
   SCREEN_PROJECTION_PROTOCOL_VERSION,
+  ScreenPointerInputMessageDto,
   ScreenProjectionControlMessageDto,
+  type ScreenPointerAuthorityMessageDto,
   type ScreenProjectionAnswerDto,
   type ScreenProjectionModeDto,
   type ScreenProjectionOfferDto,
 } from "@omarchy-bot/protocol";
 import type { ComputerSurfaceOwner } from "./broker.ts";
-import type { BotScreenManager, BotScreenProjectionSource } from "./botScreenManager.ts";
+import type {
+  BotScreenManager,
+  BotScreenPointerEvent,
+  BotScreenProjectionSource,
+} from "./botScreenManager.ts";
 
 const PREVIEW_INTERVAL_MS = 1_000;
 const EXPANDED_INTERVAL_MS = 200;
@@ -50,6 +56,15 @@ interface ProjectionSession {
   captureInFlight: boolean;
 }
 
+interface PointerController {
+  session: ProjectionSession;
+  epoch: number;
+  nextSequence: number;
+  queue: BotScreenPointerEvent[];
+  draining: boolean;
+  revoked: boolean;
+}
+
 
 function timeout<T>(message: string): { promise: Promise<T>; resolve: (value: T) => void; reject: (error: Error) => void } {
   let resolvePromise!: (value: T) => void;
@@ -68,11 +83,14 @@ function timeout<T>(message: string): { promise: Promise<T>; resolve: (value: T)
 }
 
 /**
- * Owns every WebRTC peer and capture pump. HTTP routes only exchange SDP, while
- * runtime handles, capture cadence, protocol framing, and backpressure stay here.
+ * Owns WebRTC peers, capture pumps, and validated pointer controllers. HTTP
+ * routes exchange SDP while runtime handles, geometry, authority, ordering,
+ * protocol framing, coalescing, and backpressure stay here.
  */
 export class ScreenProjectionService {
   #sessions = new Map<string, ProjectionSession>();
+  #controllers = new Map<SurfaceId, PointerController>();
+  #controllerEpochs = new Map<SurfaceId, number>();
 
   constructor(private readonly screens: BotScreenManager) {}
 
@@ -125,6 +143,12 @@ export class ScreenProjectionService {
         sessionId: id,
         surfaceId: source.surfaceId,
         runtimeGeneration: source.runtimeGeneration,
+        geometryGeneration: source.geometryGeneration,
+        logicalWidth: source.logicalWidth,
+        logicalHeight: source.logicalHeight,
+        videoWidth: source.videoWidth,
+        videoHeight: source.videoHeight,
+        scale: source.scale,
         state: "connecting",
         transport: "webrtc-data-channel-frames-v1",
         channels: {
@@ -186,14 +210,16 @@ export class ScreenProjectionService {
       session.control = channel;
       channel.onMessage((raw) => this.#control(session, raw));
     } else if (label === SCREEN_INPUT_CHANNEL) {
-      // Deliberately retained as an inert, named seam. Tickets 05–06 own input semantics.
       session.input = channel;
+      channel.onMessage((raw) => this.#input(session, raw));
     } else {
       channel.close();
       return;
     }
     channel.onOpen(() => {
-      if (this.#sessions.get(session.id) === session && session.state === "connecting") session.state = "idle";
+      if (this.#sessions.get(session.id) !== session) return;
+      if (session.state === "connecting") session.state = "idle";
+      if (label === SCREEN_INPUT_CHANNEL && session.mode === "expanded") this.#claimPointer(session);
     });
     channel.onClosed(() => this.#close(session, false));
     channel.onError(() => this.#close(session, true));
@@ -220,8 +246,11 @@ export class ScreenProjectionService {
   #setMode(session: ProjectionSession, mode: ProjectionViewMode): void {
     if (session.timer !== undefined) clearTimeout(session.timer);
     session.timer = undefined;
+    if (session.mode === "expanded" && mode !== "expanded") this.#revokePointerFor(session);
+    const changed = session.mode !== mode;
     session.mode = mode;
     session.state = mode;
+    if (mode === "expanded" && (changed || !this.#isPointerController(session))) this.#claimPointer(session);
     if (mode !== "idle") this.#schedule(session, 0);
   }
 
@@ -255,6 +284,12 @@ export class ScreenProjectionService {
         type: "frame",
         surfaceId: session.source.surfaceId,
         runtimeGeneration: session.source.runtimeGeneration,
+        geometryGeneration: session.source.geometryGeneration,
+        logicalWidth: session.source.logicalWidth,
+        logicalHeight: session.source.logicalHeight,
+        videoWidth: session.source.videoWidth,
+        videoHeight: session.source.videoHeight,
+        scale: session.source.scale,
         sequence: ++session.sequence,
         mediaType: capture.mediaType,
         capturedAt: new Date().toISOString(),
@@ -281,8 +316,154 @@ export class ScreenProjectionService {
     this.#schedule(session, delay);
   }
 
+
+  #input(session: ProjectionSession, raw: string | Buffer | ArrayBuffer): void {
+    const controller = this.#controllers.get(session.source.surfaceId);
+    if (controller?.session !== session || controller.revoked || session.mode !== "expanded") return;
+    if (typeof raw !== "string") {
+      this.#close(session, true);
+      return;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      this.#close(session, true);
+      return;
+    }
+    const message = ScreenPointerInputMessageDto.safeParse(parsed);
+    if (
+      !message.success
+      || message.data.surfaceId !== session.source.surfaceId
+      || message.data.runtimeGeneration !== session.source.runtimeGeneration
+      || message.data.geometryGeneration !== session.source.geometryGeneration
+      || message.data.controllerEpoch !== controller.epoch
+      || message.data.sequence !== controller.nextSequence
+      || message.data.x >= session.source.logicalWidth
+      || message.data.y >= session.source.logicalHeight
+      || (message.data.type === "pointer-scroll" && message.data.deltaX === 0 && message.data.deltaY === 0)
+    ) {
+      this.#close(session, true);
+      return;
+    }
+    controller.nextSequence += 1;
+    const event: BotScreenPointerEvent = message.data.type === "pointer-motion"
+      ? { type: "motion", x: message.data.x, y: message.data.y }
+      : message.data.type === "pointer-button"
+        ? {
+            type: "button",
+            x: message.data.x,
+            y: message.data.y,
+            button: message.data.button,
+            state: message.data.state,
+          }
+        : {
+            type: "scroll",
+            x: message.data.x,
+            y: message.data.y,
+            deltaX: message.data.deltaX,
+            deltaY: message.data.deltaY,
+          };
+    const last = controller.queue.at(-1);
+    if (event.type === "motion" && last?.type === "motion") controller.queue[controller.queue.length - 1] = event;
+    else controller.queue.push(event);
+    if (!controller.draining) {
+      controller.draining = true;
+      queueMicrotask(() => void this.#drainPointer(controller));
+    }
+  }
+
+  async #drainPointer(controller: PointerController): Promise<void> {
+    try {
+      while (
+        !controller.revoked
+        && this.#controllers.get(controller.session.source.surfaceId) === controller
+      ) {
+        const event = controller.queue.shift();
+        if (event === undefined) return;
+        await controller.session.source.pointer(event);
+      }
+    } catch {
+      this.#close(controller.session, true);
+    } finally {
+      controller.draining = false;
+      if (!controller.revoked && controller.queue.length > 0) {
+        controller.draining = true;
+        queueMicrotask(() => void this.#drainPointer(controller));
+      }
+    }
+  }
+
+  #claimPointer(session: ProjectionSession): void {
+    if (
+      this.#sessions.get(session.id) !== session
+      || session.mode !== "expanded"
+      || session.input === undefined
+      || !session.input.isOpen()
+      || this.#isPointerController(session)
+    ) return;
+    const previous = this.#controllers.get(session.source.surfaceId);
+    if (previous !== undefined && previous.session !== session) this.#close(previous.session, false);
+    const epoch = (this.#controllerEpochs.get(session.source.surfaceId) ?? 0) + 1;
+    this.#controllerEpochs.set(session.source.surfaceId, epoch);
+    const controller: PointerController = {
+      session,
+      epoch,
+      nextSequence: 1,
+      queue: [],
+      draining: false,
+      revoked: false,
+    };
+    this.#controllers.set(session.source.surfaceId, controller);
+    this.#sendPointerAuthority(controller, true);
+  }
+
+  #isPointerController(session: ProjectionSession): boolean {
+    return this.#controllers.get(session.source.surfaceId)?.session === session;
+  }
+
+  #revokePointerFor(session: ProjectionSession): void {
+    const controller = this.#controllers.get(session.source.surfaceId);
+    if (controller?.session === session) this.#revokePointer(controller);
+  }
+
+  #revokePointer(controller: PointerController): void {
+    if (controller.revoked) return;
+    controller.revoked = true;
+    controller.queue.length = 0;
+    if (this.#controllers.get(controller.session.source.surfaceId) === controller) {
+      this.#controllers.delete(controller.session.source.surfaceId);
+    }
+    this.#sendPointerAuthority(controller, false);
+    void controller.session.source.releasePointer().catch(() => {});
+  }
+
+  #sendPointerAuthority(controller: PointerController, active: boolean): void {
+    const { input, source } = controller.session;
+    if (input === undefined || !input.isOpen()) return;
+    const message: ScreenPointerAuthorityMessageDto = {
+      version: SCREEN_PROJECTION_PROTOCOL_VERSION,
+      type: "pointer-authority",
+      active,
+      surfaceId: source.surfaceId,
+      runtimeGeneration: source.runtimeGeneration,
+      geometryGeneration: source.geometryGeneration,
+      controllerEpoch: controller.epoch,
+      logicalWidth: source.logicalWidth,
+      logicalHeight: source.logicalHeight,
+      videoWidth: source.videoWidth,
+      videoHeight: source.videoHeight,
+      scale: source.scale,
+    };
+    try {
+      input.sendMessage(JSON.stringify(message));
+    } catch {
+      // Revocation may race the native data channel closing.
+    }
+  }
   #close(session: ProjectionSession, failed: boolean): void {
     if (this.#sessions.get(session.id) !== session) return;
+    this.#revokePointerFor(session);
     this.#sessions.delete(session.id);
     if (session.timer !== undefined) clearTimeout(session.timer);
     session.timer = undefined;

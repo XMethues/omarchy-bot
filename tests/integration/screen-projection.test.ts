@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import rtc, { type DataChannel, type PeerConnection } from "node-datachannel";
 import type { ComputerSurfaceOwner } from "../../apps/daemon/src/modules/computer/broker.ts";
+import { FakeBotScreenRuntimeAdapter } from "../../apps/daemon/src/modules/computer/fakeBotScreenRuntime.ts";
 import { api, makeBot, startDaemon, type Harness } from "./helpers/harness.ts";
 
 const EXPECTED_PNG_BASE64 =
@@ -12,6 +13,12 @@ interface ProjectionAnswer {
   sessionId: string;
   surfaceId: string;
   runtimeGeneration: number;
+  geometryGeneration: number;
+  logicalWidth: number;
+  logicalHeight: number;
+  videoWidth: number;
+  videoHeight: number;
+  scale: number;
   security: {
     authentication: "none";
     httpsRequired: false;
@@ -66,6 +73,62 @@ function openChannel(channel: DataChannel): Promise<DataChannel> {
   });
 }
 
+
+async function connectProjection(
+  h: Harness,
+  owner: ComputerSurfaceOwner,
+  name: string,
+): Promise<{
+  peer: PeerConnection;
+  control: DataChannel;
+  input: DataChannel;
+  answer: ProjectionAnswer;
+}> {
+  const peer = new rtc.PeerConnection(name, { iceServers: [] });
+  const gathered = waitFor<void>((resolve) => {
+    peer.onGatheringStateChange((state) => {
+      if (state === "complete") resolve();
+    });
+  });
+  const described = waitFor<void>((resolve) => peer.onLocalDescription(() => resolve()));
+  peer.createDataChannel("screen.frames.v1", { unordered: false });
+  const control = peer.createDataChannel("screen.control.v1", { unordered: false });
+  const input = peer.createDataChannel("screen.input.v1", { unordered: false });
+  peer.setLocalDescription("offer");
+  await described;
+  await gathered;
+  const offer = peer.localDescription();
+  if (offer === null) throw new Error("WebRTC offer was not created");
+  const response = await fetch(
+    `${h.baseUrl}/api/computer/projection?botId=${encodeURIComponent(owner.botId)}&surfaceId=${encodeURIComponent(owner.surfaceId)}`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ type: "offer", sdp: offer.sdp }),
+    },
+  );
+  expect(response.status).toBe(201);
+  const answer = await response.json() as ProjectionAnswer;
+  peer.setRemoteDescription(answer.sdp, "answer");
+  for (const candidate of answer.candidates) peer.addRemoteCandidate(candidate.candidate, candidate.sdpMid);
+  await Promise.all([openChannel(control), openChannel(input)]);
+  return { peer, control, input, answer };
+}
+
+function authority(input: DataChannel): Promise<{
+  surfaceId: string;
+  runtimeGeneration: number;
+  geometryGeneration: number;
+  controllerEpoch: number;
+}> {
+  return waitFor((resolve) => {
+    input.onMessage((raw) => {
+      if (typeof raw !== "string") return;
+      const message = JSON.parse(raw) as { type?: string };
+      if (message.type === "pointer-authority") resolve(message as never);
+    });
+  });
+}
 describe("WebRTC Screen Projection signaling", () => {
   let h: Harness;
   let peer: PeerConnection | undefined;
@@ -114,6 +177,12 @@ describe("WebRTC Screen Projection signaling", () => {
       type: "answer",
       surfaceId: owner.surfaceId,
       runtimeGeneration: 1,
+      geometryGeneration: 1,
+      logicalWidth: 1920,
+      logicalHeight: 1080,
+      videoWidth: 1920,
+      videoHeight: 1080,
+      scale: 1,
       security: { authentication: "none", httpsRequired: false },
     });
     expect(answer.sdp).toContain("a=fingerprint:");
@@ -159,6 +228,12 @@ describe("WebRTC Screen Projection signaling", () => {
       type: "frame",
       surfaceId: owner.surfaceId,
       runtimeGeneration: 1,
+      geometryGeneration: 1,
+      logicalWidth: 1920,
+      logicalHeight: 1080,
+      videoWidth: 1920,
+      videoHeight: 1080,
+      scale: 1,
       sequence: 1,
       mediaType: "image/png",
       mode: "preview",
@@ -186,4 +261,232 @@ describe("WebRTC Screen Projection signaling", () => {
 
     expect(response.status).toBe(404);
   }, 15_000);
+});
+
+describe("expanded pointer Web Control", () => {
+  let h: Harness;
+  const peers: PeerConnection[] = [];
+
+  afterEach(async () => {
+    for (const connectedPeer of peers) connectedPeer.close();
+    await h.stop();
+  });
+
+  test("binds ordered pointer input to the current Surface, runtime, geometry, controller, and sequence", async () => {
+    const runtime = new FakeBotScreenRuntimeAdapter(undefined, { pointerDelayMs: 20 });
+    h = await startDaemon(undefined, { botScreenAdapter: runtime });
+    const owner = await ownerFor(h, await makeBot(h, "Pointer controlled screen"));
+    const first = await connectProjection(h, owner, "pointer-browser-one");
+    peers.push(first.peer);
+    const firstAuthority = authority(first.input);
+    first.control.sendMessage(JSON.stringify({
+      version: 1,
+      type: "view",
+      surfaceId: owner.surfaceId,
+      runtimeGeneration: 1,
+      mode: "expanded",
+    }));
+    const firstGrant = await firstAuthority;
+    expect(firstGrant).toMatchObject({
+      surfaceId: owner.surfaceId,
+      runtimeGeneration: 1,
+      geometryGeneration: 1,
+    });
+
+    const envelope = {
+      version: 1,
+      surfaceId: owner.surfaceId,
+      runtimeGeneration: 1,
+      geometryGeneration: 1,
+      controllerEpoch: firstGrant.controllerEpoch,
+    };
+    for (let sequence = 1; sequence <= 80; sequence += 1) {
+      first.input.sendMessage(JSON.stringify({
+        ...envelope,
+        type: "pointer-motion",
+        sequence,
+        x: sequence,
+        y: sequence * 2,
+      }));
+    }
+    first.input.sendMessage(JSON.stringify({
+      ...envelope,
+      type: "pointer-button",
+      sequence: 81,
+      x: 80,
+      y: 160,
+      button: "left",
+      state: "pressed",
+    }));
+    first.input.sendMessage(JSON.stringify({
+      ...envelope,
+      type: "pointer-motion",
+      sequence: 82,
+      x: 400,
+      y: 300,
+    }));
+    first.input.sendMessage(JSON.stringify({
+      ...envelope,
+      type: "pointer-button",
+      sequence: 83,
+      x: 400,
+      y: 300,
+      button: "left",
+      state: "released",
+    }));
+    first.input.sendMessage(JSON.stringify({
+      ...envelope,
+      type: "pointer-scroll",
+      sequence: 84,
+      x: 400,
+      y: 300,
+      deltaX: -2,
+      deltaY: 12,
+    }));
+
+    await runtime.waitForPointerEvent(({ event }) => event.type === "scroll");
+    const firstBatch = runtime.pointerEvents.map(({ event }) => event);
+    const motions = firstBatch.filter((event) => event.type === "motion");
+    expect(motions.length).toBeLessThan(80);
+    expect(motions.at(-2)).toEqual({ type: "motion", x: 80, y: 160 });
+    expect(motions.at(-1)).toEqual({ type: "motion", x: 400, y: 300 });
+    expect(firstBatch.filter((event) => event.type !== "motion")).toEqual([
+      { type: "button", x: 80, y: 160, button: "left", state: "pressed" },
+      { type: "button", x: 400, y: 300, button: "left", state: "released" },
+      { type: "scroll", x: 400, y: 300, deltaX: -2, deltaY: 12 },
+    ]);
+    const second = await connectProjection(h, owner, "pointer-browser-two");
+    peers.push(second.peer);
+    const secondAuthority = authority(second.input);
+    second.control.sendMessage(JSON.stringify({
+      version: 1,
+      type: "view",
+      surfaceId: owner.surfaceId,
+      runtimeGeneration: 1,
+      mode: "expanded",
+    }));
+    const secondGrant = await secondAuthority;
+    expect(secondGrant.controllerEpoch).toBeGreaterThan(firstGrant.controllerEpoch);
+    try {
+      first.input.sendMessage(JSON.stringify({ ...envelope, type: "pointer-motion", sequence: 85, x: 900, y: 700 }));
+    } catch {
+      // Replacement may already have closed the stale controller channel.
+    }
+    second.input.sendMessage(JSON.stringify({
+      ...envelope,
+      controllerEpoch: secondGrant.controllerEpoch,
+      type: "pointer-motion",
+      sequence: 1,
+      x: 100,
+      y: 120,
+    }));
+    await runtime.waitForPointerEvents(firstBatch.length + 1);
+    expect(runtime.pointerEvents.at(-1)?.event).toEqual({ type: "motion", x: 100, y: 120 });
+
+    second.input.sendMessage(JSON.stringify({
+      ...envelope,
+      controllerEpoch: secondGrant.controllerEpoch,
+      geometryGeneration: 2,
+      type: "pointer-motion",
+      sequence: 2,
+      x: 200,
+      y: 220,
+    }));
+    second.input.sendMessage(JSON.stringify({
+      ...envelope,
+      controllerEpoch: secondGrant.controllerEpoch,
+      type: "pointer-motion",
+      sequence: 3,
+      x: 300,
+      y: 320,
+    }));
+    await runtime.waitForReleases(2);
+    expect(runtime.pointerEvents).toHaveLength(firstBatch.length + 1);
+  }, 20_000);
+
+  test("fails closed on missing, stale, mismatched, duplicated, or out-of-order fields", async () => {
+    const runtime = new FakeBotScreenRuntimeAdapter();
+    h = await startDaemon(undefined, { botScreenAdapter: runtime });
+    const owner = await ownerFor(h, await makeBot(h, "Validated pointer screen"));
+    const other = await ownerFor(h, await makeBot(h, "Other pointer screen"));
+    let releaseCount = 0;
+
+    const grant = async (name: string): Promise<{ input: DataChannel; epoch: number }> => {
+      const projection = await connectProjection(h, owner, name);
+      peers.push(projection.peer);
+      const granted = authority(projection.input);
+      projection.control.sendMessage(JSON.stringify({
+        version: 1,
+        type: "view",
+        surfaceId: owner.surfaceId,
+        runtimeGeneration: 1,
+        mode: "expanded",
+      }));
+      return { input: projection.input, epoch: (await granted).controllerEpoch };
+    };
+    const reject = async (
+      name: string,
+      change: (message: Record<string, unknown>, epoch: number) => void,
+    ): Promise<void> => {
+      const { input, epoch } = await grant(name);
+      const message: Record<string, unknown> = {
+        version: 1,
+        type: "pointer-motion",
+        surfaceId: owner.surfaceId,
+        runtimeGeneration: 1,
+        geometryGeneration: 1,
+        controllerEpoch: epoch,
+        sequence: 1,
+        x: 20,
+        y: 30,
+      };
+      change(message, epoch);
+      input.sendMessage(JSON.stringify(message));
+      releaseCount += 1;
+      await runtime.waitForReleases(releaseCount);
+    };
+
+    await reject("wrong-surface-pointer", (message) => {
+      message.surfaceId = other.surfaceId;
+    });
+    await reject("stale-runtime-pointer", (message) => {
+      message.runtimeGeneration = 2;
+    });
+    await reject("stale-controller-pointer", (message, epoch) => {
+      message.controllerEpoch = epoch + 1;
+    });
+    await reject("missing-geometry-pointer", (message) => {
+      delete message.geometryGeneration;
+    });
+    await reject("out-of-order-pointer", (message) => {
+      message.sequence = 2;
+    });
+
+    const duplicate = await grant("duplicate-pointer");
+    duplicate.input.sendMessage(JSON.stringify({
+      version: 1,
+      type: "pointer-motion",
+      surfaceId: owner.surfaceId,
+      runtimeGeneration: 1,
+      geometryGeneration: 1,
+      controllerEpoch: duplicate.epoch,
+      sequence: 1,
+      x: 40,
+      y: 50,
+    }));
+    await runtime.waitForPointerEvents(1);
+    duplicate.input.sendMessage(JSON.stringify({
+      version: 1,
+      type: "pointer-motion",
+      surfaceId: owner.surfaceId,
+      runtimeGeneration: 1,
+      geometryGeneration: 1,
+      controllerEpoch: duplicate.epoch,
+      sequence: 1,
+      x: 60,
+      y: 70,
+    }));
+    await runtime.waitForReleases(++releaseCount);
+    expect(runtime.pointerEvents.map(({ event }) => event)).toEqual([{ type: "motion", x: 40, y: 50 }]);
+  }, 35_000);
 });

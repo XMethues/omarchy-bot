@@ -212,6 +212,12 @@ export const ScreenProjectionAnswerDto = z.object({
   sessionId: z.string().min(1),
   surfaceId: SurfaceIdDto,
   runtimeGeneration: z.number().int().positive(),
+  geometryGeneration: z.number().int().positive(),
+  logicalWidth: z.number().int().positive(),
+  logicalHeight: z.number().int().positive(),
+  videoWidth: z.number().int().positive(),
+  videoHeight: z.number().int().positive(),
+  scale: z.number().positive(),
   state: z.literal("connecting"),
   transport: z.literal("webrtc-data-channel-frames-v1"),
   channels: z.object({
@@ -236,11 +242,67 @@ export const ScreenProjectionControlMessageDto = z.object({
 });
 export type ScreenProjectionControlMessageDto = z.infer<typeof ScreenProjectionControlMessageDto>;
 
+const ScreenPointerEnvelopeDto = z.object({
+  version: z.literal(SCREEN_PROJECTION_PROTOCOL_VERSION),
+  surfaceId: SurfaceIdDto,
+  runtimeGeneration: z.number().int().positive(),
+  geometryGeneration: z.number().int().positive(),
+  controllerEpoch: z.number().int().positive(),
+  sequence: z.number().int().positive(),
+});
+
+const ScreenPointerPositionDto = {
+  x: z.number().finite().nonnegative(),
+  y: z.number().finite().nonnegative(),
+};
+
+export const ScreenPointerInputMessageDto = z.discriminatedUnion("type", [
+  ScreenPointerEnvelopeDto.extend({
+    type: z.literal("pointer-motion"),
+    ...ScreenPointerPositionDto,
+  }),
+  ScreenPointerEnvelopeDto.extend({
+    type: z.literal("pointer-button"),
+    ...ScreenPointerPositionDto,
+    button: z.enum(["left", "middle", "right"]),
+    state: z.enum(["pressed", "released"]),
+  }),
+  ScreenPointerEnvelopeDto.extend({
+    type: z.literal("pointer-scroll"),
+    ...ScreenPointerPositionDto,
+    deltaX: z.number().finite(),
+    deltaY: z.number().finite(),
+  }),
+]);
+export type ScreenPointerInputMessageDto = z.infer<typeof ScreenPointerInputMessageDto>;
+
+export const ScreenPointerAuthorityMessageDto = z.object({
+  version: z.literal(SCREEN_PROJECTION_PROTOCOL_VERSION),
+  type: z.literal("pointer-authority"),
+  active: z.boolean(),
+  surfaceId: SurfaceIdDto,
+  runtimeGeneration: z.number().int().positive(),
+  geometryGeneration: z.number().int().positive(),
+  controllerEpoch: z.number().int().positive(),
+  logicalWidth: z.number().int().positive(),
+  logicalHeight: z.number().int().positive(),
+  videoWidth: z.number().int().positive(),
+  videoHeight: z.number().int().positive(),
+  scale: z.number().positive(),
+});
+export type ScreenPointerAuthorityMessageDto = z.infer<typeof ScreenPointerAuthorityMessageDto>;
+
 export const ScreenProjectionFrameHeaderDto = z.object({
   version: z.literal(SCREEN_PROJECTION_PROTOCOL_VERSION),
   type: z.literal("frame"),
   surfaceId: SurfaceIdDto,
   runtimeGeneration: z.number().int().positive(),
+  geometryGeneration: z.number().int().positive(),
+  logicalWidth: z.number().int().positive(),
+  logicalHeight: z.number().int().positive(),
+  videoWidth: z.number().int().positive(),
+  videoHeight: z.number().int().positive(),
+  scale: z.number().positive(),
   sequence: z.number().int().positive(),
   mediaType: z.enum(["image/png", "image/jpeg"]),
   capturedAt: z.string().optional(),

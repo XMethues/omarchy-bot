@@ -1,7 +1,7 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
 
 const PNG = Buffer.from(
-  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+  "iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAYAAAD0In+KAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAADklEQVQImWMQMgn7D8IAC5MDN627upEAAAAASUVORK5CYII=",
   "base64",
 );
 
@@ -27,6 +27,8 @@ async function fulfillJson(route: Route, body: unknown): Promise<void> {
 async function installProjectionPeer(page: Page): Promise<void> {
   await page.addInitScript(({ pngBase64 }) => {
     const png = Uint8Array.from(atob(pngBase64), (character) => character.charCodeAt(0)).buffer;
+    const inputMessages: unknown[] = [];
+    Object.defineProperty(window, "__screenInputMessages", { configurable: true, value: inputMessages });
     class FakeDataChannel extends EventTarget {
       readonly label: string;
       readonly ordered = true;
@@ -89,6 +91,10 @@ async function installProjectionPeer(page: Page): Promise<void> {
 
       createDataChannel(label: string): RTCDataChannel {
         const channel = new FakeDataChannel(label, (sentLabel, raw) => {
+          if (sentLabel === "screen.input.v1") {
+            inputMessages.push(JSON.parse(raw));
+            return;
+          }
           if (sentLabel !== "screen.control.v1") return;
           const message = JSON.parse(raw) as { mode?: string };
           if (message.mode !== "preview" && message.mode !== "expanded") return;
@@ -96,12 +102,36 @@ async function installProjectionPeer(page: Page): Promise<void> {
           if (frames === undefined) return;
           this.sequence += 1;
           queueMicrotask(() => {
+            if (message.mode === "expanded") {
+              this.channels.get("screen.input.v1")?.dispatchEvent(new MessageEvent("message", {
+                data: JSON.stringify({
+                  version: 1,
+                  type: "pointer-authority",
+                  active: true,
+                  surfaceId: this.surfaceId,
+                  runtimeGeneration: 1,
+                  geometryGeneration: 1,
+                  controllerEpoch: 7,
+                  logicalWidth: 1000,
+                  logicalHeight: 500,
+                  videoWidth: 2000,
+                  videoHeight: 1000,
+                  scale: 2,
+                }),
+              }));
+            }
             frames.dispatchEvent(new MessageEvent("message", {
               data: JSON.stringify({
                 version: 1,
                 type: "frame",
                 surfaceId: this.surfaceId,
                 runtimeGeneration: 1,
+                geometryGeneration: 1,
+                logicalWidth: 1000,
+                logicalHeight: 500,
+                videoWidth: 2000,
+                videoHeight: 1000,
+                scale: 2,
                 sequence: this.sequence,
                 mediaType: "image/png",
                 mode: message.mode,
@@ -159,6 +189,12 @@ async function fulfillProjection(route: Route): Promise<boolean> {
       sessionId: `session-${surfaceId}`,
       surfaceId,
       runtimeGeneration: 1,
+      geometryGeneration: 1,
+      logicalWidth: 1000,
+      logicalHeight: 500,
+      videoWidth: 2000,
+      videoHeight: 1000,
+      scale: 2,
       state: "connecting",
       transport: "webrtc-data-channel-frames-v1",
       channels: { frames: "screen.frames.v1", control: "screen.control.v1", input: "screen.input.v1" },
@@ -310,6 +346,119 @@ test.describe("contextual computer sheet", () => {
     await expect(page.getByRole("button", { name: "Close computer", exact: true })).toHaveAttribute("data-state", "waiting");
     await expect(emergency.getByRole("button", { name: "Emergency stop computer" })).toBeVisible();
     expect(otherBotId).not.toBe(waitingBotId);
+  });
+
+  test("maps expanded pointer input through resized letterboxed content while compact preview stays inert", async ({ page }) => {
+    await installProjectionPeer(page);
+    await page.route("**/api/computer/**", async (route) => {
+      if (await fulfillProjection(route)) return;
+      const url = new URL(route.request().url());
+      await fulfillJson(route, {
+        botId: url.searchParams.get("botId"),
+        surfaceId: url.searchParams.get("surfaceId"),
+        state: "ready",
+        activity: "Screen ready.",
+      });
+    });
+    await page.setViewportSize({ width: 1280, height: 760 });
+    await page.goto("/");
+    await createBot(page, "Pointer Bot");
+    await page.getByRole("button", { name: "Open computer", exact: true }).click();
+    const preview = page.getByAltText("Latest computer preview for Pointer Bot");
+    await expect(preview).toBeVisible();
+    const previewBox = await preview.boundingBox();
+    if (previewBox === null) throw new Error("preview has no rendered box");
+    await page.mouse.move(previewBox.x + previewBox.width / 2, previewBox.y + previewBox.height / 2);
+    await page.mouse.click(previewBox.x + previewBox.width / 2, previewBox.y + previewBox.height / 2);
+    await page.mouse.wheel(0, 30);
+    expect(await page.evaluate(() => (window as typeof window & { __screenInputMessages: unknown[] }).__screenInputMessages)).toEqual([]);
+
+    await page.getByRole("button", { name: "Expand desktop preview" }).click();
+    const expanded = page.getByAltText("Expanded computer preview for Pointer Bot");
+    await expect(expanded).toBeVisible();
+    await expect.poll(() => page.evaluate(
+      () => (window as typeof window & { __screenInputMessages: unknown[] }).__screenInputMessages.length,
+    )).toBe(0);
+
+    await page.setViewportSize({ width: 900, height: 760 });
+    await expanded.evaluate((image) => {
+      image.style.width = "600px";
+      image.style.height = "500px";
+      image.style.objectFit = "contain";
+    });
+    const imageBox = await expanded.boundingBox();
+    if (imageBox === null) throw new Error("expanded projection has no rendered box");
+    const fittedWidth = Math.min(imageBox.width, imageBox.height * 2);
+    const fittedHeight = fittedWidth / 2;
+    const left = imageBox.x + (imageBox.width - fittedWidth) / 2;
+    const top = imageBox.y + (imageBox.height - fittedHeight) / 2;
+    await expanded.dispatchEvent("pointermove", {
+      pointerId: 40,
+      pointerType: "mouse",
+      clientX: imageBox.x + imageBox.width / 2,
+      clientY: imageBox.y + 1,
+      bubbles: true,
+    });
+    expect(await page.evaluate(
+      () => (window as typeof window & { __screenInputMessages: unknown[] }).__screenInputMessages,
+    )).toEqual([]);
+    await expanded.dispatchEvent("pointermove", {
+      pointerId: 41,
+      pointerType: "mouse",
+      clientX: left + 1,
+      clientY: top + 1,
+      bubbles: true,
+    });
+    await expanded.dispatchEvent("pointermove", {
+      pointerId: 42,
+      pointerType: "mouse",
+      clientX: left + fittedWidth - 1,
+      clientY: top + fittedHeight - 1,
+      bubbles: true,
+    });
+    await expanded.dispatchEvent("wheel", {
+      clientX: left + fittedWidth - 1,
+      clientY: top + fittedHeight - 1,
+      deltaX: -24,
+      deltaY: 120,
+      bubbles: true,
+      cancelable: true,
+    });
+    await page.mouse.move(left + fittedWidth * 0.4, top + fittedHeight * 0.4);
+    await page.mouse.down();
+    await page.mouse.move(left + fittedWidth * 0.6, top + fittedHeight * 0.7, { steps: 30 });
+    await page.mouse.up();
+
+    const messages = await page.evaluate(
+      () => (window as typeof window & { __screenInputMessages: Array<Record<string, unknown>> }).__screenInputMessages,
+    );
+    expect(messages.length).toBeGreaterThan(5);
+    expect(messages.map((message) => message.sequence)).toEqual(messages.map((_, index) => index + 1));
+    expect(messages.every((message) =>
+      message.surfaceId !== undefined
+      && message.runtimeGeneration === 1
+      && message.geometryGeneration === 1
+      && message.controllerEpoch === 7
+    )).toBe(true);
+    expect(messages.some((message) =>
+      message.type === "pointer-motion"
+      && Number(message.x) <= 2
+      && Number(message.y) <= 2
+    )).toBe(true);
+    expect(messages.some((message) =>
+      message.type === "pointer-motion"
+      && Number(message.x) >= 995
+      && Number(message.y) >= 495
+    )).toBe(true);
+    expect(messages.filter((message) => message.type === "pointer-button").map((message) => message.state)).toEqual([
+      "pressed",
+      "released",
+    ]);
+    expect(messages.some((message) =>
+      message.type === "pointer-scroll"
+      && message.deltaX === -24
+      && message.deltaY === 120
+    )).toBe(true);
   });
 
   test("uses a bottom sheet on a narrow screen", async ({ page }) => {
