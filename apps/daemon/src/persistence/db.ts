@@ -2,7 +2,20 @@ import { Database } from "bun:sqlite";
 import { AVATAR_RENDERER_ID } from "@omarchy-bot/protocol";
 import type { Config } from "../bootstrap/config.ts";
 
-export const MIGRATIONS: { name: string; sql: string }[] = [
+export type Migration = { name: string } & (
+  | { sql: string; migrate?: never }
+  | { sql?: never; migrate: (db: Database) => void }
+);
+
+export function applyMigration(db: Database, migration: Migration): void {
+  if (migration.migrate !== undefined) {
+    migration.migrate(db);
+    return;
+  }
+  db.exec(migration.sql);
+}
+
+export const MIGRATIONS: Migration[] = [
   {
     name: "0001-initial",
     sql: `
@@ -536,6 +549,23 @@ DROP TABLE IF EXISTS computer_leases;
 DROP TABLE IF EXISTS legacy_unscoped_artifacts;
 `,
   },
+  {
+    // A deployed archive-removal migration rebuilt bots without these fields.
+    // Restore the current lifecycle contract without rebuilding or rewriting
+    // any Bot rows. Current-schema databases record this as an inert step.
+    name: "0013-restore-bot-archive-lifecycle",
+    migrate: (db) => {
+      const columns = new Set(
+        (db.query(`PRAGMA table_info(bots)`).all() as Array<{ name: string }>).map((column) => column.name),
+      );
+      if (!columns.has("archived")) {
+        db.exec(`ALTER TABLE bots ADD COLUMN archived INTEGER NOT NULL DEFAULT 0`);
+      }
+      if (!columns.has("archived_at")) {
+        db.exec(`ALTER TABLE bots ADD COLUMN archived_at TEXT`);
+      }
+    },
+  },
 ];
 export function openDb(cfg: Config): Database {
   const db = new Database(cfg.dbPath, { create: true });
@@ -552,7 +582,7 @@ export function openDb(cfg: Config): Database {
     try {
       for (const m of pending) {
         const tx = db.transaction(() => {
-          db.exec(m.sql);
+          applyMigration(db, m);
           db.query("INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?)").run(m.name, new Date().toISOString());
         });
         tx();

@@ -269,7 +269,7 @@ describe("integration: legacy migration", () => {
     db.exec("PRAGMA journal_mode = WAL");
     db.exec(`CREATE TABLE IF NOT EXISTS schema_migrations (name TEXT PRIMARY KEY, applied_at TEXT NOT NULL)`);
     const initialMigration = MIGRATIONS.find((migration) => migration.name === "0001-initial");
-    if (initialMigration === undefined) throw new Error("0001 migration provenance is unavailable");
+    if (initialMigration?.sql === undefined) throw new Error("0001 migration provenance is unavailable");
     db.exec(initialMigration.sql);
     const now = "2026-09-01T00:00:00.000Z";
     // Legacy agent-shaped bots (id === agent id).
@@ -383,7 +383,9 @@ describe("integration: legacy migration", () => {
     db.exec(`CREATE TABLE schema_migrations (name TEXT PRIMARY KEY, applied_at TEXT NOT NULL)`);
     const initialMigration = MIGRATIONS.find((migration) => migration.name === "0001-initial");
     const expandedMigration = MIGRATIONS.find((migration) => migration.name === "0002-user-created-bots");
-    if (initialMigration === undefined || expandedMigration === undefined) throw new Error("legacy migration provenance is unavailable");
+    if (initialMigration?.sql === undefined || expandedMigration?.sql === undefined) {
+      throw new Error("legacy migration provenance is unavailable");
+    }
     db.exec(initialMigration.sql);
     db.query(`INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?)`).run(initialMigration.name, "2026-09-01T00:00:00.000Z");
     db.exec(expandedMigration.sql);

@@ -3,10 +3,12 @@ import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { Database } from "bun:sqlite";
-import { MIGRATIONS, openDb } from "../../apps/daemon/src/persistence/db.ts";
+import { applyMigration, MIGRATIONS, openDb } from "../../apps/daemon/src/persistence/db.ts";
 import { renderAvatarRecipe } from "../../apps/web/src/components/avatarRenderer.ts";
 import { AVATAR_RENDERER_ID, AvatarRecipeDto } from "../../packages/protocol/src/index.ts";
 import { startDaemon, type Harness } from "./helpers/harness.ts";
+import { BotScreenManager } from "../../apps/daemon/src/modules/computer/botScreenManager.ts";
+import { FakeBotScreenRuntimeAdapter } from "../../apps/daemon/src/modules/computer/fakeBotScreenRuntime.ts";
 
 function databaseThrough(migrationName: string): { db: Database; dbPath: string; home: string } {
   const home = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-migrations-"));
@@ -16,7 +18,7 @@ function databaseThrough(migrationName: string): { db: Database; dbPath: string;
 
   let found = false;
   for (const migration of MIGRATIONS) {
-    db.exec(migration.sql);
+    applyMigration(db, migration);
     db.query(`INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?)`).run(migration.name, "2026-09-01T00:00:00.000Z");
     if (migration.name === migrationName) {
       found = true;
@@ -35,6 +37,130 @@ function finishMigrations(db: Database, dbPath: string): Database {
   db.close();
   return openDb({ dbPath } as never);
 }
+
+function deployedArchivelessDatabase(): { dbPath: string; home: string } {
+  const home = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-archiveless-"));
+  const dbPath = path.join(home, "db.sqlite");
+  const db = new Database(dbPath, { create: true });
+  db.exec(`
+    CREATE TABLE schema_migrations (name TEXT PRIMARY KEY, applied_at TEXT NOT NULL);
+    CREATE TABLE agents (
+      id TEXT PRIMARY KEY,
+      display_name TEXT NOT NULL,
+      agent_version TEXT NOT NULL DEFAULT 'unknown',
+      status TEXT NOT NULL DEFAULT 'unknown',
+      reason TEXT,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE bots (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      instructions TEXT NOT NULL DEFAULT '',
+      agent_id TEXT NOT NULL REFERENCES agents(id),
+      avatar_kind TEXT NOT NULL DEFAULT 'generated',
+      avatar_recipe TEXT NOT NULL DEFAULT '',
+      avatar_file TEXT,
+      pinned INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      provenance TEXT NOT NULL DEFAULT 'user_created'
+        CHECK (provenance IN ('user_created', 'legacy_conversation', 'legacy_inventory'))
+    );
+    CREATE TABLE bot_surfaces (
+      surface_id TEXT PRIMARY KEY,
+      bot_id TEXT NOT NULL UNIQUE REFERENCES bots(id) ON DELETE CASCADE,
+      lifecycle_state TEXT NOT NULL DEFAULT 'stopped'
+        CHECK (lifecycle_state IN ('stopped', 'starting', 'ready', 'failed')),
+      runtime_generation INTEGER NOT NULL DEFAULT 0,
+      logical_width INTEGER NOT NULL DEFAULT 1920,
+      logical_height INTEGER NOT NULL DEFAULT 1080,
+      scale REAL NOT NULL DEFAULT 1,
+      refresh_rate INTEGER NOT NULL DEFAULT 60,
+      last_failure TEXT,
+      last_image_at TEXT,
+      transitioned_at TEXT NOT NULL
+    );
+  `);
+  const appliedAt = "2026-09-03T18:20:46.736Z";
+  const deployedLedger = [
+    "0001-initial",
+    "0002-user-created-bots",
+    "0003-permanent-bot-deletion",
+    "0004-contract-legacy-runtime",
+    "0005-created-bots-animated-avatars",
+    "0006-bot-provenance-repair",
+    "0007-pin-dicebear-renderer-id",
+    "0008-staged-attachment-draft-ownership",
+    "0009-current-avatar-renderer-only",
+    "0010-agent-oriented-avatar-styles",
+    "0011-remove-bot-archive-lifecycle",
+    "0010-bot-computer-surfaces",
+    "0011-redacted-input-diagnostics",
+    "0012-bot-screen-contract",
+  ];
+  const recordMigration = db.query(`INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?)`);
+  for (const name of deployedLedger) recordMigration.run(name, appliedAt);
+  db.query(`INSERT INTO agents (id, display_name, status, updated_at) VALUES ('pi', 'Pi', 'ready', ?)`).run(appliedAt);
+  db.query(
+    `INSERT INTO bots (id, name, instructions, agent_id, avatar_recipe, created_at, updated_at, provenance)
+     VALUES ('bot_existing', 'Existing Bot', 'Preserve these instructions', 'pi', '{}', ?, ?, 'legacy_conversation')`,
+  ).run(appliedAt, appliedAt);
+  db.query(
+    `INSERT INTO bot_surfaces (
+       surface_id, bot_id, lifecycle_state, runtime_generation, transitioned_at
+     ) VALUES ('surf_11111111111111111111111111111111', 'bot_existing', 'ready', 4, ?)`,
+  ).run(appliedAt);
+  db.close();
+  return { dbPath, home };
+}
+
+describe("integration: deployed schema convergence", () => {
+  test("restores archive lifecycle columns before Bot Screen recovery", async () => {
+    const { dbPath, home } = deployedArchivelessDatabase();
+    const db = openDb({ dbPath } as never);
+    const adapter = new FakeBotScreenRuntimeAdapter();
+    const screens = new BotScreenManager(db, adapter, {
+      capacity: 1,
+      logicalWidth: 1920,
+      logicalHeight: 1080,
+      frameRate: 16,
+    });
+
+    try {
+      await screens.recover();
+      expect(
+        db.query(
+          `SELECT id, name, instructions, agent_id, provenance, archived, archived_at
+           FROM bots WHERE id = 'bot_existing'`,
+        ).get(),
+      ).toEqual({
+        id: "bot_existing",
+        name: "Existing Bot",
+        instructions: "Preserve these instructions",
+        agent_id: "pi",
+        provenance: "legacy_conversation",
+        archived: 0,
+        archived_at: null,
+      });
+      expect(
+        db.query(
+          `SELECT count(*) AS count
+           FROM schema_migrations
+           WHERE name = '0013-restore-bot-archive-lifecycle'`,
+        ).get(),
+      ).toEqual({ count: 1 });
+      expect(adapter.starts).toHaveLength(1);
+      expect(adapter.starts[0]).toMatchObject({
+        surfaceId: "surf_11111111111111111111111111111111",
+        generation: 5,
+      });
+    } finally {
+      await screens.shutdown();
+      db.close();
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
 
 describe("integration: Bot provenance migrations", () => {
   test("preserves Bot provenance while replacing every legacy avatar recipe", () => {
