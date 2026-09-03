@@ -130,9 +130,9 @@ CREATE INDEX idx_events_aggregate ON events(aggregate_type, aggregate_id);
   },
   {
     // User-created Bots reference Agents (ADR 0002). One step: build the new
-    // tables, copy legacy data (legacy agent-shaped bot -> migrated bot row;
-    // threads re-pointed; role_sessions -> thread_sessions), then drop the
-    // legacy model. Threads and messages survive untouched.
+    // tables, preserve only legacy Agent records with user-owned content or
+    // configuration, re-point their threads, then drop the legacy model.
+    // Empty inventory rows remain Agents and never become Sidebar Bots.
     name: "0002-user-created-bots",
     sql: `
 CREATE TABLE agents (
@@ -230,7 +230,8 @@ SELECT DISTINCT b.id,
        b.updated_at
 FROM bots b;
 
--- Every legacy agent-shaped bot becomes one migrated user-created Bot.
+-- A legacy Agent becomes a Bot only when it owns conversation data or user
+-- configuration. Empty built-in inventory rows remain infrastructure.
 INSERT INTO bots_new (id, name, instructions, agent_id, avatar_kind, avatar_recipe, created_at, updated_at)
 SELECT 'bot_' || lower(hex(randomblob(16))),
        b.display_name,
@@ -240,7 +241,27 @@ SELECT 'bot_' || lower(hex(randomblob(16))),
        '{"rendererVersion":"9.4.3","style":"shapes","seed":"bot_' || lower(hex(randomblob(16))) || '","options":{}}',
        b.created_at,
        b.updated_at
-FROM bots b;
+FROM bots b
+WHERE EXISTS (SELECT 1 FROM threads t WHERE t.bot_id = b.id)
+   OR EXISTS (
+     SELECT 1 FROM roles r
+     WHERE r.bot_id = b.id
+       AND (
+         r.id <> 'default'
+         OR r.name <> 'Default'
+         OR trim(r.instructions) <> ''
+         OR COALESCE(r.default_cwd, '') <> ''
+         OR r.default_model IS NOT NULL
+       )
+   )
+   OR trim(b.default_cwd) <> ''
+   OR b.default_model IS NOT NULL
+   OR b.display_name <> CASE b.id
+     WHEN 'pi' THEN 'Pi' WHEN 'omp' THEN 'OMP' WHEN 'codex' THEN 'Codex'
+     WHEN 'claude' THEN 'Claude' WHEN 'grok' THEN 'Grok' WHEN 'opencode' THEN 'OpenCode'
+     WHEN 'gemini' THEN 'Gemini' WHEN 'copilot' THEN 'Copilot' WHEN 'crush' THEN 'Crush'
+     ELSE b.id
+   END;
 
 -- Re-point threads at their migrated bot (ids preserved, zero message loss).
 INSERT INTO threads_new (id, bot_id, title, cwd, created_at, updated_at)
@@ -347,6 +368,52 @@ DROP TABLE IF EXISTS settings;
 -- Replay begins at the contracted public model; no old aggregate identities,
 -- approval payloads, or lease diagnostics can cross the WebSocket boundary.
 DELETE FROM events;
+`,
+  },
+  {
+    // Remove empty rows created by the first Bot migration from the old
+    // built-in Agent inventory. A migrated row is identifiable by the random
+    // recipe seed used by 0002; user-created Bots use their Bot id as the seed.
+    // Then move every retained local recipe to DiceBear's animated v10 styles.
+    name: "0005-created-bots-animated-avatars",
+    sql: `
+CREATE TEMP TABLE legacy_inventory_placeholders (id TEXT PRIMARY KEY);
+INSERT INTO legacy_inventory_placeholders (id)
+SELECT id FROM bots
+WHERE avatar_kind = 'generated'
+  AND trim(instructions) = ''
+  AND pinned = 0
+  AND archived = 0
+  AND NOT EXISTS (SELECT 1 FROM threads WHERE threads.bot_id = bots.id)
+  AND NOT EXISTS (SELECT 1 FROM attachments WHERE attachments.bot_id = bots.id)
+  AND json_valid(avatar_recipe)
+  AND json_extract(avatar_recipe, '$.rendererVersion') = '9.4.3'
+  AND json_extract(avatar_recipe, '$.seed') <> id
+  AND name = CASE agent_id
+    WHEN 'pi' THEN 'Pi' WHEN 'omp' THEN 'OMP' WHEN 'codex' THEN 'Codex'
+    WHEN 'claude' THEN 'Claude' WHEN 'grok' THEN 'Grok' WHEN 'opencode' THEN 'OpenCode'
+    WHEN 'gemini' THEN 'Gemini' WHEN 'copilot' THEN 'Copilot' WHEN 'crush' THEN 'Crush'
+    ELSE agent_id
+  END;
+DELETE FROM bot_state WHERE bot_id IN (SELECT id FROM legacy_inventory_placeholders);
+DELETE FROM bots WHERE id IN (SELECT id FROM legacy_inventory_placeholders);
+DROP TABLE legacy_inventory_placeholders;
+
+UPDATE bots
+SET avatar_recipe = json_object(
+  'rendererVersion', '10.7.0',
+  'style', CASE json_extract(avatar_recipe, '$.style')
+    WHEN 'pixel-art' THEN 'pixelbot'
+    WHEN 'micah' THEN 'thumbs'
+    WHEN 'pixelbot' THEN 'pixelbot'
+    WHEN 'thumbs' THEN 'thumbs'
+    ELSE 'shapes'
+  END,
+  'seed', COALESCE(json_extract(avatar_recipe, '$.seed'), id),
+  'options', json('{}')
+)
+WHERE avatar_kind IN ('generated', 'recipe')
+  AND json_valid(avatar_recipe);
 `,
   },
 ];

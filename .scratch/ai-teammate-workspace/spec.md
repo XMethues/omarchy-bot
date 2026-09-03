@@ -134,9 +134,9 @@ Use Astryx primitives for the product surface, local managed storage for attachm
 - Start app-owned dictation with file output and explicit no-auto-submit/no-smart-auto-submit overrides. The application inserts returned text into the owning draft and optionally executes its own Thread-scoped send command based on the user setting.
 - Preserve external Omarchy Voxtype shortcuts and user configuration. Do not implement browser speech recognition or raw-audio upload.
 - Store the Voice auto-send preference in application settings, defaulting off.
-- Store uploaded avatars locally after safe image decoding/re-encoding. Store generated avatars as versioned, validated DiceBear Avatar Recipes.
+- Store uploaded avatars locally after safe image decoding/re-encoding. Store generated avatars as versioned, validated DiceBear v10 Avatar Recipes using animated styles only.
 - Use the Bot's selected Agent for prompt-to-recipe generation as a profile operation outside Thread history. Render only application-generated DiceBear output.
-- Animate generated avatar internals or an uploaded-avatar activity container only for selected, working, or streaming states. Gate movement behind reduced-motion preference.
+- Animate generated SVG internals with DiceBear's native `animationVariant`, or an uploaded-avatar activity container, only for selected, working, or streaming states. Gate movement behind reduced-motion preference.
 - Keep the Computer Broker as the exclusive Shared Screen input coordinator, but replace public lease/TTL/queue diagnostics with a docked desktop drawer, narrow-window Bottom Sheet, and modal expanded preview for the selected Bot.
 - Keep Takeover, Return to Bot, waiting state, re-observation, and emergency stop semantics. Remove the separate omarchy-bot approval check for desktop actions; coordination remains distinct from Agent permissions.
 - Publish ordered Bot, Thread, turn/activity, dictation, and Computer state through the existing replayable WebSocket seam. Do not broadcast transcript text from dictation to non-owning clients.

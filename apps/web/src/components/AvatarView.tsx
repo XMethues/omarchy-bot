@@ -1,7 +1,7 @@
-import { createAvatar } from "@dicebear/core";
-import * as micah from "@dicebear/micah";
-import * as pixelArt from "@dicebear/pixel-art";
-import * as shapes from "@dicebear/shapes";
+import { Avatar as DiceBearAvatar, Style } from "@dicebear/core";
+import pixelbotDefinition from "@dicebear/styles/pixelbot.json";
+import shapesDefinition from "@dicebear/styles/shapes.json";
+import thumbsDefinition from "@dicebear/styles/thumbs.json";
 import * as stylex from "@stylexjs/stylex";
 import type { JSX } from "react";
 import type { AvatarDto, AvatarRecipeDto } from "@omarchy-bot/protocol";
@@ -43,44 +43,39 @@ const styles = stylex.create({
   },
 });
 
-function probability(recipe: AvatarRecipeDto, key: string): number | undefined {
-  const value = recipe.options[key];
-  return typeof value === "number" ? value : undefined;
+const pixelbotStyle = new Style(pixelbotDefinition);
+const shapesStyle = new Style(shapesDefinition);
+const thumbsStyle = new Style(thumbsDefinition);
+
+type AnimationVariant = "slowest" | "medium" | "fast";
+
+function animationVariant(activity: AvatarActivity): AnimationVariant | undefined {
+  switch (activity) {
+    case "selected":
+      return "slowest";
+    case "working":
+      return "medium";
+    case "streaming":
+      return "fast";
+    case "idle":
+      return undefined;
+  }
 }
 
-function recipeDataUri(recipe: AvatarRecipeDto): string {
-  if (recipe.rendererVersion !== "9.4.3") return createAvatar(shapes, { seed: recipe.seed }).toDataUri();
+function recipeDataUri(recipe: AvatarRecipeDto, activity: AvatarActivity): string {
+  const variant = animationVariant(activity);
+  const options = variant === undefined
+    ? { seed: recipe.seed }
+    : { seed: recipe.seed, animationVariant: variant };
 
   switch (recipe.style) {
-    case "micah": {
-      const earringsProbability = probability(recipe, "earringsProbability");
-      const facialHairProbability = probability(recipe, "facialHairProbability");
-      const glassesProbability = probability(recipe, "glassesProbability");
-      const hairProbability = probability(recipe, "hairProbability");
-      return createAvatar(micah, {
-        seed: recipe.seed,
-        ...(earringsProbability !== undefined ? { earringsProbability } : {}),
-        ...(facialHairProbability !== undefined ? { facialHairProbability } : {}),
-        ...(glassesProbability !== undefined ? { glassesProbability } : {}),
-        ...(hairProbability !== undefined ? { hairProbability } : {}),
-      }).toDataUri();
-    }
-    case "pixel-art": {
-      const accessoriesProbability = probability(recipe, "accessoriesProbability");
-      const beardProbability = probability(recipe, "beardProbability");
-      const glassesProbability = probability(recipe, "glassesProbability");
-      const hatProbability = probability(recipe, "hatProbability");
-      return createAvatar(pixelArt, {
-        seed: recipe.seed,
-        ...(accessoriesProbability !== undefined ? { accessoriesProbability } : {}),
-        ...(beardProbability !== undefined ? { beardProbability } : {}),
-        ...(glassesProbability !== undefined ? { glassesProbability } : {}),
-        ...(hatProbability !== undefined ? { hatProbability } : {}),
-      }).toDataUri();
-    }
+    case "pixelbot":
+      return new DiceBearAvatar(pixelbotStyle, options).toDataUri();
+    case "thumbs":
+      return new DiceBearAvatar(thumbsStyle, options).toDataUri();
     case "shapes":
     default:
-      return createAvatar(shapes, { seed: recipe.seed }).toDataUri();
+      return new DiceBearAvatar(shapesStyle, options).toDataUri();
   }
 }
 
@@ -97,9 +92,9 @@ export function AvatarView({ avatar, name, size = "md", activity = "idle" }: Ava
     />
   ) : undefined;
   const uploadedUrl = avatar.kind === "upload" && /^\/api\/bots\/[\w-]+\/avatar$/.test(avatar.url) ? avatar.url : undefined;
-  const src = avatar.kind === "upload" ? uploadedUrl : recipeDataUri(avatar.recipe);
+  const src = avatar.kind === "upload" ? uploadedUrl : recipeDataUri(avatar.recipe, activity);
   const motionStyle =
-    avatar.kind !== "generated"
+    avatar.kind !== "upload"
       ? undefined
       : activity === "streaming"
         ? styles.streaming

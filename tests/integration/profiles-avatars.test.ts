@@ -11,7 +11,7 @@ import { api, apiStatus, makeBot, sendToBot, startDaemon, waitThreadIdle, type H
 
 let h: Harness;
 let avatars: AvatarService;
-let agentOutput = JSON.stringify({ style: "micah", seed: "calm-blue", options: { glassesProbability: 40 } });
+let agentOutput = JSON.stringify({ style: "thumbs", seed: "calm-blue", options: {} });
 let agentFailure: string | undefined;
 let openedInstructions = "";
 let closedSessions = 0;
@@ -92,7 +92,7 @@ describe("bot profile editing", () => {
     const initial = await api<BotDto>(h, "GET", `/api/bots/${botId}`);
     expect(initial.avatar).toEqual({
       kind: "generated",
-      recipe: { rendererVersion: "9.4.3", style: "shapes", seed: botId, options: {} },
+      recipe: { rendererVersion: "10.7.0", style: "shapes", seed: botId, options: {} },
     });
 
     const first = await avatars.generate(botId);
@@ -209,14 +209,14 @@ describe("Agent-authored avatar recipe boundary", () => {
   test("runs outside Thread history and stores only a validated pinned recipe", async () => {
     const botId = await makeBot(h, "Agent Recipe Bot");
     agentFailure = undefined;
-    agentOutput = JSON.stringify({ style: "micah", seed: "calm-blue", options: { glassesProbability: 40 } });
+    agentOutput = JSON.stringify({ style: "thumbs", seed: "calm-blue", options: {} });
     const beforeThreads = await api<unknown[]>(h, "GET", `/api/bots/${botId}/threads`);
     const response = await avatarRequest("POST", `/api/bots/${botId}/avatar/recipe`, { json: { prompt: "calm blue teammate" } });
     expect(response.status).toBe(200);
     const updated = (await response.json()) as BotDto;
     expect(updated.avatar).toEqual({
       kind: "recipe",
-      recipe: { rendererVersion: "9.4.3", style: "micah", seed: "calm-blue", options: { glassesProbability: 40 } },
+      recipe: { rendererVersion: "10.7.0", style: "thumbs", seed: "calm-blue", options: {} },
     });
     expect(openedInstructions).toContain("Reply with exactly one JSON object");
     expect(closedSessions).toBeGreaterThan(0);
@@ -231,7 +231,7 @@ describe("Agent-authored avatar recipe boundary", () => {
       JSON.stringify({ style: "shapes", seed: "x", options: { backgroundColor: "ff0000" } }),
       "<svg><script>alert(1)</script></svg>",
       "<html><img src=https://example.test/avatar.png></html>",
-      JSON.stringify({ style: "micah", seed: "https://example.test/avatar.png", options: {} }),
+      JSON.stringify({ style: "thumbs", seed: "https://example.test/avatar.png", options: {} }),
     ];
     for (const output of hostileOutputs) {
       agentOutput = output;

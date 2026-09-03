@@ -59,7 +59,7 @@ test.describe("Bot profiles and avatars", () => {
           ...current,
           avatar: {
             kind: "recipe",
-            recipe: { rendererVersion: "9.4.3", style: "micah", seed: "e2e-recipe", options: { glassesProbability: 25 } },
+            recipe: { rendererVersion: "10.7.0", style: "thumbs", seed: "e2e-recipe", options: {} },
           },
         }),
       });
@@ -68,7 +68,7 @@ test.describe("Bot profiles and avatars", () => {
     await openProfile(page);
     await page.getByTestId("avatar-prompt").fill("A friendly teammate with round glasses");
     await page.getByTestId("avatar-recipe-submit").click();
-    await expect(page.getByRole("dialog").getByTestId("avatar-micah")).toBeVisible();
+    await expect(page.getByRole("dialog").getByTestId("avatar-thumbs")).toBeVisible();
   });
 
   test("shows selected and streaming activity without moving transcript content", async ({ page }) => {

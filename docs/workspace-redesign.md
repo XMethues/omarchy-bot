@@ -94,13 +94,13 @@ The user may edit the Bot's name, Instructions, and avatar. The Agent reference 
 A Bot can use either:
 
 - a locally uploaded image; or
-- a deterministic animated DiceBear avatar.
+- a deterministic animated DiceBear v10 SVG avatar.
 
 New Bots receive a generated avatar automatically. In profile editing, the user may upload an image, choose another generated variation, or describe an avatar in a prompt. The Bot's selected Agent converts that prompt into a constrained, versioned Avatar Recipe. Omarchy Bot validates the recipe and renders DiceBear itself; Agent-produced SVG, HTML, scripts, and remote URLs are never rendered.
 
 Motion is stateful and restrained:
 
-- selected or working generated avatars may use native internal animation;
+- selected or working generated avatars use DiceBear's native internal `animationVariant` animation;
 - uploaded images use the same container-level activity ring/state treatment;
 - the assistant avatar in the transcript may animate while output is streaming and settles when the turn completes;
 - idle, unselected avatars do not animate continuously;

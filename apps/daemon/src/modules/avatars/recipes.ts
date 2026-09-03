@@ -1,29 +1,14 @@
 import { z } from "zod";
 import type { AvatarRecipeDto } from "@omarchy-bot/protocol";
 
-export const AVATAR_RENDERER_VERSION = "9.4.3";
-export const ALLOWED_AVATAR_STYLES = ["shapes", "micah", "pixel-art"] as const;
+export const AVATAR_RENDERER_VERSION = "10.7.0";
+export const ALLOWED_AVATAR_STYLES = ["shapes", "pixelbot", "thumbs"] as const;
 export type AllowedAvatarStyle = (typeof ALLOWED_AVATAR_STYLES)[number];
 
-const probability = z.number().int().min(0).max(100);
 const styleOptions = {
   shapes: z.object({}).strict(),
-  micah: z
-    .object({
-      earringsProbability: probability.optional(),
-      facialHairProbability: probability.optional(),
-      glassesProbability: probability.optional(),
-      hairProbability: probability.optional(),
-    })
-    .strict(),
-  "pixel-art": z
-    .object({
-      accessoriesProbability: probability.optional(),
-      beardProbability: probability.optional(),
-      glassesProbability: probability.optional(),
-      hatProbability: probability.optional(),
-    })
-    .strict(),
+  pixelbot: z.object({}).strict(),
+  thumbs: z.object({}).strict(),
 } as const;
 
 const unsafeText = /(?:<\/?(?:svg|html|script)\b|javascript:|data:|https?:\/\/|<|>)/i;
@@ -46,12 +31,9 @@ const responseSchema = z
  * System contract for an isolated profile operation. The Agent returns data,
  * never markup or a renderable URL; Omarchy Bot remains the only renderer.
  */
-export const AVATAR_RECIPE_SYSTEM_INSTRUCTIONS = `You create deterministic DiceBear avatar recipes for Omarchy Bot.
-Reply with exactly one JSON object and no prose or markdown: {"style":"shapes|micah|pixel-art","seed":"plain text seed","options":{}}.
-Allowed options by style:
-- shapes: no options
-- micah: earringsProbability, facialHairProbability, glassesProbability, hairProbability (integer 0-100)
-- pixel-art: accessoriesProbability, beardProbability, glassesProbability, hatProbability (integer 0-100)
+export const AVATAR_RECIPE_SYSTEM_INSTRUCTIONS = `You create deterministic animated DiceBear avatar recipes for Omarchy Bot.
+Reply with exactly one JSON object and no prose or markdown: {"style":"shapes|pixelbot|thumbs","seed":"plain text seed","options":{}}.
+The three allowed styles are animated by Omarchy Bot; options must be an empty object.
 Never return SVG, HTML, script, data URLs, remote URLs, or additional keys.`;
 
 /** Strictly parse and validate untrusted Agent output into a pinned recipe. */

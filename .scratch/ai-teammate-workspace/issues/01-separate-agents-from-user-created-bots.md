@@ -6,8 +6,8 @@
 
 **Status:** resolved
 
-- [x] Starting from a representative legacy database preserves existing Threads and messages while creating separate Agent and Bot records.
-- [x] Starting again after migration is idempotent and does not duplicate Agents, Bots, Threads, or messages.
+- [x] Starting from a representative legacy database preserves existing Threads and messages while migrating only Agent records with user-owned content or configuration into Bots.
+- [x] Empty built-in Agent inventory records remain Agents and never become Sidebar Bots; repeat startup is idempotent.
 - [x] The Agent API lists every supported Agent with installation, readiness, version, and plain-language unavailability guidance.
 - [x] The Bot API creates a Bot from Name, Job/Instructions, and an available Agent and rejects invalid or unavailable selections clearly.
 - [x] Multiple Bots can reference the same Agent and receive independent Bot identifiers.
@@ -18,11 +18,10 @@
  
 ## Answer
  
-Implemented the Agent/Bot split end to end. Migration `0002-user-created-bots` creates separate Agent and user-created Bot records, rewires legacy Threads and native sessions without message loss, and remains idempotent. The public Agent and Bot APIs expose readiness guidance, validate creation, preserve fixed Agent ownership, and allow multiple independent Bots per Agent. The web app now uses an Astryx `AppShell` with a Bot-only `Sidebar` and an Astryx Create Bot `Dialog`; successful creation refreshes the Bot query, selects the created Bot, and sets `thread=blank`.
+Implemented the Agent/Bot split end to end. Migration `0002-user-created-bots` creates separate Agent records while converting only legacy records with conversations or user configuration into Bots; migration `0005-created-bots-animated-avatars` removes empty inventory placeholders created by the earlier broad migration. Legacy Threads and native sessions are rewired without message loss, and repeat startup remains idempotent. The public Agent and Bot APIs expose readiness guidance, validate creation, preserve fixed Agent ownership, and allow multiple independent Bots per Agent. The web app uses an Astryx `AppShell` with a Bot-only `Sidebar` and an Astryx Create Bot `Dialog`; successful creation selects the new Bot and opens `thread=blank`.
  
 Evidence:
  
-- `bun run typecheck`: passed (`tsc --noEmit`, exit 0).
-- `bun test tests/integration`: 24 passed, 0 failed, 136 assertions. This includes the representative legacy migration/idempotency test, all-nine-Agent readiness API coverage, unavailable and invalid Bot creation rejection, independent same-Agent Bot IDs, and immutable `agentId`.
-- `bun run --filter='@omarchy-bot/web' build`: passed; Vite transformed 2,263 modules and exited 0.
-- `bunx playwright test -c tests/e2e`: 7 passed. `01-create-bot.spec.ts` proves readiness guidance, disabled unavailable Agents, inline validation, selection into a blank conversation, and independent Sidebar rows for same-Agent Bots.
+- `bun run typecheck` and `bun run build`: passed.
+- `bun test tests/integration`: 74 passed, including both fresh-legacy and already-migrated database coverage proving empty Agent inventory placeholders are absent while user-owned data survives.
+- `bun run test:e2e`: 44 passed; `01-create-bot.spec.ts` proves the empty Sidebar, readiness guidance, disabled unavailable Agents, selection into a blank conversation, and independent rows for multiple user-created Bots on one Agent.

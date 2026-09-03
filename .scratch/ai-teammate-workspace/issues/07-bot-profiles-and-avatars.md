@@ -20,8 +20,8 @@
 
 ## Answer
 
-Implemented editable Bot names and Instructions with immutable Agent identity, deterministic DiceBear recipes pinned to renderer version `9.4.3`, safe local image decode/crop/re-encode through Sharp, and isolated Agent-authored recipe generation outside Thread history. Recipe parsing admits only three pinned local styles and their allow-listed options; markup, scripts, data URLs, and remote URLs are rejected.
+Implemented editable Bot names and Instructions with immutable Agent identity, deterministic animated DiceBear recipes pinned to renderer version `10.7.0`, safe local image decode/crop/re-encode through Sharp, and isolated Agent-authored recipe generation outside Thread history. Recipe parsing admits only the animated `shapes`, `pixelbot`, and `thumbs` styles; markup, scripts, data URLs, and remote URLs are rejected.
 
-The shared profile dialog supports save, deterministic variation, upload, and prompt recipes. Sidebar, header, transcript, and streaming avatars expose selected/working/streaming activity without moving transcript content; reduced motion disables animation while preserving a visible status indicator.
+The shared profile dialog supports save, deterministic variation, upload, and prompt recipes. Selected, working, and streaming generated avatars use DiceBear’s SVG-internal `animationVariant`; uploaded avatars retain container-level activity motion. Both paths settle when idle and respect reduced motion.
 
-Validated with `bun run typecheck`, focused profile/avatar integration tests, the complete 39-test integration suite, a production web build, and all four profile/avatar Playwright scenarios including a stable masked visual-regression baseline.
+Validated with `bun run typecheck`, production build, all 74 integration tests, and all 44 Playwright scenarios. Browser coverage decodes the rendered SVG and verifies that active avatars contain DiceBear’s native keyframes and reduced-motion guard while idle avatars contain no animation component.

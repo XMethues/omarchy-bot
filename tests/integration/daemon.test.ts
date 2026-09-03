@@ -243,7 +243,7 @@ describe("integration: threads API", () => {
 });
 
 describe("integration: legacy migration", () => {
-  test("booting over a representative legacy db preserves threads+messages and creates agents+bots; second boot is idempotent", async () => {
+  test("booting over a representative legacy db preserves user-owned conversations without turning the Agent inventory into Bots", async () => {
     // Fabricate a legacy home: apply only migration 0001, seed legacy rows.
     const legacyHome = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-legacy-"));
     const db = new Database(path.join(legacyHome, "db.sqlite"), { create: true });
@@ -275,12 +275,12 @@ describe("integration: legacy migration", () => {
     // Boot the real daemon over the legacy home: migration 0002 must run.
     const legacy = await startDaemon(legacyHome);
     try {
-      // Agents + migrated bots exist.
+      // The Agent inventory remains complete, but only the legacy Agent with
+      // user-owned content becomes a visible Bot.
       const agents = await api<{ id: string; status: string }[]>(legacy, "GET", "/api/agents");
       expect(agents.length).toBe(9);
       const bots = await api<{ id: string; name: string; agentId: string; instructions: string }[]>(legacy, "GET", "/api/bots");
-      // Both legacy bots migrated (pi enabled, claude disabled) with new ids.
-      expect(bots.length).toBe(2);
+      expect(bots.length).toBe(1);
       const migratedPi = bots.find((b) => b.agentId === "pi")!;
       expect(migratedPi.id.startsWith("bot_")).toBeTrue();
       expect(migratedPi.id).not.toBe("pi");
@@ -343,7 +343,7 @@ describe("integration: legacy migration", () => {
       try {
         const bots2 = await api<{ id: string }[]>(again, "GET", "/api/bots");
         const agents2 = await api<{ id: string }[]>(again, "GET", "/api/agents");
-        expect(bots2.length).toBe(2);
+        expect(bots2.length).toBe(1);
         expect(agents2.length).toBe(9);
         const threads2 = await api<{ id: string }[]>(again, "GET", `/api/bots/${migratedPi.id}/threads`);
         expect(threads2.length).toBe(2);
@@ -376,6 +376,15 @@ describe("integration: legacy migration", () => {
     db.query(
       `INSERT INTO bots (id, name, instructions, agent_id, avatar_kind, avatar_recipe, created_at, updated_at)
        VALUES ('bot_11111111111111111111111111111111', 'Existing', '', 'pi', 'generated', '{"rendererVersion":"9.4.3","style":"shapes","seed":"bot_11111111111111111111111111111111","options":{}}', ?, ?)`,
+    ).run(now, now);
+    db.query(
+      `INSERT INTO bots (id, name, instructions, agent_id, avatar_kind, avatar_recipe, created_at, updated_at)
+       VALUES ('bot_22222222222222222222222222222222', 'Pi', '', 'pi', 'generated', '{"rendererVersion":"9.4.3","style":"shapes","seed":"legacy-random-seed","options":{}}', ?, ?)`,
+    ).run(now, now);
+    db.query(`INSERT INTO bot_state (bot_id) VALUES ('bot_22222222222222222222222222222222')`).run();
+    db.query(
+      `INSERT INTO bots (id, name, instructions, agent_id, avatar_kind, avatar_recipe, created_at, updated_at)
+       VALUES ('bot_33333333333333333333333333333333', 'My teammate', '', 'pi', 'generated', '{"rendererVersion":"9.4.3","style":"shapes","seed":"bot_33333333333333333333333333333333","options":{}}', ?, ?)`,
     ).run(now, now);
     db.query(`INSERT INTO threads (id, bot_id, title, created_at, updated_at) VALUES ('thread_existing', 'bot_11111111111111111111111111111111', 'Existing', ?, ?)`).run(now, now);
     db.query(
@@ -417,6 +426,13 @@ describe("integration: legacy migration", () => {
       const oldestCursor = contracted.svc.events.oldestCursor();
       expect(contracted.svc.events.replay(Math.max(0, oldestCursor - 1), oldestCursor).events.some((event) => event.eventId === "expanded-legacy-event")).toBeFalse();
       expect((contracted.svc.db.query(`SELECT COUNT(*) AS count FROM schema_migrations WHERE name = '0004-contract-legacy-runtime'`).get() as { count: number }).count).toBe(1);
+      const visibleBots = await api<{ id: string; name: string; avatar: { recipe?: { rendererVersion?: string } } }[]>(contracted, "GET", "/api/bots");
+      expect(visibleBots.map((bot) => bot.id).sort()).toEqual([
+        "bot_11111111111111111111111111111111",
+        "bot_33333333333333333333333333333333",
+      ]);
+      expect(visibleBots.every((bot) => bot.avatar.recipe?.rendererVersion === "10.7.0")).toBeTrue();
+      expect(visibleBots.some((bot) => bot.id === "bot_22222222222222222222222222222222")).toBeFalse();
     } finally {
       await contracted.stop();
       rmSync(legacyHome, { recursive: true, force: true });

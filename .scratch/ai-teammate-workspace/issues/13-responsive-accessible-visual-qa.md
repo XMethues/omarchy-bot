@@ -19,7 +19,7 @@
 
 ## Answer
 
-Completed the Astryx workspace as a responsive Sidebar and conversation surface: the Sidebar contains only user-created Bots, existing blank Threads have no hero placeholder, conventional navigation and toolbar actions are icon-only with accessible labels, and selected/working/streaming DiceBear avatars have reduced-motion-safe state animation.
+Completed the Astryx workspace as a responsive Sidebar and conversation surface: the Sidebar contains only intentionally created or data-bearing migrated Bots, existing blank Threads have no hero placeholder, conventional navigation and toolbar actions are icon-only with accessible labels, and selected/working/streaming avatars use DiceBear v10’s reduced-motion-safe SVG-internal animation.
 
 Computer observation now uses a docked desktop drawer or narrow-window Bottom Sheet. The compact preview expands into an Astryx Lightbox modal, Escape closes one layer at a time, and closing the drawer restores focus to its header trigger.
 

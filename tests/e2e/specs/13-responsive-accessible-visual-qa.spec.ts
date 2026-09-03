@@ -28,7 +28,7 @@ interface SeedOptions {
 const avatar = (seed: string) => ({
   kind: "generated",
   recipe: {
-    rendererVersion: "9.4.3",
+    rendererVersion: "10.7.0",
     style: "shapes",
     seed,
     options: {},
@@ -283,13 +283,19 @@ test.describe("ticket 13 responsive, accessible, and visual QA", () => {
     const selectedAvatar = page
       .getByTestId(`sidebar-bot-${PRIMARY_BOT_ID}`)
       .getByTestId("avatar-view");
-    await expect(selectedAvatar).not.toHaveCSS("animation-name", "none");
-    await expect(selectedAvatar.getByTestId("avatar-shapes").locator("img")).toHaveAttribute("src", /^data:image\/svg\+xml/);
+    const selectedImage = selectedAvatar.getByTestId("avatar-shapes").locator("img");
+    const selectedSrc = await selectedImage.getAttribute("src");
+    expect(selectedSrc).toMatch(/^data:image\/svg\+xml/);
+    const selectedSvg = decodeURIComponent(selectedSrc!.slice(selectedSrc!.indexOf(",") + 1));
+    expect(selectedSvg).toContain("@keyframes");
+    expect(selectedSvg).toContain("prefers-reduced-motion");
 
     const idleAvatar = page
       .getByTestId(`sidebar-bot-${SECONDARY_BOT_ID}`)
       .getByTestId("avatar-view");
-    await expect(idleAvatar).toHaveCSS("animation-name", "none");
+    const idleSrc = await idleAvatar.getByTestId("avatar-shapes").locator("img").getAttribute("src");
+    const idleSvg = decodeURIComponent(idleSrc!.slice(idleSrc!.indexOf(",") + 1));
+    expect(idleSvg).not.toContain("@keyframes");
   });
 
 
