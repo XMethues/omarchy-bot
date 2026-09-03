@@ -38,11 +38,13 @@ test.describe("contextual computer sheet", () => {
       if (url.pathname === "/api/computer/take-control") state = "user-control";
       if (url.pathname === "/api/computer/return-to-bot") state = "idle";
       const selectedBotId = url.searchParams.get("botId") ?? undefined;
+      const surfaceId = url.searchParams.get("surfaceId") ?? undefined;
       const selectedState: ComputerState =
-        state === "bot-using" && selectedBotId !== undefined && selectedBotId !== activeBotId ? "idle" : state;
+        state === "bot-using" && selectedBotId !== activeBotId ? "idle" : state;
       await fulfillJson(route, {
         state: selectedState,
-        ...(selectedState === "bot-using" && activeBotId !== undefined ? { botId: activeBotId } : {}),
+        botId: selectedBotId,
+        surfaceId,
         activity:
           selectedState === "bot-using"
             ? "This bot is using the computer."
@@ -98,59 +100,72 @@ test.describe("contextual computer sheet", () => {
     await expect(trigger).toBeFocused();
   });
 
-  test("waiting belongs only to the waiting bot and the emergency fail-safe stays global", async ({ page }) => {
+  test("switching Bots clears old preview state and keeps emergency state Surface-scoped", async ({ page }) => {
     let waitingBotId: string | undefined;
-    let emergencyStopped = false;
+    const emergencyStopped = new Set<string>();
     await page.route("**/api/computer/**", async (route) => {
       const url = new URL(route.request().url());
+      const selectedBotId = url.searchParams.get("botId") ?? undefined;
+      const surfaceId = url.searchParams.get("surfaceId") ?? undefined;
       if (url.pathname === "/api/computer/snapshot") {
         await route.fulfill({ status: 200, contentType: "image/png", body: PNG });
         return;
       }
-      if (url.pathname === "/api/computer/emergency-stop") emergencyStopped = true;
-      if (url.pathname === "/api/computer/resume") emergencyStopped = false;
-      const selectedBotId = url.searchParams.get("botId") ?? undefined;
+      if (url.pathname === "/api/computer/emergency-stop" && surfaceId !== undefined) emergencyStopped.add(surfaceId);
+      if (url.pathname === "/api/computer/resume" && surfaceId !== undefined) emergencyStopped.delete(surfaceId);
       const selectedState: ComputerState =
-        emergencyStopped
+        surfaceId !== undefined && emergencyStopped.has(surfaceId)
           ? "emergency-stopped"
-          : selectedBotId === waitingBotId || (selectedBotId === undefined && waitingBotId !== undefined)
+          : selectedBotId === waitingBotId
             ? "waiting"
-            : "idle";
+            : "bot-using";
       await fulfillJson(route, {
         state: selectedState,
-        ...(selectedState === "waiting" && waitingBotId !== undefined ? { botId: waitingBotId } : {}),
-        activity: selectedState === "waiting" ? "Waiting for computer." : selectedState === "emergency-stopped" ? "Computer control is stopped." : "The computer is ready.",
+        botId: selectedBotId,
+        surfaceId,
+        activity:
+          selectedState === "waiting"
+            ? "Waiting for computer."
+            : selectedState === "emergency-stopped"
+              ? "Computer control is stopped."
+              : "This bot is using the computer.",
+        ...(selectedState === "waiting" ? { previewAt: "2026-09-02T12:00:00.000Z" } : {}),
       });
     });
 
     await page.goto("/");
-    await expect(page.getByRole("complementary", { name: "Global computer safety" })).toHaveCount(0);
+    await expect(page.getByRole("complementary", { name: "Bot Screen safety" })).toHaveCount(0);
     waitingBotId = await createBot(page, "Waiting Bot");
     const otherBotId = await createBot(page, "Other Bot");
 
     await page.getByRole("button", { name: "Waiting Bot", exact: true }).click();
-    await expect(page.getByRole("button", { name: "Open computer", exact: true })).toHaveAttribute("data-state", "waiting");
     await page.getByRole("button", { name: "Open computer", exact: true }).click();
     const computer = page.getByRole("complementary", { name: "Computer", exact: true });
-    await expect(computer.getByRole("heading", { name: "Waiting for computer" })).toBeVisible();
-    await expect(computer.getByRole("button", { name: "Take control" })).toHaveCount(0);
-    await page.keyboard.press("Escape");
+    await expect(computer.getByAltText("Latest computer preview for Waiting Bot")).toBeVisible();
 
     await page.getByRole("button", { name: "Other Bot", exact: true }).click();
-    await expect(page.getByRole("button", { name: "Open computer", exact: true })).toHaveAttribute("data-state", "idle");
-
-    const emergency = page.getByRole("complementary", { name: "Global computer safety" });
-    await expect(emergency.getByRole("button", { name: "Emergency stop computer" })).toBeVisible();
+    await expect(computer.getByAltText("Latest computer preview for Waiting Bot")).toHaveCount(0);
+    await expect(computer.getByAltText("Latest computer preview for Other Bot")).toBeVisible();
+    const emergency = page.getByRole("complementary", { name: "Bot Screen safety" });
     await emergency.getByRole("button", { name: "Emergency stop computer" }).click();
-    await page.getByRole("button", { name: "Waiting Bot", exact: true }).click();
     await expect(emergency.getByRole("button", { name: "Resume computer control" })).toBeVisible();
-    await emergency.getByRole("button", { name: "Resume computer control" }).click();
+
+    await page.getByRole("button", { name: "Waiting Bot", exact: true }).click();
+    await expect(page.getByRole("button", { name: "Close computer", exact: true })).toHaveAttribute("data-state", "waiting");
     await expect(emergency.getByRole("button", { name: "Emergency stop computer" })).toBeVisible();
     expect(otherBotId).not.toBe(waitingBotId);
   });
 
   test("uses a bottom sheet on a narrow screen", async ({ page }) => {
-    await page.route("**/api/computer/state**", (route) => fulfillJson(route, { state: "idle", activity: "The computer is ready." }));
+    await page.route("**/api/computer/state**", (route) => {
+      const url = new URL(route.request().url());
+      return fulfillJson(route, {
+        botId: url.searchParams.get("botId"),
+        surfaceId: url.searchParams.get("surfaceId"),
+        state: "idle",
+        activity: "The computer is ready.",
+      });
+    });
     await page.route("**/api/computer/snapshot**", (route) => route.fulfill({ status: 200, contentType: "image/png", body: PNG }));
     await page.goto("/");
     await createBot(page, "Mobile Computer Bot");

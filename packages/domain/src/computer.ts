@@ -1,8 +1,8 @@
-/**
- * The single, globally exclusive desktop-input grant. `holder: "human"` means
- * the user took over. Read-only observation is never lease-gated.
- */
+import type { SurfaceId } from "./ids.ts";
+
+/** Surface-scoped desktop-input grant. Read-only observation is never lease-gated. */
 export interface ComputerLease {
+  surfaceId: SurfaceId;
   holder: { botId: string } | "human";
   turnId?: string;
   acquiredAt: string;

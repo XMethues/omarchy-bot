@@ -3,7 +3,7 @@ import {
   isAgentCapabilityInventory,
   type AgentCapabilityInventory,
 } from "@omarchy-bot/agent-contract";
-import { AGENT_IDS } from "@omarchy-bot/domain";
+import { AGENT_IDS, isSurfaceId, type SurfaceId } from "@omarchy-bot/domain";
 
 // ----- Agents -----
 
@@ -60,10 +60,16 @@ export const AvatarDto = z.discriminatedUnion("kind", [
 ]);
 export type AvatarDto = z.infer<typeof AvatarDto>;
 
+
+export const SurfaceIdDto = z.custom<SurfaceId>(
+  (value) => typeof value === "string" && isSurfaceId(value),
+  "invalid Computer Surface id",
+);
 // ----- Bots -----
 
 export const BotDto = z.object({
   id: z.string(),
+  surfaceId: SurfaceIdDto,
   name: z.string(),
   instructions: z.string(),
   agentId: z.enum(AGENT_IDS),
@@ -178,8 +184,9 @@ export type DictationResultDto = z.infer<typeof DictationResultDto>;
 // ----- Computer -----
 
 export const ComputerViewDto = z.object({
+  surfaceId: SurfaceIdDto,
+  botId: z.string(),
   state: z.enum(["idle", "bot-using", "waiting", "needs-you", "user-control", "emergency-stopped", "unavailable"]),
-  botId: z.string().optional(),
   activity: z.string().optional(),
   previewAt: z.string().optional(),
 });
@@ -210,7 +217,7 @@ export const DeleteBotBody = z.object({ confirmName: z.string() });
 export type DeleteBotBodyDto = z.infer<typeof DeleteBotBody>;
 
 export const DeleteBotFailureDto = z.object({
-  stage: z.enum(["native_session", "attachment", "avatar", "database"]),
+  stage: z.enum(["native_session", "attachment", "avatar", "surface", "database"]),
   resource: z.string(),
   message: z.string(),
 });
@@ -226,6 +233,8 @@ export const DeleteBotResultDto = z.object({
     turns: z.number().int().nonnegative(),
     attachments: z.number().int().nonnegative(),
     avatar: z.boolean(),
+    computerArtifacts: z.number().int().nonnegative(),
+    surface: z.boolean(),
     nativeSessions: z.number().int().nonnegative(),
   }),
   nativeSessionCleanup: z.object({

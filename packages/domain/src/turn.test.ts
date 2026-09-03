@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { assertTransitionTurn, assertTurnTerminalOnce, canTransitionTurn, isTerminalTurn } from "./turn.ts";
 import { isInputAction, leaseExpired } from "./computer.ts";
-import { isBotId } from "./ids.ts";
+import { isBotId, isSurfaceId, type SurfaceId } from "./ids.ts";
 
 describe("turn state machine", () => {
   test("working can pause for current input and computer states before completion", () => {
@@ -36,7 +36,12 @@ describe("computer actions", () => {
     expect(isInputAction("screenshot")).toBeFalse();
   });
   test("lease expiry", () => {
-    const lease = { holder: "human" as const, acquiredAt: "2026-01-01T00:00:00Z", expiresAt: "2026-01-01T00:01:00Z" };
+    const lease = {
+      surfaceId: "surf_0123456789abcdef0123456789abcdef" as SurfaceId,
+      holder: "human" as const,
+      acquiredAt: "2026-01-01T00:00:00Z",
+      expiresAt: "2026-01-01T00:01:00Z",
+    };
     expect(leaseExpired(lease, new Date("2026-01-01T00:02:00Z"))).toBeTrue();
     expect(leaseExpired(lease, new Date("2026-01-01T00:00:30Z"))).toBeFalse();
   });
@@ -46,5 +51,10 @@ describe("bot ids", () => {
   test("bot ids never alias agent ids", () => {
     expect(isBotId("bot_0123456789abcdef0123456789abcdef")).toBeTrue();
     expect(isBotId("pi")).toBeFalse();
+  });
+
+  test("Surface ids are opaque and distinct from Bot ids", () => {
+    expect(isSurfaceId("surf_0123456789abcdef0123456789abcdef")).toBeTrue();
+    expect(isSurfaceId("bot_0123456789abcdef0123456789abcdef")).toBeFalse();
   });
 });

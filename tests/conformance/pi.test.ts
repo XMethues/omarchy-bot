@@ -303,29 +303,30 @@ describe("pi conformance (10 steps, real model)", () => {
 
       // ---- Step 10: Computer fixture via the REAL broker + REAL computer worker ----
       const broker = daemon.svc.computer;
-      const botActor = { botId: "bot_conformance" };
+      const bot = daemon.svc.bots.create({ name: "Conformance Computer", agentId: "pi" });
+      const owner = { botId: bot.id, surfaceId: bot.surfaceId };
       // observe without lease
-      const obs = await broker.act(botActor, undefined, { name: "observe", args: {} });
+      const obs = await broker.act(owner, undefined, { name: "observe", args: {} });
       expect((obs.text ?? "").length).toBeGreaterThan(0);
       // screenshot lands an artifact
-      await broker.act(botActor, undefined, { name: "screenshot", args: {} });
-      expect(daemon.svc.computer.state().lastImageAt).toBeDefined();
+      await broker.act(owner, undefined, { name: "screenshot", args: {} });
+      expect(daemon.svc.computer.state(owner).lastImageAt).toBeDefined();
       // Gate 1: bot input without lease is rejected
-      await expect(broker.act(botActor, undefined, { name: "click", args: {} })).rejects.toThrow(/no active input lease/);
+      await expect(broker.act(owner, undefined, { name: "click", args: {} })).rejects.toThrow(/no active input lease/);
       // acquire lease as bot, harmless test input (lone shift press is a no-op)
-      const lease = await broker.acquire(botActor, undefined);
+      const lease = await broker.acquire(owner, undefined);
       expect(lease.granted).toBeTrue();
-      await broker.act(botActor, undefined, { name: "key", args: { key: "shift" } });
+      await broker.act(owner, undefined, { name: "key", args: { key: "shift" } });
       // Take over: human steals the lease; bot input must now fail
-      broker.takeOver();
-      await expect(broker.act(botActor, undefined, { name: "type", args: { text: "x" } })).rejects.toThrow();
+      broker.takeOver(owner);
+      await expect(broker.act(owner, undefined, { name: "type", args: { text: "x" } })).rejects.toThrow();
       // I'm done: re-observe, release, bot can resume
-      await broker.imDone();
-      const reAcquire = await broker.acquire(botActor, undefined);
+      await broker.imDone(owner);
+      const reAcquire = await broker.acquire(owner, undefined);
       expect(reAcquire.granted).toBeTrue();
-      const obs2 = await broker.act(botActor, undefined, { name: "observe", args: {} });
+      const obs2 = await broker.act(owner, undefined, { name: "observe", args: {} });
       expect((obs2.text ?? "").length).toBeGreaterThan(0);
-      broker.release(botActor, reAcquire.token!);
+      broker.release(owner, reAcquire.token!);
       console.log("conformance: step 10 ok — observe/screenshot/lease/input/take-over/im-done/resume");
 
       // ---- Record: write the versioned conformance record and verify the gate ----

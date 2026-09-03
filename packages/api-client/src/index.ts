@@ -30,6 +30,11 @@ export interface ApiClientOptions {
   fetch?: typeof fetch;
 }
 
+export interface ComputerSurfaceOwner {
+  botId: string;
+  surfaceId: ComputerViewDto["surfaceId"];
+}
+
 export interface ApiError extends Error {
   status: number;
   body: unknown;
@@ -216,23 +221,27 @@ export class ApiClient {
 
 
   // ----- computer -----
-  computerState(botId?: string): Promise<ComputerViewDto> {
-    return this.req(`/api/computer/state${botId === undefined ? "" : `?botId=${encodeURIComponent(botId)}`}`);
+  computerState(owner: ComputerSurfaceOwner): Promise<ComputerViewDto> {
+    return this.req(this.computerPath("/api/computer/state", owner));
   }
-  takeControl(): Promise<ComputerViewDto> {
-    return this.req("/api/computer/take-control", { method: "POST" });
+  takeControl(owner: ComputerSurfaceOwner): Promise<ComputerViewDto> {
+    return this.req(this.computerPath("/api/computer/take-control", owner), { method: "POST" });
   }
-  returnToBot(): Promise<ComputerViewDto> {
-    return this.req("/api/computer/return-to-bot", { method: "POST" });
+  returnToBot(owner: ComputerSurfaceOwner): Promise<ComputerViewDto> {
+    return this.req(this.computerPath("/api/computer/return-to-bot", owner), { method: "POST" });
   }
-  emergencyStop(): Promise<ComputerViewDto> {
-    return this.req("/api/computer/emergency-stop", { method: "POST" });
+  emergencyStop(owner: ComputerSurfaceOwner): Promise<ComputerViewDto> {
+    return this.req(this.computerPath("/api/computer/emergency-stop", owner), { method: "POST" });
   }
-  resumeComputer(): Promise<ComputerViewDto> {
-    return this.req("/api/computer/resume", { method: "POST" });
+  resumeComputer(owner: ComputerSurfaceOwner): Promise<ComputerViewDto> {
+    return this.req(this.computerPath("/api/computer/resume", owner), { method: "POST" });
   }
-  computerImageUrl(): string {
-    return `${this.base}/api/computer/snapshot?t=${Date.now()}`;
+  computerImageUrl(owner: ComputerSurfaceOwner): string {
+    return `${this.base}${this.computerPath("/api/computer/snapshot", owner)}&t=${Date.now()}`;
+  }
+
+  private computerPath(path: string, owner: ComputerSurfaceOwner): string {
+    return `${path}?botId=${encodeURIComponent(owner.botId)}&surfaceId=${encodeURIComponent(owner.surfaceId)}`;
   }
 
   // ----- events -----

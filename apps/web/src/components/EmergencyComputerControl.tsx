@@ -20,7 +20,7 @@ const localStyles = stylex.create({
   },
 });
 
-/** Global fail-safe kept clear of the conversation composer and sheet actions. */
+/** Selected-Bot fail-safe kept clear of the conversation composer and sheet actions. */
 export function EmergencyComputerControl({
   view,
   busy = false,
@@ -40,7 +40,7 @@ export function EmergencyComputerControl({
       as="aside"
       gap={1}
       xstyle={localStyles.root}
-      aria-label="Global computer safety"
+      aria-label="Bot Screen safety"
       aria-live="polite"
       data-testid="emergency-computer-control"
     >

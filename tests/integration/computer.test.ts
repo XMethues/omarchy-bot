@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { EventEnvelope } from "../../packages/protocol/src/index.ts";
 import { handleComputerRequest } from "../../apps/daemon/src/api/computerRoutes.ts";
+import type { ComputerSurfaceOwner } from "../../apps/daemon/src/modules/computer/broker.ts";
 import { api, makeBot, sendToBot, startDaemon, type Harness } from "./helpers/harness.ts";
 
 async function computerRequest<T>(h: Harness, method: string, path: string): Promise<{ response: Response; body: T }> {
@@ -10,6 +11,18 @@ async function computerRequest<T>(h: Harness, method: string, path: string): Pro
     response,
     body: (contentType?.startsWith("application/json") ? await response.json() : await response.arrayBuffer()) as T,
   };
+}
+
+type SurfaceOwner = ComputerSurfaceOwner;
+
+async function ownerFor(h: Harness, botId: string): Promise<SurfaceOwner> {
+  const bot = await api<{ id: string; surfaceId: string }>(h, "GET", `/api/bots/${botId}`);
+  return { botId: bot.id, surfaceId: bot.surfaceId as ComputerSurfaceOwner["surfaceId"] };
+}
+
+function computerPath(path: string, owner: SurfaceOwner): string {
+  const separator = path.includes("?") ? "&" : "?";
+  return `${path}${separator}botId=${encodeURIComponent(owner.botId)}&surfaceId=${encodeURIComponent(owner.surfaceId)}`;
 }
 
 function isResumeEvent(event: EventEnvelope, turnId: string): boolean {
@@ -27,7 +40,10 @@ function hasContextualComputerPayload(event: EventEnvelope): boolean {
   const payload = event.payload;
   return payload !== null
     && typeof payload === "object"
-    && Object.keys(payload).every((key) => key === "botId");
+    && "botId" in payload
+    && "surfaceId" in payload
+    && typeof payload.botId === "string"
+    && typeof payload.surfaceId === "string";
 }
 
 async function waitForTurnStatus(h: Harness, turnId: string, status: string): Promise<void> {
@@ -40,15 +56,6 @@ async function waitForTurnStatus(h: Harness, turnId: string, status: string): Pr
   }
 }
 
-async function waitForComputerState(h: Harness, botId: string, state: string): Promise<void> {
-  const deadline = Date.now() + 5_000;
-  for (;;) {
-    const { body } = await computerRequest<{ state: string }>(h, "GET", `/api/computer/state?botId=${botId}`);
-    if (body.state === state) return;
-    if (Date.now() >= deadline) throw new Error(`computer for ${botId} did not reach ${state}; current=${body.state}`);
-    await Bun.sleep(20);
-  }
-}
 
 describe("contextual computer control", () => {
   let h: Harness;
@@ -61,60 +68,118 @@ describe("contextual computer control", () => {
     await h.stop();
   });
 
-  test("idle state includes the latest observable preview without requiring input ownership", async () => {
-    const botId = await makeBot(h, "Observer");
 
-    const observation = await h.svc.computer.act({ botId }, undefined, { name: "observe", args: {} });
+  test("new Bots own distinct stable opaque Computer Surfaces", async () => {
+    const first = await api<{ id: string; surfaceId: string }>(h, "POST", "/api/bots", {
+      name: "First screen",
+      instructions: "",
+      agentId: "pi",
+    });
+    const second = await api<{ id: string; surfaceId: string }>(h, "POST", "/api/bots", {
+      name: "Second screen",
+      instructions: "",
+      agentId: "pi",
+    });
+
+    expect(first.surfaceId).toMatch(/^surf_[0-9a-f]{32}$/);
+    expect(second.surfaceId).toMatch(/^surf_[0-9a-f]{32}$/);
+    expect(second.surfaceId).not.toBe(first.surfaceId);
+    expect((await api<{ surfaceId: string }>(h, "GET", `/api/bots/${first.id}`)).surfaceId).toBe(first.surfaceId);
+  });
+
+  test("Computer routes reject a missing Bot and Surface association", async () => {
+    const response = await fetch(`${h.baseUrl}/api/computer/state`);
+    expect(response.status).toBe(400);
+  });
+
+  test("Computer routes reject mismatched Bot and Surface ownership", async () => {
+    const first = await api<{ id: string; surfaceId: string }>(h, "POST", "/api/bots", {
+      name: "First owner",
+      instructions: "",
+      agentId: "pi",
+    });
+    const second = await api<{ id: string; surfaceId: string }>(h, "POST", "/api/bots", {
+      name: "Second owner",
+      instructions: "",
+      agentId: "pi",
+    });
+
+    const response = await fetch(
+      `${h.baseUrl}/api/computer/state?botId=${first.id}&surfaceId=${second.surfaceId}`,
+    );
+    expect(response.status).toBe(404);
+  });
+  test("preview observations and cached state remain scoped to their Surface", async () => {
+    const first = await ownerFor(h, await makeBot(h, "Observer"));
+    const second = await ownerFor(h, await makeBot(h, "Other observer"));
+
+    const observation = await h.svc.computer.act(first, undefined, { name: "observe", args: {} });
     expect(observation.text).toMatch(/^fake-observe#/);
 
-    const snapshot = await computerRequest<ArrayBuffer>(h, "GET", "/api/computer/snapshot");
+    const snapshot = await computerRequest<ArrayBuffer>(h, "GET", computerPath("/api/computer/snapshot", first));
     expect(snapshot.response.status).toBe(200);
     expect(snapshot.response.headers.get("content-type")).toBe("image/png");
     expect(snapshot.body.byteLength).toBeGreaterThan(0);
 
-    const { body } = await computerRequest<{ state: string; activity?: string; previewAt?: string }>(
+    const firstState = await computerRequest<{ botId: string; surfaceId: string; state: string; activity?: string; previewAt?: string }>(
       h,
       "GET",
-      `/api/computer/state?botId=${botId}`,
+      computerPath("/api/computer/state", first),
     );
-    expect(body.state).toBe("idle");
-    expect(body.activity).toBe("The computer is ready.");
-    expect(body.previewAt).toBeString();
-  });
-
-  test("bot use and waiting are scoped to the selected bot", async () => {
-    const usingBotId = await makeBot(h, "Using");
-    const waitingBotId = await makeBot(h, "Waiting");
-    const unrelatedBotId = await makeBot(h, "Unrelated");
-
-    expect((await h.svc.computer.acquire({ botId: usingBotId }, undefined)).granted).toBeTrue();
-    expect((await h.svc.computer.acquire({ botId: waitingBotId }, undefined)).queued).toBeTrue();
-
-    expect((await computerRequest<{ state: string; botId?: string }>(h, "GET", `/api/computer/state?botId=${usingBotId}`)).body).toMatchObject({
-      state: "bot-using",
-      botId: usingBotId,
-    });
-    expect((await computerRequest<{ state: string; botId?: string }>(h, "GET", `/api/computer/state?botId=${waitingBotId}`)).body).toMatchObject({
-      state: "waiting",
-      botId: waitingBotId,
-    });
-    expect((await computerRequest<{ state: string; botId?: string }>(h, "GET", `/api/computer/state?botId=${unrelatedBotId}`)).body).toMatchObject({
+    const secondState = await computerRequest<{ botId: string; surfaceId: string; state: string; activity?: string; previewAt?: string }>(
+      h,
+      "GET",
+      computerPath("/api/computer/state", second),
+    );
+    expect(firstState.body).toMatchObject({ ...first, state: "idle", previewAt: expect.any(String) });
+    expect(secondState.body).toEqual({
+      ...second,
       state: "idle",
+      activity: "The computer is ready.",
     });
   });
 
-  test("takeover parks the active bot and return re-observes before resuming it", async () => {
+  test("Bot Surfaces hold independent input leases", async () => {
+    const first = await ownerFor(h, await makeBot(h, "First"));
+    const second = await ownerFor(h, await makeBot(h, "Second"));
+
+    const firstLease = await h.svc.computer.acquire(first, undefined);
+    const secondLease = await h.svc.computer.acquire(second, undefined);
+    expect(firstLease.granted).toBeTrue();
+    expect(secondLease.granted).toBeTrue();
+    await expect(h.svc.computer.act(first, undefined, { name: "type", args: { text: "one" } })).resolves.toMatchObject({
+      text: expect.stringMatching(/^fake-type#/),
+    });
+    await expect(h.svc.computer.act(second, undefined, { name: "type", args: { text: "two" } })).resolves.toMatchObject({
+      text: expect.stringMatching(/^fake-type#/),
+    });
+    expect((await computerRequest(h, "GET", computerPath("/api/computer/state", first))).body)
+      .toMatchObject({ ...first, state: "bot-using" });
+    expect((await computerRequest(h, "GET", computerPath("/api/computer/state", second))).body)
+      .toMatchObject({ ...second, state: "bot-using" });
+  });
+
+  test("takeover parks and resumes only the owning Surface's active turn", async () => {
     const botId = await makeBot(h, "Driver");
+    const owner = await ownerFor(h, botId);
     const turn = await sendToBot(h, botId, "hang");
     await waitForTurnStatus(h, turn.turnId, "working");
-    expect((await h.svc.computer.acquire({ botId }, turn.turnId)).granted).toBeTrue();
+    expect((await h.svc.computer.acquire(owner, turn.turnId)).granted).toBeTrue();
 
-    const taken = await computerRequest<{ state: string }>(h, "POST", `/api/computer/take-control?botId=${botId}`);
+    const taken = await computerRequest<{ state: string }>(
+      h,
+      "POST",
+      computerPath("/api/computer/take-control", owner),
+    );
     expect(taken.body.state).toBe("user-control");
     await waitForTurnStatus(h, turn.turnId, "waiting_for_input");
 
-    const returned = await computerRequest<{ state: string; botId?: string }>(h, "POST", `/api/computer/return-to-bot?botId=${botId}`);
-    expect(returned.body).toMatchObject({ state: "bot-using", botId });
+    const returned = await computerRequest<{ state: string; botId: string; surfaceId: string }>(
+      h,
+      "POST",
+      computerPath("/api/computer/return-to-bot", owner),
+    );
+    expect(returned.body).toMatchObject({ ...owner, state: "bot-using" });
     await waitForTurnStatus(h, turn.turnId, "working");
 
     const events = h.svc.events.replay(0, h.svc.events.oldestCursor()).events;
@@ -122,69 +187,57 @@ describe("contextual computer control", () => {
     const stateChanges = events.filter((event) => event.aggregateType === "computer");
     expect(resumed).toBeDefined();
     expect(stateChanges.length).toBeGreaterThan(0);
-    expect(stateChanges.every((event) => event.aggregateId === "state" && event.type === "computer.state.changed")).toBeTrue();
+    expect(stateChanges.every((event) =>
+      event.aggregateId === owner.surfaceId && event.type === "computer.state.changed"
+    )).toBeTrue();
     expect(stateChanges.every(hasContextualComputerPayload)).toBeTrue();
     expect(stateChanges.some((event) => event.cursor < resumed!.cursor)).toBeTrue();
   });
 
-  test("input leases serialize bots while observation remains ownership-free", async () => {
-    const firstBotId = await makeBot(h, "First");
-    const secondBotId = await makeBot(h, "Second");
-    const firstTurn = await sendToBot(h, firstBotId, "hang");
-    const secondTurn = await sendToBot(h, secondBotId, "hang");
-    await waitForTurnStatus(h, firstTurn.turnId, "working");
-    await waitForTurnStatus(h, secondTurn.turnId, "working");
-    const firstLease = await h.svc.computer.acquire({ botId: firstBotId }, firstTurn.turnId);
-    expect(firstLease.granted).toBeTrue();
-    expect((await h.svc.computer.acquire({ botId: secondBotId }, secondTurn.turnId)).queued).toBeTrue();
-    await waitForTurnStatus(h, secondTurn.turnId, "waiting_for_computer");
+  test("Surface-scoped emergency stop leaves another Bot Surface usable", async () => {
+    const stopped = await ownerFor(h, await makeBot(h, "Stopped Bot"));
+    const unaffected = await ownerFor(h, await makeBot(h, "Unaffected Bot"));
+    expect((await h.svc.computer.acquire(stopped, undefined)).granted).toBeTrue();
+    expect((await h.svc.computer.acquire(unaffected, undefined)).granted).toBeTrue();
 
-    await expect(h.svc.computer.act({ botId: firstBotId }, firstTurn.turnId, { name: "type", args: { text: "one" } })).resolves.toMatchObject({
-      text: expect.stringMatching(/^fake-type#/),
-    });
-    await expect(h.svc.computer.act({ botId: secondBotId }, secondTurn.turnId, { name: "type", args: { text: "two" } })).rejects.toThrow(
-      `input lease held by ${firstBotId}`,
-    );
-    await expect(h.svc.computer.act({ botId: secondBotId }, secondTurn.turnId, { name: "observe", args: {} })).resolves.toMatchObject({
-      text: expect.stringMatching(/^fake-observe#/),
-    });
+    expect((
+      await computerRequest<{ state: string }>(
+        h,
+        "POST",
+        computerPath("/api/computer/emergency-stop", stopped),
+      )
+    ).body.state).toBe("emergency-stopped");
+    await expect(h.svc.computer.act(stopped, undefined, { name: "type", args: { text: "blocked" } }))
+      .rejects.toThrow("computer input is emergency-stopped");
+    await expect(h.svc.computer.act(unaffected, undefined, { name: "type", args: { text: "allowed" } }))
+      .resolves.toMatchObject({ text: expect.stringMatching(/^fake-type#/) });
 
-    h.svc.computer.release({ botId: firstBotId }, firstLease.token!);
-    await waitForComputerState(h, secondBotId, "bot-using");
-    await waitForTurnStatus(h, secondTurn.turnId, "working");
-    await expect(h.svc.computer.act({ botId: secondBotId }, secondTurn.turnId, { name: "click", args: { x: 1, y: 1 } })).resolves.toMatchObject({
-      text: expect.stringMatching(/^fake-click#/),
-    });
+    expect((
+      await computerRequest<{ state: string }>(
+        h,
+        "POST",
+        computerPath("/api/computer/resume", stopped),
+      )
+    ).body.state).toBe("bot-using");
   });
 
-  test("open_url needs only the active lease and reports contextual state", async () => {
-    const botId = await makeBot(h, "Computer user");
-    const lease = await h.svc.computer.acquire({ botId }, undefined);
+  test("archive and restore retain Surface identity while permanent deletion removes it", async () => {
+    const owner = await ownerFor(h, await makeBot(h, "Archived screen"));
+    const archived = await api<{ surfaceId: string }>(h, "POST", `/api/bots/${owner.botId}/archive`, {});
+    expect(archived.surfaceId).toBe(owner.surfaceId);
+    expect((await fetch(`${h.baseUrl}${computerPath("/api/computer/state", owner)}`)).status).toBe(404);
 
-    await expect(h.svc.computer.act({ botId }, undefined, { name: "open_url", args: { url: "https://example.com" } })).resolves.toMatchObject({
-      text: expect.stringMatching(/^fake-open_url#/),
+    const restored = await api<{ surfaceId: string }>(h, "POST", `/api/bots/${owner.botId}/restore`);
+    expect(restored.surfaceId).toBe(owner.surfaceId);
+    expect((await fetch(`${h.baseUrl}${computerPath("/api/computer/state", owner)}`)).status).toBe(200);
+
+    await api(h, "POST", `/api/bots/${owner.botId}/archive`, {});
+    const deleted = await api<{ status: string }>(h, "DELETE", `/api/bots/${owner.botId}`, {
+      confirmName: "Archived screen",
     });
-    expect(lease.granted).toBeTrue();
-    expect((await computerRequest<{ state: string; botId?: string }>(h, "GET", `/api/computer/state?botId=${botId}`)).body)
-      .toMatchObject({ state: "bot-using", botId });
-  });
-
-  test("emergency stop revokes input globally while leaving observation available until resume", async () => {
-    const botId = await makeBot(h, "Emergency Bot");
-    expect((await h.svc.computer.acquire({ botId }, undefined)).granted).toBeTrue();
-
-    expect((await computerRequest<{ state: string }>(h, "POST", "/api/computer/emergency-stop")).body.state).toBe("emergency-stopped");
-    await expect(h.svc.computer.act({ botId }, undefined, { name: "type", args: { text: "blocked" } })).rejects.toThrow(
-      "computer input is emergency-stopped",
-    );
-    await expect(h.svc.computer.act({ botId }, undefined, { name: "observe", args: {} })).resolves.toMatchObject({
-      text: expect.stringMatching(/^fake-observe#/),
-    });
-
-    expect((await computerRequest<{ state: string; botId?: string }>(h, "POST", `/api/computer/resume?botId=${botId}`)).body).toMatchObject({
-      state: "bot-using",
-      botId,
-    });
+    expect(deleted.status).toBe("deleted");
+    expect(h.svc.db.query(`SELECT surface_id FROM bot_surfaces WHERE surface_id = ?`).get(owner.surfaceId)).toBeNull();
+    expect((await fetch(`${h.baseUrl}${computerPath("/api/computer/state", owner)}`)).status).toBe(404);
   });
 
   test("non-computer requests are left to the parent router", async () => {

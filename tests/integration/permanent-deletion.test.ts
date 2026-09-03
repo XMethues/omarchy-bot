@@ -52,6 +52,15 @@ describe("permanent archived Bot deletion", () => {
   test("removes Bot-owned database rows and files while preserving the shared Agent and sibling Bot", async () => {
     const botId = await makeBot(h, "Delete all owned data");
     const siblingId = await makeBot(h, "Shared Agent sibling survives");
+    const deletedBot = await api<BotViewDto>(h, "GET", `/api/bots/${botId}`);
+    await h.svc.computer.act(
+      { botId, surfaceId: deletedBot.surfaceId },
+      undefined,
+      { name: "screenshot", args: {} },
+    );
+    const computerArtifact = h.svc.db
+      .query(`SELECT id, path FROM artifacts WHERE surface_id = ?`)
+      .get(deletedBot.surfaceId) as { id: string; path: string };
     const draftToken = crypto.randomUUID();
     const managed = await stageAttachment(h, botId, "managed bytes", "managed.txt", draftToken);
     const staged = await stageAttachment(h, botId, "staged bytes", "staged.txt", draftToken);
@@ -71,6 +80,7 @@ describe("permanent archived Bot deletion", () => {
     expect(existsSync(managedPath)).toBeTrue();
     expect(existsSync(stagedPath)).toBeTrue();
     expect(existsSync(avatarPath)).toBeTrue();
+    expect(existsSync(computerArtifact.path)).toBeTrue();
 
     await api(h, "POST", `/api/bots/${botId}/archive`, {});
     const result = await api<DeleteBotResultDto>(h, "DELETE", `/api/bots/${botId}`, { confirmName: "Delete all owned data" });
@@ -82,18 +92,23 @@ describe("permanent archived Bot deletion", () => {
       turns: 1,
       attachments: 2,
       avatar: true,
+      computerArtifacts: 1,
+      surface: true,
       nativeSessions: 1,
     });
     expect(result.nativeSessionCleanup).toEqual({ supported: true, skipped: 0 });
     expect(existsSync(managedPath)).toBeFalse();
     expect(existsSync(stagedPath)).toBeFalse();
     expect(existsSync(avatarPath)).toBeFalse();
+    expect(existsSync(computerArtifact.path)).toBeFalse();
     expect((await apiStatus(h, "GET", `/api/bots/${botId}`)).status).toBe(404);
     expect((await apiStatus(h, "GET", `/api/threads/${sent.threadId}`)).status).toBe(404);
     expect(h.svc.db.query(`SELECT COUNT(*) AS count FROM messages WHERE thread_id=?`).get(sent.threadId)).toEqual({ count: 0 });
     expect(h.svc.db.query(`SELECT COUNT(*) AS count FROM turns WHERE bot_id=?`).get(botId)).toEqual({ count: 0 });
     expect(h.svc.db.query(`SELECT COUNT(*) AS count FROM thread_sessions WHERE thread_id=?`).get(sent.threadId)).toEqual({ count: 0 });
     expect(h.svc.db.query(`SELECT COUNT(*) AS count FROM attachments WHERE bot_id=?`).get(botId)).toEqual({ count: 0 });
+    expect(h.svc.db.query(`SELECT COUNT(*) AS count FROM artifacts WHERE surface_id=?`).get(deletedBot.surfaceId)).toEqual({ count: 0 });
+    expect(h.svc.db.query(`SELECT COUNT(*) AS count FROM bot_surfaces WHERE surface_id=?`).get(deletedBot.surfaceId)).toEqual({ count: 0 });
     expect(
       h.svc.db.query(`SELECT type FROM events WHERE aggregate_type='bot' AND aggregate_id=? ORDER BY cursor`).all(botId),
     ).toEqual([{ type: "bot.deleted" }]);

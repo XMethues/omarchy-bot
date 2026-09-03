@@ -18,7 +18,7 @@ import {
   type ComputerProbePayload,
   type ComputerResult,
 } from "@omarchy-bot/agent-contract";
-import { isInputAction } from "@omarchy-bot/domain";
+import { isInputAction, isSurfaceId } from "@omarchy-bot/domain";
 import { McpClient, type McpCallResult } from "./mcp.ts";
 
 const AGENT_ID = "computer";
@@ -202,6 +202,12 @@ async function handle(cmd: ComputerCommand): Promise<ComputerResult> {
       }
     }
     case "act": {
+      if (!isSurfaceId(cmd.surfaceId)) {
+        return { requestId: cmd.requestId, ok: false, error: "valid surfaceId is required" };
+      }
+      if (cmd.lease !== undefined && cmd.lease.surfaceId !== cmd.surfaceId) {
+        return { requestId: cmd.requestId, ok: false, error: "lease Surface does not match command Surface" };
+      }
       try {
         const payload = await performAction(cmd.action, cmd.lease?.token);
         return { requestId: cmd.requestId, ok: true, payload };

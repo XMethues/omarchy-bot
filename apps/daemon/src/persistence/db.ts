@@ -493,6 +493,58 @@ WHERE avatar_kind IN ('generated', 'recipe')
   END;
 `,
   },
+  {
+    name: "0010-bot-computer-surfaces",
+    sql: `
+CREATE TABLE bot_surfaces (
+  surface_id TEXT PRIMARY KEY CHECK (surface_id GLOB 'surf_[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]'),
+  bot_id TEXT NOT NULL UNIQUE REFERENCES bots(id) ON DELETE CASCADE,
+  lifecycle_state TEXT NOT NULL DEFAULT 'stopped' CHECK (lifecycle_state IN ('stopped', 'starting', 'ready', 'failed')),
+  runtime_generation INTEGER NOT NULL DEFAULT 0,
+  logical_width INTEGER NOT NULL DEFAULT 1920,
+  logical_height INTEGER NOT NULL DEFAULT 1080,
+  scale REAL NOT NULL DEFAULT 1,
+  refresh_rate INTEGER NOT NULL DEFAULT 60,
+  last_failure TEXT,
+  last_image_at TEXT,
+  transitioned_at TEXT NOT NULL
+);
+INSERT INTO bot_surfaces (surface_id, bot_id, transitioned_at)
+SELECT 'surf_' || lower(hex(randomblob(16))), id, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+FROM bots;
+
+CREATE TABLE computer_leases_by_surface (
+  surface_id TEXT PRIMARY KEY REFERENCES bot_surfaces(surface_id) ON DELETE CASCADE,
+  holder_is_human INTEGER NOT NULL DEFAULT 0,
+  holder_bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+  turn_id TEXT,
+  token TEXT NOT NULL,
+  acquired_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL
+);
+INSERT INTO computer_leases_by_surface
+  (surface_id, holder_is_human, holder_bot_id, turn_id, token, acquired_at, expires_at)
+SELECT bot_surfaces.surface_id, computer_leases.holder_is_human, computer_leases.holder_bot_id,
+       computer_leases.turn_id, computer_leases.token, computer_leases.acquired_at, computer_leases.expires_at
+FROM computer_leases
+JOIN bot_surfaces ON bot_surfaces.bot_id = computer_leases.holder_bot_id;
+DROP TABLE computer_leases;
+ALTER TABLE computer_leases_by_surface RENAME TO computer_leases;
+
+-- Existing artifact rows predate ownership metadata and cannot be attributed
+-- safely. Retain them losslessly outside the active, fail-closed Surface store.
+ALTER TABLE artifacts RENAME TO legacy_unscoped_artifacts;
+CREATE TABLE artifacts (
+  id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL,
+  media_type TEXT NOT NULL,
+  path TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  surface_id TEXT NOT NULL REFERENCES bot_surfaces(surface_id) ON DELETE CASCADE
+);
+CREATE INDEX idx_artifacts_surface ON artifacts(surface_id);
+`,
+  },
 ];
 
 export function openDb(cfg: Config): Database {

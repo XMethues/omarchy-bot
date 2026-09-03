@@ -2,40 +2,56 @@ import { randomUUID } from "node:crypto";
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { Database } from "bun:sqlite";
-import { isInputAction, type ComputerAction, type ComputerLease } from "@omarchy-bot/domain";
+import { isInputAction, type ComputerAction, type ComputerLease, type SurfaceId } from "@omarchy-bot/domain";
 import type { EventLog } from "../events/eventLog.ts";
 import type { TurnService } from "../turns/turns.ts";
 import type { Supervisor } from "../../supervision/supervisor.ts";
 import type { Config } from "../../bootstrap/config.ts";
 
-interface LeaseRow { holder_is_human: number; holder_bot_id: string | null; turn_id: string | null; token: string; acquired_at: string; expires_at: string }
+interface LeaseRow {
+  surface_id: SurfaceId;
+  holder_is_human: number;
+  holder_bot_id: string;
+  turn_id: string | null;
+  token: string;
+  acquired_at: string;
+  expires_at: string;
+}
 interface ParkedBot {
-  actor: { botId: string };
   turnId?: string;
 }
+interface SnapshotCache {
+  checkedAt: number;
+  mediaType: string;
+  bytes: Uint8Array;
+}
 export interface ComputerBrokerState {
+  botId: string;
+  surfaceId: SurfaceId;
   lease: ComputerLease | null;
-  queuedBotIds: string[];
-  needsHumanBotIds: string[];
+  queuedTurnIds: string[];
+  needsHuman: boolean;
   emergencyStopped: boolean;
   lastImageAt?: string;
 }
 
+export interface ComputerSurfaceOwner {
+  botId: string;
+  surfaceId: SurfaceId;
+}
+
 
 /**
- * ComputerBroker: the only grantor/revoker of the exclusive input lease and
- * the only path from agents to the desktop. Observation is never lease-gated;
- * input actions are serialized and failures are fail closed. (ADR 0004:
- * arbitration stays internal and never filters Agent capabilities.)
+ * Surface-scoped coordination boundary. Ticket 01 keeps the physical worker
+ * behind this interface while every caller, cache, lease and event is bound
+ * to the owning Bot's durable Computer Surface.
  */
 export class ComputerBroker {
-  #queue: ParkedBot[] = [];
-  #parkedForHuman: ParkedBot | undefined;
-  #parkedForEmergency: ParkedBot | undefined;
-  #emergencyStopped = false;
-  #lastSnapshotAt = 0;
-  #snapshotCache: { mediaType: string; bytes: Uint8Array } | undefined;
-  #lastImageAt: string | undefined;
+  #queues = new Map<SurfaceId, ParkedBot[]>();
+  #parkedForHuman = new Map<SurfaceId, ParkedBot>();
+  #parkedForEmergency = new Map<SurfaceId, ParkedBot>();
+  #emergencyStopped = new Set<SurfaceId>();
+  #snapshotCaches = new Map<SurfaceId, SnapshotCache>();
 
   constructor(
     private readonly db: Database,
@@ -43,253 +59,385 @@ export class ComputerBroker {
     private readonly turns: TurnService,
     private readonly supervisor: Supervisor,
     private readonly cfg: Config,
-  ) {}
-
-  #lease(): LeaseRow | undefined {
-    // bun:sqlite .get() returns null (not undefined) for no rows.
-    return (this.db.query(`SELECT * FROM computer_leases WHERE id = 1`).get() ?? undefined) as LeaseRow | undefined;
+  ) {
+    this.events.subscribe((event) => {
+      if (event.aggregateType !== "bot" || (event.type !== "bot.archived" && event.type !== "bot.deleted")) return;
+      const payload = event.payload as { surfaceId?: unknown } | undefined;
+      if (typeof payload?.surfaceId === "string") this.#clearSurface(payload.surfaceId as SurfaceId);
+    });
   }
 
-  #writeLease(l: LeaseRow | undefined): void {
-    if (!l) {
-      this.db.query(`DELETE FROM computer_leases WHERE id = 1`).run();
+  resolveOwner(botId: string, surfaceId: string): ComputerSurfaceOwner | undefined {
+    const row = this.db
+      .query(
+        `SELECT bot_surfaces.surface_id
+         FROM bot_surfaces
+         JOIN bots ON bots.id = bot_surfaces.bot_id
+         WHERE bot_surfaces.bot_id = ? AND bot_surfaces.surface_id = ? AND bots.archived = 0`,
+      )
+      .get(botId, surfaceId) as { surface_id: SurfaceId } | null;
+    return row === null ? undefined : { botId, surfaceId: row.surface_id };
+  }
+
+  ownerForBot(botId: string): ComputerSurfaceOwner | undefined {
+    const row = this.db
+      .query(
+        `SELECT bot_surfaces.surface_id
+         FROM bot_surfaces
+         JOIN bots ON bots.id = bot_surfaces.bot_id
+         WHERE bot_surfaces.bot_id = ? AND bots.archived = 0`,
+      )
+      .get(botId) as { surface_id: SurfaceId } | null;
+    return row === null ? undefined : { botId, surfaceId: row.surface_id };
+  }
+
+  #requireOwner(owner: ComputerSurfaceOwner): ComputerSurfaceOwner {
+    const resolved = this.resolveOwner(owner.botId, owner.surfaceId);
+    if (resolved === undefined) throw new Error("unknown, archived, or mismatched Computer Surface owner");
+    return resolved;
+  }
+
+  #lease(surfaceId: SurfaceId): LeaseRow | undefined {
+    return (this.db.query(`SELECT * FROM computer_leases WHERE surface_id = ?`).get(surfaceId) ?? undefined) as
+      | LeaseRow
+      | undefined;
+  }
+
+  #writeLease(owner: ComputerSurfaceOwner, lease: LeaseRow | undefined): void {
+    if (lease === undefined) {
+      this.db.query(`DELETE FROM computer_leases WHERE surface_id = ?`).run(owner.surfaceId);
       return;
     }
     this.db
-      .query(`INSERT INTO computer_leases (id, holder_is_human, holder_bot_id, turn_id, token, acquired_at, expires_at)
-              VALUES (1, ?, ?, ?, ?, ?, ?)
-              ON CONFLICT(id) DO UPDATE SET holder_is_human=excluded.holder_is_human, holder_bot_id=excluded.holder_bot_id,
-                turn_id=excluded.turn_id, token=excluded.token,
-                acquired_at=excluded.acquired_at, expires_at=excluded.expires_at`)
-      .run(l.holder_is_human, l.holder_bot_id, l.turn_id, l.token, l.acquired_at, l.expires_at);
+      .query(
+        `INSERT INTO computer_leases
+           (surface_id, holder_is_human, holder_bot_id, turn_id, token, acquired_at, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(surface_id) DO UPDATE SET
+           holder_is_human=excluded.holder_is_human,
+           holder_bot_id=excluded.holder_bot_id,
+           turn_id=excluded.turn_id,
+           token=excluded.token,
+           acquired_at=excluded.acquired_at,
+           expires_at=excluded.expires_at`,
+      )
+      .run(
+        lease.surface_id,
+        lease.holder_is_human,
+        lease.holder_bot_id,
+        lease.turn_id,
+        lease.token,
+        lease.acquired_at,
+        lease.expires_at,
+      );
   }
 
-  #leaseMatchesActor(l: LeaseRow, actor: { botId: string }, turnId?: string): boolean {
-    if (l.holder_is_human) return false;
-    return l.holder_bot_id === actor.botId && (turnId === undefined || l.turn_id === turnId);
+  #event(owner: ComputerSurfaceOwner): void {
+    this.events.append("computer", owner.surfaceId, "computer.state.changed", owner);
   }
 
-  state(): ComputerBrokerState {
-    const l = this.#lease();
-    const needsHumanBotIds = (
-      this.db
-        .query(`SELECT DISTINCT bot_id FROM turns WHERE status = 'waiting_for_input'`)
-        .all() as { bot_id: string }[]
-    ).map((row) => row.bot_id);
+  #queue(surfaceId: SurfaceId): ParkedBot[] {
+    let queue = this.#queues.get(surfaceId);
+    if (queue === undefined) {
+      queue = [];
+      this.#queues.set(surfaceId, queue);
+    }
+    return queue;
+  }
+
+  state(input: ComputerSurfaceOwner): ComputerBrokerState {
+    const owner = this.#requireOwner(input);
+    const lease = this.#lease(owner.surfaceId);
+    const surface = this.db
+      .query(`SELECT last_image_at FROM bot_surfaces WHERE surface_id = ?`)
+      .get(owner.surfaceId) as { last_image_at: string | null };
+    const needsHuman =
+      this.db.query(`SELECT 1 FROM turns WHERE bot_id = ? AND status = 'waiting_for_input' LIMIT 1`).get(owner.botId) !== null;
     return {
-      lease: l
-        ? {
-            holder: l.holder_is_human ? ("human" as const) : { botId: l.holder_bot_id! },
-            ...(l.turn_id !== null ? { turnId: l.turn_id } : {}),
-            acquiredAt: l.acquired_at,
-            expiresAt: l.expires_at,
-          }
-        : null,
-      queuedBotIds: this.#queue.map((entry) => entry.actor.botId),
-      needsHumanBotIds,
-      emergencyStopped: this.#emergencyStopped,
-      ...(this.#lastImageAt !== undefined ? { lastImageAt: this.#lastImageAt } : {}),
+      ...owner,
+      lease:
+        lease === undefined
+          ? null
+          : {
+              surfaceId: owner.surfaceId,
+              holder: lease.holder_is_human ? ("human" as const) : { botId: owner.botId },
+              ...(lease.turn_id !== null ? { turnId: lease.turn_id } : {}),
+              acquiredAt: lease.acquired_at,
+              expiresAt: lease.expires_at,
+            },
+      queuedTurnIds: this.#queue(owner.surfaceId).flatMap((entry) =>
+        entry.turnId === undefined ? [] : [entry.turnId]
+      ),
+      needsHuman,
+      emergencyStopped: this.#emergencyStopped.has(owner.surfaceId),
+      ...(surface.last_image_at !== null ? { lastImageAt: surface.last_image_at } : {}),
     };
   }
 
-  /** Bot requests the exclusive input lease. Queues as waiting_for_computer when held. */
-  async acquire(actor: { botId: string }, turnId: string | undefined, ttlMs = this.cfg.leaseTtlMs): Promise<{ granted: boolean; token?: string; queued: boolean }> {
-    if (this.#emergencyStopped) return { granted: false, queued: false };
-    const l = this.#lease();
-    const expired = l !== undefined && new Date(l.expires_at).getTime() <= Date.now();
-    if (l === undefined || expired) {
+  states(): ComputerBrokerState[] {
+    const owners = this.db
+      .query(
+        `SELECT bot_surfaces.bot_id, bot_surfaces.surface_id
+         FROM bot_surfaces JOIN bots ON bots.id = bot_surfaces.bot_id
+         WHERE bots.archived = 0`,
+      )
+      .all() as Array<{ bot_id: string; surface_id: SurfaceId }>;
+    return owners.map((owner) => this.state({ botId: owner.bot_id, surfaceId: owner.surface_id }));
+  }
+
+  async acquire(input: ComputerSurfaceOwner, turnId: string | undefined, ttlMs = this.cfg.leaseTtlMs): Promise<{ granted: boolean; token?: string; queued: boolean }> {
+    const owner = this.#requireOwner(input);
+    if (this.#emergencyStopped.has(owner.surfaceId)) return { granted: false, queued: false };
+    const lease = this.#lease(owner.surfaceId);
+    const expired = lease !== undefined && new Date(lease.expires_at).getTime() <= Date.now();
+    if (lease === undefined || expired) {
       const token = randomUUID();
       const now = new Date();
-      this.#writeLease({
-        holder_is_human: 0, holder_bot_id: actor.botId, turn_id: turnId ?? null,
-        token, acquired_at: now.toISOString(), expires_at: new Date(now.getTime() + ttlMs).toISOString(),
+      this.#writeLease(owner, {
+        surface_id: owner.surfaceId,
+        holder_is_human: 0,
+        holder_bot_id: owner.botId,
+        turn_id: turnId ?? null,
+        token,
+        acquired_at: now.toISOString(),
+        expires_at: new Date(now.getTime() + ttlMs).toISOString(),
       });
-      this.events.append("computer", "state", "computer.state.changed", { botId: actor.botId });
+      this.#event(owner);
       return { granted: true, token, queued: false };
     }
-    if (this.#leaseMatchesActor(l, actor, turnId)) return { granted: true, token: l.token, queued: false };
-    if (!this.#queue.some((q) => q.actor.botId === actor.botId && q.turnId === turnId)) {
-      this.#queue.push({ actor, ...(turnId !== undefined ? { turnId } : {}) });
-      this.events.append("computer", "state", "computer.state.changed", { botId: actor.botId });
+    if (!lease.holder_is_human && (turnId === undefined || lease.turn_id === turnId)) {
+      return { granted: true, token: lease.token, queued: false };
+    }
+    const queue = this.#queue(owner.surfaceId);
+    if (!queue.some((entry) => entry.turnId === turnId)) {
+      queue.push(turnId === undefined ? {} : { turnId });
+      this.#event(owner);
       if (turnId !== undefined) this.turns.parkForComputer(turnId);
     }
     return { granted: false, queued: true };
   }
 
-  renew(actor: { botId: string }, turnId: string | undefined, ttlMs = this.cfg.leaseTtlMs): boolean {
-    const l = this.#lease();
-    if (!l || !this.#leaseMatchesActor(l, actor, turnId)) return false;
-    l.expires_at = new Date(Date.now() + ttlMs).toISOString();
-    this.#writeLease(l);
+  renew(input: ComputerSurfaceOwner, turnId: string | undefined, ttlMs = this.cfg.leaseTtlMs): boolean {
+    const owner = this.#requireOwner(input);
+    const lease = this.#lease(owner.surfaceId);
+    if (lease === undefined || lease.holder_is_human || (turnId !== undefined && lease.turn_id !== turnId)) return false;
+    lease.expires_at = new Date(Date.now() + ttlMs).toISOString();
+    this.#writeLease(owner, lease);
     return true;
   }
 
-  release(actor: { botId: string } | "human", token: string): void {
-    const l = this.#lease();
-    if (!l) return;
-    if (actor === "human") {
-      // Human authority: the user releases only their own lease, no token needed.
-      if (!l.holder_is_human) return;
-    } else if (l.token !== token || !this.#leaseMatchesActor(l, actor)) {
-      return;
-    }
-    this.#writeLease(undefined);
-    this.events.append("computer", "state", "computer.state.changed", actor === "human" ? {} : { botId: actor.botId });
-    void this.#grantNext();
+  release(input: ComputerSurfaceOwner, token: string, actor: "bot" | "human" = "bot"): void {
+    const owner = this.#requireOwner(input);
+    const lease = this.#lease(owner.surfaceId);
+    if (lease === undefined) return;
+    if (actor === "human" ? !lease.holder_is_human : lease.holder_is_human || lease.token !== token) return;
+    this.#writeLease(owner, undefined);
+    this.#event(owner);
+    void this.#grantNext(owner);
   }
 
-  /** Contextual takeover: stop Bot input, hand the shared screen to the user, and park the turn. */
-  takeOver(): { ok: boolean; lease: ComputerLease | null } {
-    const l = this.#lease();
-    if (l && !l.holder_is_human) {
-      const parkedBotId = l.holder_bot_id!;
-      const parkedTurn = l.turn_id ?? undefined;
-      this.#parkedForHuman = {
-        actor: { botId: parkedBotId },
-        ...(parkedTurn !== undefined ? { turnId: parkedTurn } : {}),
-      };
-      this.#writeLease(undefined);
+  takeOver(input: ComputerSurfaceOwner): { ok: boolean; lease: ComputerLease | null } {
+    const owner = this.#requireOwner(input);
+    const lease = this.#lease(owner.surfaceId);
+    if (lease?.holder_is_human) return { ok: true, lease: this.state(owner).lease };
+    if (lease !== undefined) {
+      const parkedTurn = lease.turn_id ?? undefined;
+      this.#parkedForHuman.set(owner.surfaceId, parkedTurn === undefined ? {} : { turnId: parkedTurn });
       this.turns.parkForHuman(parkedTurn);
-      this.#writeLease({
-        holder_is_human: 1, holder_bot_id: null, turn_id: null,
-        token: randomUUID(), acquired_at: new Date().toISOString(), expires_at: new Date(Date.now() + 24 * 3600_000).toISOString(),
-      });
-      this.events.append("computer", "state", "computer.state.changed", { botId: parkedBotId });
-    } else if (!l) {
-      this.#parkedForHuman = undefined;
-      this.#writeLease({
-        holder_is_human: 1, holder_bot_id: null, turn_id: null,
-        token: randomUUID(), acquired_at: new Date().toISOString(), expires_at: new Date(Date.now() + 24 * 3600_000).toISOString(),
-      });
-      this.events.append("computer", "state", "computer.state.changed", {});
+    } else {
+      this.#parkedForHuman.delete(owner.surfaceId);
     }
-    return { ok: true, lease: this.state().lease };
+    const now = new Date();
+    this.#writeLease(owner, {
+      surface_id: owner.surfaceId,
+      holder_is_human: 1,
+      holder_bot_id: owner.botId,
+      turn_id: null,
+      token: randomUUID(),
+      acquired_at: now.toISOString(),
+      expires_at: new Date(now.getTime() + 24 * 3600_000).toISOString(),
+    });
+    this.#event(owner);
+    return { ok: true, lease: this.state(owner).lease };
   }
 
-  /** User is done: re-observe successfully, then restore the parked Bot before any queued Bot. */
-  async imDone(): Promise<{ observation?: string | null }> {
-    const l = this.#lease();
-    if (!l || !l.holder_is_human) return {};
-
+  async imDone(input: ComputerSurfaceOwner): Promise<{ observation?: string | null }> {
+    const owner = this.#requireOwner(input);
+    const lease = this.#lease(owner.surfaceId);
+    if (lease === undefined || !lease.holder_is_human) return {};
     const result = (await this.supervisor.computerCommand(
-      { type: "act", action: { name: "observe", args: {} } },
+      { type: "act", surfaceId: owner.surfaceId, action: { name: "observe", args: {} } },
       15_000,
     )) as { text?: string } | undefined;
-    const observation = result?.text;
-
-    const parked = this.#parkedForHuman;
-    this.#parkedForHuman = undefined;
-    this.#writeLease(undefined);
+    const parked = this.#parkedForHuman.get(owner.surfaceId);
+    this.#parkedForHuman.delete(owner.surfaceId);
+    this.#writeLease(owner, undefined);
     if (parked !== undefined) {
-      const restored = await this.acquire(parked.actor, parked.turnId);
+      const restored = await this.acquire(owner, parked.turnId);
       if (restored.granted) this.turns.resumeAfterHuman(parked.turnId);
     } else {
-      await this.#grantNext();
+      await this.#grantNext(owner);
     }
-    this.events.append("computer", "state", "computer.state.changed", parked === undefined ? {} : { botId: parked.actor.botId });
-    return observation !== undefined ? { observation } : {};
+    this.#event(owner);
+    return result?.text === undefined ? {} : { observation: result.text };
   }
 
-  async #grantNext(): Promise<void> {
-    const next = this.#queue.shift();
-    if (!next) return;
-    const res = await this.acquire(next.actor, next.turnId);
-    if (res.granted) this.turns.resumeAfterComputer(next.turnId);
+  async #grantNext(owner: ComputerSurfaceOwner): Promise<void> {
+    const next = this.#queue(owner.surfaceId).shift();
+    if (next === undefined) return;
+    const result = await this.acquire(owner, next.turnId);
+    if (result.granted) this.turns.resumeAfterComputer(next.turnId);
   }
 
-  emergencyStop(): void {
-    this.#emergencyStopped = true;
-    const l = this.#lease();
-    this.#parkedForEmergency =
-      l !== undefined && !l.holder_is_human
-        ? {
-            actor: { botId: l.holder_bot_id! },
-            ...(l.turn_id !== null ? { turnId: l.turn_id } : {}),
-          }
-        : undefined;
-    if (this.#parkedForEmergency?.turnId !== undefined) {
-      this.turns.parkForHuman(this.#parkedForEmergency.turnId);
+  emergencyStop(input: ComputerSurfaceOwner): void {
+    const owner = this.#requireOwner(input);
+    this.#emergencyStopped.add(owner.surfaceId);
+    const lease = this.#lease(owner.surfaceId);
+    if (lease !== undefined && !lease.holder_is_human) {
+      const parked = lease.turn_id === null ? {} : { turnId: lease.turn_id };
+      this.#parkedForEmergency.set(owner.surfaceId, parked);
+      if (parked.turnId !== undefined) this.turns.parkForHuman(parked.turnId);
+    } else {
+      this.#parkedForEmergency.delete(owner.surfaceId);
     }
-    this.#parkedForHuman = undefined;
-    this.#writeLease(undefined);
-    this.events.append("computer", "state", "computer.state.changed", {});
+    this.#parkedForHuman.delete(owner.surfaceId);
+    this.#writeLease(owner, undefined);
+    this.#event(owner);
   }
 
-  async resumeAfterEmergencyStop(): Promise<void> {
-    if (!this.#emergencyStopped) return;
-    const parked = this.#parkedForEmergency;
-    if (parked !== undefined || this.#queue.length > 0) {
-      await this.supervisor.computerCommand({ type: "act", action: { name: "observe", args: {} } }, 15_000);
+  async resumeAfterEmergencyStop(input: ComputerSurfaceOwner): Promise<void> {
+    const owner = this.#requireOwner(input);
+    if (!this.#emergencyStopped.has(owner.surfaceId)) return;
+    const parked = this.#parkedForEmergency.get(owner.surfaceId);
+    if (parked !== undefined || this.#queue(owner.surfaceId).length > 0) {
+      await this.supervisor.computerCommand(
+        { type: "act", surfaceId: owner.surfaceId, action: { name: "observe", args: {} } },
+        15_000,
+      );
     }
-    this.#parkedForEmergency = undefined;
-    this.#emergencyStopped = false;
+    this.#parkedForEmergency.delete(owner.surfaceId);
+    this.#emergencyStopped.delete(owner.surfaceId);
     if (parked !== undefined) {
-      const restored = await this.acquire(parked.actor, parked.turnId);
+      const restored = await this.acquire(owner, parked.turnId);
       if (restored.granted) this.turns.resumeAfterHuman(parked.turnId);
     } else {
-      await this.#grantNext();
+      await this.#grantNext(owner);
     }
-    this.events.append("computer", "state", "computer.state.changed", parked === undefined ? {} : { botId: parked.actor.botId });
+    this.#event(owner);
   }
 
-  /**
-   * The single path for desktop actions. Input actions require a live lease;
-   * the Agent follows its own native behavior (ADR 0003).
-   */
-  async act(actor: { botId: string } | "human", turnId: string | undefined, action: ComputerAction): Promise<{ text?: string; imageRef?: string; windowList?: unknown }> {
-    if (this.#emergencyStopped && isInputAction(action.name)) throw new Error("computer input is emergency-stopped");
-    const l = this.#lease();
+  async act(
+    input: ComputerSurfaceOwner,
+    turnId: string | undefined,
+    action: ComputerAction,
+    actor: "bot" | "human" = "bot",
+  ): Promise<{ text?: string; imageRef?: string; windowList?: unknown }> {
+    const owner = this.#requireOwner(input);
+    if (this.#emergencyStopped.has(owner.surfaceId) && isInputAction(action.name)) {
+      throw new Error("computer input is emergency-stopped");
+    }
+    const lease = this.#lease(owner.surfaceId);
     if (isInputAction(action.name)) {
-      if (!l) throw new Error("no active input lease");
+      if (lease === undefined) throw new Error("no active input lease");
       if (actor === "human") {
-        if (!l.holder_is_human) throw new Error("input lease is not held by human");
-      } else if (!this.#leaseMatchesActor(l, actor, turnId)) {
-        throw new Error(`input lease held by ${l.holder_is_human ? "human" : l.holder_bot_id}`);
+        if (!lease.holder_is_human) throw new Error("input lease is not held by human");
+      } else if (lease.holder_is_human || (turnId !== undefined && lease.turn_id !== turnId)) {
+        throw new Error(`input lease held by ${lease.holder_is_human ? "human" : owner.botId}`);
       }
     }
 
-    const cmd: { type: "act"; action: ComputerAction; lease?: { holder: { botId: string } | "human"; turnId?: string; token: string } } = { type: "act", action };
-    if (l && isInputAction(action.name)) {
-      cmd.lease = {
-        holder: l.holder_is_human ? ("human" as const) : { botId: l.holder_bot_id! },
-        ...(l.turn_id !== null ? { turnId: l.turn_id } : {}),
-        token: l.token,
+    const command: {
+      type: "act";
+      surfaceId: SurfaceId;
+      action: ComputerAction;
+      lease?: {
+        surfaceId: SurfaceId;
+        holder: { botId: string } | "human";
+        turnId?: string;
+        token: string;
+      };
+    } = { type: "act", surfaceId: owner.surfaceId, action };
+    if (lease !== undefined && isInputAction(action.name)) {
+      command.lease = {
+        surfaceId: owner.surfaceId,
+        holder: lease.holder_is_human ? "human" : { botId: owner.botId },
+        ...(lease.turn_id !== null ? { turnId: lease.turn_id } : {}),
+        token: lease.token,
       };
     }
-    const r = (await this.supervisor.computerCommand(cmd, 30_000)) as {
-      text?: string;
-      image?: { mediaType: "image/png" | "image/jpeg"; base64: string };
-      windowList?: unknown;
-    } | undefined;
+    const result = (await this.supervisor.computerCommand(command, 30_000)) as
+      | {
+          text?: string;
+          image?: { mediaType: "image/png" | "image/jpeg"; base64: string };
+          windowList?: unknown;
+        }
+      | undefined;
 
     let imageRef: string | undefined;
-    if (r?.image?.base64) {
+    if (result?.image?.base64) {
       const id = randomUUID();
-      const ext = r.image.mediaType === "image/png" ? "png" : "jpg";
-      const p = path.join(this.cfg.artifactsDir, `snapshot-${id}.${ext}`);
-      await writeFile(p, Buffer.from(r.image.base64, "base64"));
-      this.db.query(`INSERT INTO artifacts (id, kind, media_type, path, created_at) VALUES (?, 'snapshot', ?, ?, ?)`).run(id, r.image.mediaType, p, new Date().toISOString());
+      const extension = result.image.mediaType === "image/png" ? "png" : "jpg";
+      const artifactPath = path.join(this.cfg.artifactsDir, `snapshot-${id}.${extension}`);
+      const observedAt = new Date().toISOString();
+      await writeFile(artifactPath, Buffer.from(result.image.base64, "base64"));
+      this.db
+        .query(`INSERT INTO artifacts (id, kind, media_type, path, created_at, surface_id) VALUES (?, 'snapshot', ?, ?, ?, ?)`)
+        .run(id, result.image.mediaType, artifactPath, observedAt, owner.surfaceId);
+      this.db.query(`UPDATE bot_surfaces SET last_image_at = ? WHERE surface_id = ?`).run(observedAt, owner.surfaceId);
       imageRef = id;
-      this.#lastImageAt = new Date().toISOString();
     }
-    this.events.append("computer", "state", "computer.state.changed", actor === "human" ? {} : { botId: actor.botId });
+    this.#event(owner);
     return {
-      ...(r?.text !== undefined ? { text: r.text } : {}),
+      ...(result?.text !== undefined ? { text: result.text } : {}),
       ...(imageRef !== undefined ? { imageRef } : {}),
-      ...(r?.windowList !== undefined ? { windowList: r.windowList } : {}),
+      ...(result?.windowList !== undefined ? { windowList: result.windowList } : {}),
     };
   }
 
-  /** Rate-limited observation for the web panel; never lease-gated. */
-  async snapshot(): Promise<{ bytes: Uint8Array; mediaType: string } | undefined> {
-    if (Date.now() - this.#lastSnapshotAt < 400) return this.#snapshotCache;
-    const r = (await this.supervisor.computerCommand({ type: "act", action: { name: "screenshot", args: {} } }, 15_000).catch(() => undefined)) as
-      | { image?: { mediaType: string; base64: string } }
-      | undefined;
-    if (!r?.image?.base64) return this.#snapshotCache;
-    this.#lastSnapshotAt = Date.now();
-    this.#snapshotCache = { mediaType: r.image.mediaType, bytes: Buffer.from(r.image.base64, "base64") };
-    this.#lastImageAt = new Date().toISOString();
-    return this.#snapshotCache;
+  async snapshot(input: ComputerSurfaceOwner): Promise<{ bytes: Uint8Array; mediaType: string } | undefined> {
+    const owner = this.#requireOwner(input);
+    const cached = this.#snapshotCaches.get(owner.surfaceId);
+    if (cached !== undefined && Date.now() - cached.checkedAt < 400) {
+      return { mediaType: cached.mediaType, bytes: cached.bytes };
+    }
+    const result = (await this.supervisor
+      .computerCommand(
+        { type: "act", surfaceId: owner.surfaceId, action: { name: "screenshot", args: {} } },
+        15_000,
+      )
+      .catch(() => undefined)) as { image?: { mediaType: string; base64: string } } | undefined;
+    if (!result?.image?.base64) {
+      return cached === undefined ? undefined : { mediaType: cached.mediaType, bytes: cached.bytes };
+    }
+    const checkedAt = Date.now();
+    const next = {
+      checkedAt,
+      mediaType: result.image.mediaType,
+      bytes: Buffer.from(result.image.base64, "base64"),
+    };
+    this.#snapshotCaches.set(owner.surfaceId, next);
+    this.db
+      .query(`UPDATE bot_surfaces SET last_image_at = ? WHERE surface_id = ?`)
+      .run(new Date(checkedAt).toISOString(), owner.surfaceId);
+    this.#event(owner);
+    return { mediaType: next.mediaType, bytes: next.bytes };
+  }
+
+  shutdown(): void {
+    this.db.exec(`DELETE FROM computer_leases`);
+    this.#queues.clear();
+    this.#parkedForHuman.clear();
+    this.#parkedForEmergency.clear();
+    this.#emergencyStopped.clear();
+    this.#snapshotCaches.clear();
+  }
+
+  #clearSurface(surfaceId: SurfaceId): void {
+    this.db.query(`DELETE FROM computer_leases WHERE surface_id = ?`).run(surfaceId);
+    this.#queues.delete(surfaceId);
+    this.#parkedForHuman.delete(surfaceId);
+    this.#parkedForEmergency.delete(surfaceId);
+    this.#emergencyStopped.delete(surfaceId);
+    this.#snapshotCaches.delete(surfaceId);
   }
 }

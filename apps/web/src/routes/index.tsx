@@ -133,22 +133,20 @@ function HomeScreen(): JSX.Element {
 
   const bot = useMemo(() => bots.data?.find((b) => b.id === selectedBotId), [bots.data, selectedBotId]);
   const computer = useQuery({
-    queryKey: ["computer", bot?.id],
-    queryFn: () => api.computerState(bot?.id),
-    refetchInterval: 15_000,
-  });
-  const computerSafety = useQuery({
-    queryKey: ["computer", { scope: "global" }],
-    queryFn: () => api.computerState(),
+    queryKey: ["computer", bot?.id, bot?.surfaceId],
+    queryFn: () => api.computerState({ botId: bot!.id, surfaceId: bot!.surfaceId }),
+    enabled: bot !== undefined,
     refetchInterval: 15_000,
   });
 
   const computerAction = useMutation({
     mutationFn: (action: "take" | "return" | "stop" | "resume") => {
-      if (action === "take") return api.takeControl();
-      if (action === "return") return api.returnToBot();
-      if (action === "stop") return api.emergencyStop();
-      return api.resumeComputer();
+      if (bot === undefined) throw new Error("No Bot is selected");
+      const owner = { botId: bot.id, surfaceId: bot.surfaceId };
+      if (action === "take") return api.takeControl(owner);
+      if (action === "return") return api.returnToBot(owner);
+      if (action === "stop") return api.emergencyStop(owner);
+      return api.resumeComputer(owner);
     },
     onSuccess: () => {
       setComputerError(undefined);
@@ -408,14 +406,18 @@ function HomeScreen(): JSX.Element {
         setNotificationPermission(typeof Notification === "undefined" ? "unsupported" : Notification.permission);
         setSettingsOpen(true);
       }}
-      safetyControl={
-        <EmergencyComputerControl
-          view={computerSafety.data ?? { state: "unavailable" }}
-          busy={computerAction.isPending}
-          onEmergencyStop={() => computerAction.mutate("stop")}
-          onResume={() => computerAction.mutate("resume")}
-        />
-      }
+      {...(bot !== undefined
+        ? {
+            safetyControl: (
+              <EmergencyComputerControl
+                view={computer.data ?? { botId: bot.id, surfaceId: bot.surfaceId, state: "unavailable" }}
+                busy={computerAction.isPending}
+                onEmergencyStop={() => computerAction.mutate("stop")}
+                onResume={() => computerAction.mutate("resume")}
+              />
+            ),
+          }
+        : {})}
     />
   );
 
@@ -457,10 +459,13 @@ function HomeScreen(): JSX.Element {
         end={
           bot !== undefined ? (
             <ComputerSheet
+              key={bot.surfaceId}
               bot={bot}
               view={
                 computer.data
                   ?? {
+                    botId: bot.id,
+                    surfaceId: bot.surfaceId,
                     state: "unavailable",
                     activity:
                       computer.error !== null
@@ -468,7 +473,7 @@ function HomeScreen(): JSX.Element {
                         : "Computer state is loading.",
                   }
               }
-              snapshotUrl={api.computerImageUrl()}
+              snapshotUrl={api.computerImageUrl({ botId: bot.id, surfaceId: bot.surfaceId })}
               open={computerOpen}
               returnFocusRef={computerTriggerRef}
               busy={computerAction.isPending}

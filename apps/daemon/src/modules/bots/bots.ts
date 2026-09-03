@@ -1,12 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { Database } from "bun:sqlite";
-import type { AgentId } from "@omarchy-bot/domain";
+import type { AgentId, SurfaceId } from "@omarchy-bot/domain";
 import { AVATAR_RENDERER_ID, type AvatarDto, type AvatarRecipeDto, type BotDto, type BotViewDto, type TurnDto } from "@omarchy-bot/protocol";
 import type { EventLog } from "../events/eventLog.ts";
 import type { AgentsRegistry } from "../agents/registry.ts";
 import type { ThreadsService } from "../threads/threads.ts";
 
 interface BotRow {
+  surface_id: string;
   id: string; name: string; instructions: string; agent_id: string;
   avatar_kind: string; avatar_recipe: string; avatar_file: string | null;
   pinned: number; archived: number; archived_at: string | null;
@@ -64,7 +65,9 @@ export class BotsService {
   }
 
   #row(id: string): BotRow | undefined {
-    return this.db.query(`SELECT * FROM bots WHERE id = ?`).get(id) as BotRow | undefined;
+    return this.db
+      .query(`SELECT bots.*, bot_surfaces.surface_id FROM bots JOIN bot_surfaces ON bot_surfaces.bot_id = bots.id WHERE bots.id = ?`)
+      .get(id) as BotRow | undefined;
   }
 
   #stateRow(botId: string): BotStateRow | undefined {
@@ -82,12 +85,14 @@ export class BotsService {
       );
     }
     const id = `bot_${randomUUID().replace(/-/g, "")}`;
+    const surfaceId = `surf_${randomUUID().replace(/-/g, "")}` as SurfaceId;
     const now = new Date().toISOString();
     const tx = this.db.transaction(() => {
       this.db
         .query(`INSERT INTO bots (id, name, instructions, agent_id, avatar_kind, avatar_recipe, created_at, updated_at) VALUES (?, ?, ?, ?, 'generated', ?, ?, ?)`)
         .run(id, input.name, input.instructions ?? "", input.agentId, defaultAvatarRecipe(id), now, now);
       this.db.query(`INSERT INTO bot_state (bot_id) VALUES (?)`).run(id);
+      this.db.query(`INSERT INTO bot_surfaces (surface_id, bot_id, transitioned_at) VALUES (?, ?, ?)`).run(surfaceId, id, now);
     });
     tx();
     this.events.append("bot", id, "bot.created", this.getDto(id));
@@ -106,7 +111,7 @@ export class BotsService {
         ? { kind: "upload", url: `/api/bots/${r.id}/avatar` }
         : { kind: r.avatar_kind === "recipe" ? "recipe" : "generated", recipe: JSON.parse(r.avatar_recipe || defaultAvatarRecipe(r.id)) };
     return {
-      id: r.id, name: r.name, instructions: r.instructions, agentId: r.agent_id as AgentId,
+      id: r.id, surfaceId: r.surface_id as SurfaceId, name: r.name, instructions: r.instructions, agentId: r.agent_id as AgentId,
       avatar, pinned: Boolean(r.pinned), archived: Boolean(r.archived),
       createdAt: r.created_at, updatedAt: r.updated_at,
     };
@@ -114,7 +119,11 @@ export class BotsService {
 
   list(opts: { includeArchived?: boolean } = {}): BotViewDto[] {
     const rows = this.db
-      .query(opts.includeArchived ? `SELECT * FROM bots` : `SELECT * FROM bots WHERE archived = 0`)
+      .query(
+        opts.includeArchived
+          ? `SELECT bots.*, bot_surfaces.surface_id FROM bots JOIN bot_surfaces ON bot_surfaces.bot_id = bots.id`
+          : `SELECT bots.*, bot_surfaces.surface_id FROM bots JOIN bot_surfaces ON bot_surfaces.bot_id = bots.id WHERE bots.archived = 0`,
+      )
       .all() as BotRow[];
     const views = rows.map((r) => this.#toView(r));
     views.sort(
@@ -207,7 +216,11 @@ export class BotsService {
     }
 
     const now = new Date().toISOString();
-    this.db.query(`UPDATE bots SET archived = 1, archived_at = ?, updated_at = ? WHERE id = ?`).run(now, now, id);
+    const archive = this.db.transaction(() => {
+      this.db.query(`UPDATE bots SET archived = 1, archived_at = ?, updated_at = ? WHERE id = ?`).run(now, now, id);
+      this.db.query(`UPDATE bot_surfaces SET lifecycle_state = 'stopped', transitioned_at = ? WHERE bot_id = ?`).run(now, id);
+    });
+    archive();
     const archived = this.getDto(id);
     this.events.append("bot", id, "bot.archived", archived);
     return archived;
@@ -222,7 +235,11 @@ export class BotsService {
     if (!row.archived) return this.#toDto(row);
 
     const now = new Date().toISOString();
-    this.db.query(`UPDATE bots SET archived = 0, archived_at = NULL, updated_at = ? WHERE id = ?`).run(now, id);
+    const restore = this.db.transaction(() => {
+      this.db.query(`UPDATE bots SET archived = 0, archived_at = NULL, updated_at = ? WHERE id = ?`).run(now, id);
+      this.db.query(`UPDATE bot_surfaces SET lifecycle_state = 'stopped', transitioned_at = ? WHERE bot_id = ?`).run(now, id);
+    });
+    restore();
     const restored = this.getDto(id);
     this.events.append("bot", id, "bot.restored", restored);
     return restored;

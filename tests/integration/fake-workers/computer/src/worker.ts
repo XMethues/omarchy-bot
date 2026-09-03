@@ -4,7 +4,7 @@
  * (defense in depth — the broker already gates this).
  */
 import { readJsonl } from "../../../../../packages/agent-contract/src/framing.ts";
-import { isInputAction } from "../../../../../packages/domain/src/index.ts";
+import { isInputAction, isSurfaceId } from "../../../../../packages/domain/src/index.ts";
 import type { ComputerActionName } from "../../../../../packages/domain/src/index.ts";
 
 const write = (msg: unknown): void => {
@@ -19,12 +19,20 @@ const ONE_PIXEL_PNG =
 
 
 readJsonl(Bun.stdin.stream(), (raw) => {
-  const msg = raw as { type: string; requestId?: string; action?: { name: string; args?: Record<string, unknown> }; lease?: { token: string } };
+  const msg = raw as { type: string; requestId?: string; surfaceId?: string; action?: { name: string; args?: Record<string, unknown> }; lease?: { surfaceId?: string; token: string } };
   if (msg.type === "probe") {
     write({ requestId: msg.requestId!, ok: true, payload: { ok: true, backend: "fake" } });
     return;
   }
   if (msg.type === "act") {
+    if (!isSurfaceId(msg.surfaceId ?? "")) {
+      write({ requestId: msg.requestId!, ok: false, error: "fake worker requires a valid surfaceId" });
+      return;
+    }
+    if (msg.lease !== undefined && msg.lease.surfaceId !== msg.surfaceId) {
+      write({ requestId: msg.requestId!, ok: false, error: "fake worker rejects mismatched lease Surface" });
+      return;
+    }
     const action = msg.action!;
     const hadLease = msg.lease !== undefined;
     const actionName = action.name as ComputerActionName;

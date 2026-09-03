@@ -6,6 +6,7 @@ import { Database } from "bun:sqlite";
 import { MIGRATIONS, openDb } from "../../apps/daemon/src/persistence/db.ts";
 import { renderAvatarRecipe } from "../../apps/web/src/components/avatarRenderer.ts";
 import { AVATAR_RENDERER_ID, AvatarRecipeDto } from "../../packages/protocol/src/index.ts";
+import { startDaemon, type Harness } from "./helpers/harness.ts";
 
 function databaseThrough(migrationName: string): { db: Database; dbPath: string; home: string } {
   const home = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-migrations-"));
@@ -217,4 +218,78 @@ describe("integration: Bot provenance migrations", () => {
       rmSync(home, { recursive: true, force: true });
     }
   });
+
+  test("assigns migrated Bots stable unique Surfaces once and exposes them through the daemon API", async () => {
+    const { db, dbPath, home } = databaseThrough("0009-current-avatar-renderer-only");
+    const now = "2026-09-01T00:02:00.000Z";
+    const recipe = JSON.stringify({
+      rendererVersion: AVATAR_RENDERER_ID,
+      style: "shapes",
+      seed: "legacy",
+      options: {},
+    });
+    let firstDaemon: Harness | undefined;
+    let secondDaemon: Harness | undefined;
+    try {
+      db.query(`INSERT INTO agents (id, display_name, status, updated_at) VALUES ('pi', 'Pi', 'ready', ?)`).run(now);
+      db.query(
+        `INSERT INTO bots (id, name, instructions, agent_id, avatar_kind, avatar_recipe, created_at, updated_at)
+         VALUES ('bot_11111111111111111111111111111111', 'Migrated one', '', 'pi', 'generated', ?, ?, ?),
+                ('bot_22222222222222222222222222222222', 'Migrated two', '', 'pi', 'generated', ?, ?, ?)`,
+      ).run(recipe, now, now, recipe, now, now);
+      db.query(`INSERT INTO bot_state (bot_id) VALUES (?), (?)`)
+        .run("bot_11111111111111111111111111111111", "bot_22222222222222222222222222222222");
+      db.query(
+        `INSERT INTO computer_leases
+           (id, holder_is_human, holder_bot_id, turn_id, token, acquired_at, expires_at)
+         VALUES (1, 0, 'bot_11111111111111111111111111111111', NULL, 'legacy-token', ?, ?)`,
+      ).run(now, "2026-09-01T00:04:00.000Z");
+      db.query(
+        `INSERT INTO artifacts (id, kind, media_type, path, created_at)
+         VALUES ('legacy-artifact', 'snapshot', 'image/png', '/tmp/legacy-snapshot.png', ?)`,
+      ).run(now);
+
+      const migrated = finishMigrations(db, dbPath);
+      const surfaces = migrated
+        .query(`SELECT surface_id, bot_id FROM bot_surfaces ORDER BY bot_id`)
+        .all() as Array<{ surface_id: string; bot_id: string }>;
+      expect(surfaces).toHaveLength(2);
+      expect(surfaces[0]!.surface_id).toMatch(/^surf_[0-9a-f]{32}$/);
+      expect(surfaces[1]!.surface_id).toMatch(/^surf_[0-9a-f]{32}$/);
+      expect(surfaces[1]!.surface_id).not.toBe(surfaces[0]!.surface_id);
+      expect(
+        migrated.query(`SELECT surface_id FROM computer_leases WHERE holder_bot_id = ?`)
+          .get("bot_11111111111111111111111111111111"),
+      ).toEqual({ surface_id: surfaces[0]!.surface_id });
+      expect(
+        migrated.query(`SELECT id, path FROM legacy_unscoped_artifacts WHERE id = 'legacy-artifact'`).get(),
+      ).toEqual({ id: "legacy-artifact", path: "/tmp/legacy-snapshot.png" });
+      expect(
+        (migrated.query(`PRAGMA table_info(artifacts)`).all() as Array<{ name: string; notnull: number }>)
+          .find((column) => column.name === "surface_id"),
+      ).toMatchObject({ notnull: 1 });
+      migrated.close();
+
+      firstDaemon = await startDaemon(home);
+      const firstBootBot = await fetch(`${firstDaemon.baseUrl}/api/bots/bot_11111111111111111111111111111111`)
+        .then((response) => response.json()) as { surfaceId: string };
+      expect(firstBootBot.surfaceId).toBe(surfaces[0]!.surface_id);
+      await firstDaemon.stop();
+      firstDaemon = undefined;
+
+      secondDaemon = await startDaemon(home);
+      const secondBootBot = await fetch(`${secondDaemon.baseUrl}/api/bots/bot_11111111111111111111111111111111`)
+        .then((response) => response.json()) as { surfaceId: string };
+      expect(secondBootBot.surfaceId).toBe(surfaces[0]!.surface_id);
+    } finally {
+      await firstDaemon?.stop();
+      await secondDaemon?.stop();
+      try {
+        db.close();
+      } catch {
+        // finishMigrations already closed the setup connection.
+      }
+      rmSync(home, { recursive: true, force: true });
+    }
+  }, 15_000);
 });

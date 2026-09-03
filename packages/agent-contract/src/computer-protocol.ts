@@ -1,4 +1,4 @@
-import type { ComputerAction } from "@omarchy-bot/domain";
+import type { ComputerAction, SurfaceId } from "@omarchy-bot/domain";
 import type { Hello } from "./shared.ts";
 
 export type ComputerCommand =
@@ -6,9 +6,10 @@ export type ComputerCommand =
   | {
       type: "act";
       requestId: string;
+      surfaceId: SurfaceId;
       action: ComputerAction;
       /** Set for input actions. Worker refuses input without it (defense in depth). */
-      lease?: { holder: { botId: string } | "human"; turnId?: string; token: string };
+      lease?: { surfaceId: SurfaceId; holder: { botId: string } | "human"; turnId?: string; token: string };
     }
   | { type: "shutdown"; requestId: string };
 

@@ -71,7 +71,7 @@ export async function main(): Promise<{ stop: () => Promise<void>; port: number;
       writeStatusAtomic(cfg.statusPath, {
         ts: new Date().toISOString(),
         agents: agents.list().map((a) => ({ id: a.id, status: a.status })),
-        computer: computer.state(),
+        computer: computer.states(),
       });
     } catch {
       /* status file is best-effort */
@@ -88,7 +88,7 @@ export async function main(): Promise<{ stop: () => Promise<void>; port: number;
     // Safe shutdown order: stop new work before revoking shared resources.
     clearInterval(statusTimer);
     await dictation.shutdown();
-    computer.emergencyStop(); // revoke leases, stop input (also parks turns)
+    computer.shutdown();
     await supervisor.stopAll(); // close workers
     http.stop(); // close listeners
     db.close(); // flush WAL
