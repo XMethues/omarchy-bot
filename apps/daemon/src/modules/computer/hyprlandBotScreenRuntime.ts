@@ -13,13 +13,14 @@ import type { ComputerInputAuthority } from "@omarchy-bot/agent-contract";
 import type { SurfaceComputerWorker, Supervisor } from "../../supervision/supervisor.ts";
 import { ensureInputHelper } from "../../../native/pointer-helper/build.ts";
 import { ApplicationUnits } from "../../supervision/applicationUnits.ts";
-import type {
-  BotScreenActionResult,
-  BotScreenCapture,
-  BotScreenInputEvent,
-  BotScreenProvision,
-  BotScreenRuntime,
-  BotScreenRuntimeAdapter,
+import {
+  BotScreenInputRejectedError,
+  type BotScreenActionResult,
+  type BotScreenCapture,
+  type BotScreenInputEvent,
+  type BotScreenProvision,
+  type BotScreenRuntime,
+  type BotScreenRuntimeAdapter,
 } from "./botScreenManager.ts";
 
 interface HyprlandAdapterOptions {
@@ -85,16 +86,17 @@ class WaylandVirtualInput {
   #reader: ReadableStreamDefaultReader<Uint8Array>;
   #decoder = new TextDecoder();
   #buffer = "";
-  #sequence = 0;
+  #requestSequence = 0;
   #operations: Promise<void> = Promise.resolve();
   #stopped = false;
+  #context: string;
 
   private constructor(
     private readonly process: PointerProcess,
-    private readonly logicalWidth: number,
-    private readonly logicalHeight: number,
+    provision: BotScreenProvision,
   ) {
     this.#reader = process.stdout.getReader();
+    this.#context = `${provision.surfaceId} ${provision.generation} ${provision.geometryGeneration}`;
     this.exited = process.exited.then((status) => new Error(`Bot Screen input helper exited with status ${status}`));
   }
 
@@ -102,17 +104,25 @@ class WaylandVirtualInput {
     binary: string,
     outputName: string,
     launcherEnvironment: Record<string, string>,
-    logicalWidth: number,
-    logicalHeight: number,
+    provision: BotScreenProvision,
     commandPrefix: string[],
   ): Promise<WaylandVirtualInput> {
-    const process = Bun.spawn([...commandPrefix, binary, outputName], {
+    const process = Bun.spawn([
+      ...commandPrefix,
+      binary,
+      outputName,
+      provision.surfaceId,
+      String(provision.generation),
+      String(provision.geometryGeneration),
+      String(provision.logicalWidth),
+      String(provision.logicalHeight),
+    ], {
       env: launcherEnvironment,
       stdin: "pipe",
       stdout: "pipe",
       stderr: "pipe",
     });
-    const input = new WaylandVirtualInput(process, logicalWidth, logicalHeight);
+    const input = new WaylandVirtualInput(process, provision);
     const ready = await Promise.race([
       input.#readLine(),
       process.exited.then(async (status) => {
@@ -132,38 +142,53 @@ class WaylandVirtualInput {
     return input;
   }
 
+  setInputAuthority(controllerEpoch: number): Promise<void> {
+    const requestSequence = ++this.#requestSequence;
+    return this.#command(
+      `authority ${requestSequence} ${this.#context} ${controllerEpoch}`,
+      requestSequence,
+    );
+  }
+
   input(event: BotScreenInputEvent): Promise<void> {
+    const requestSequence = ++this.#requestSequence;
+    const envelope = `${event.surfaceId} ${event.runtimeGeneration} ${event.geometryGeneration} ${event.controllerEpoch} ${event.sequence}`;
     if (event.type === "motion") {
+      return this.#command(`motion ${requestSequence} ${envelope} ${event.x} ${event.y}`, requestSequence);
+    }
+    if (event.type === "button") {
+      const button = event.button === "left" ? 272 : event.button === "right" ? 273 : 274;
       return this.#command(
-        `motion ${++this.#sequence} ${event.x} ${event.y} ${this.logicalWidth} ${this.logicalHeight}`,
-        this.#sequence,
+        `button ${requestSequence} ${envelope} ${event.x} ${event.y} ${button} ${
+          event.state === "pressed" ? 1 : 0
+        }`,
+        requestSequence,
+      );
+    }
+    if (event.type === "scroll") {
+      return this.#command(
+        `scroll ${requestSequence} ${envelope} ${event.x} ${event.y} ${event.deltaX} ${event.deltaY}`,
+        requestSequence,
       );
     }
     if (event.type === "key") {
-      const sequence = ++this.#sequence;
-      return this.#command(`key ${sequence} ${event.keyCode} ${event.state === "pressed" ? 1 : 0}`, sequence);
+      return this.#command(
+        `key ${requestSequence} ${envelope} ${event.keyCode} ${event.state === "pressed" ? 1 : 0}`,
+        requestSequence,
+      );
     }
-    if (event.type === "paste") {
-      const sequence = ++this.#sequence;
-      return this.#command(`paste ${sequence} ${Buffer.from(event.text, "utf8").toString("base64")}`, sequence);
-    }
-    const motionSequence = ++this.#sequence;
-    const motion = this.#command(
-      `motion ${motionSequence} ${event.x} ${event.y} ${this.logicalWidth} ${this.logicalHeight}`,
-      motionSequence,
+    return this.#command(
+      `paste ${requestSequence} ${envelope} ${Buffer.from(event.text, "utf8").toString("base64")}`,
+      requestSequence,
     );
-    const eventSequence = ++this.#sequence;
-    const transition = event.type === "button"
-      ? `button ${eventSequence} ${event.button === "left" ? 272 : event.button === "right" ? 273 : 274} ${
-        event.state === "pressed" ? 1 : 0
-      }`
-      : `scroll ${eventSequence} ${event.deltaX} ${event.deltaY}`;
-    return motion.then(() => this.#command(transition, eventSequence));
   }
 
-  release(): Promise<void> {
-    const sequence = ++this.#sequence;
-    return this.#command(`release ${sequence}`, sequence);
+  release(controllerEpoch?: number): Promise<void> {
+    const requestSequence = ++this.#requestSequence;
+    return this.#command(
+      `release ${requestSequence} ${this.#context} ${controllerEpoch ?? 0}`,
+      requestSequence,
+    );
   }
 
   async stop(): Promise<void> {
@@ -181,13 +206,19 @@ class WaylandVirtualInput {
     }
   }
 
-  #command(line: string, sequence: number): Promise<void> {
+
+  #command(line: string, requestSequence: number): Promise<void> {
     const operation = this.#operations.then(async () => {
       if (this.#stopped || this.process.exitCode !== null) throw new Error("Bot Screen input helper is not running");
       this.process.stdin.write(`${line}\n`);
       await this.process.stdin.flush();
       const response = await this.#readLine();
-      if (response !== `OK ${sequence}`) throw new Error("Bot Screen input helper rejected an input event");
+      if (response === `OK ${requestSequence}`) return;
+      const rejectionPrefix = `ERR ${requestSequence} `;
+      if (response.startsWith(rejectionPrefix)) {
+        throw new BotScreenInputRejectedError(response.slice(rejectionPrefix.length));
+      }
+      throw new Error("Bot Screen input helper returned an invalid protocol response");
     });
     this.#operations = operation.catch(() => {});
     return operation;
@@ -374,8 +405,7 @@ export class HyprlandBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter 
         inputHelper,
         outputName,
         this.#units.launcherEnvironment(childEnv),
-        provision.logicalWidth,
-        provision.logicalHeight,
+        provision,
         this.#units.command(provision.surfaceId, provision.generation, "input", childEnv),
       );
       virtualInput = startedVirtualInput;
@@ -453,8 +483,9 @@ export class HyprlandBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter 
       return {
         capture,
         act,
+        setInputAuthority: (controllerEpoch) => startedVirtualInput.setInputAuthority(controllerEpoch),
         input: (event) => startedVirtualInput.input(event),
-        releaseInput: () => startedVirtualInput.release(),
+        releaseInput: (controllerEpoch) => startedVirtualInput.release(controllerEpoch),
         exited,
         stop: async () => {
           stopped = true;

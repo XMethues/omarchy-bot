@@ -88,10 +88,8 @@ export async function main(options: MainOptions = {}): Promise<{
       capacity: cfg.botScreenCapacity,
       logicalWidth: cfg.botScreenLogicalWidth,
       logicalHeight: cfg.botScreenLogicalHeight,
-      frameRate: cfg.botScreenFrameRate,
     },
   );
-  await screens.recover();
   let projections!: ScreenProjectionService;
 
   const events = new EventLog(db);
@@ -117,6 +115,7 @@ export async function main(options: MainOptions = {}): Promise<{
     (owner) => computer.canAcceptWebControl(owner),
     cfg.botScreenFrameRate,
   );
+  await screens.recover();
 
   agents.init();
 

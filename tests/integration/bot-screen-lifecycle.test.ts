@@ -23,6 +23,17 @@ async function waitForState(h: Harness, owner: Pick<BotDto, "id" | "surfaceId">,
   }
 }
 
+async function activateScreen(
+  h: Harness,
+  owner: Pick<BotDto, "id" | "surfaceId">,
+): Promise<ComputerViewDto> {
+  const snapshot = await fetch(
+    `${h.baseUrl}/api/computer/snapshot?botId=${encodeURIComponent(owner.id)}&surfaceId=${encodeURIComponent(owner.surfaceId)}`,
+  );
+  expect(snapshot.status).toBe(200);
+  return waitForState(h, owner, "ready");
+}
+
 describe("Bot Screen lifecycle", () => {
   let h: Harness | undefined;
 
@@ -35,7 +46,7 @@ describe("Bot Screen lifecycle", () => {
     h = await startDaemon(undefined, { botScreenAdapter: adapter });
     const owner = await bot(h, await makeBot(h, "Lifecycle Bot"));
 
-    await waitForState(h, owner, "ready");
+    await activateScreen(h, owner);
     expect(adapter.running(owner.surfaceId)).toEqual({ generation: 1 });
 
     const archived = await api<BotDto>(h, "POST", `/api/bots/${owner.id}/archive`, {});
@@ -52,7 +63,7 @@ describe("Bot Screen lifecycle", () => {
     const adapter = new FakeBotScreenRuntimeAdapter();
     h = await startDaemon(undefined, { botScreenAdapter: adapter });
     const owner = await bot(h, await makeBot(h, "Delete Screen"));
-    await waitForState(h, owner, "ready");
+    await activateScreen(h, owner);
 
     await api<BotDto>(h, "POST", `/api/bots/${owner.id}/archive`, {});
     const result = await api<DeleteBotResultDto>(h, "DELETE", `/api/bots/${owner.id}`, {
@@ -70,7 +81,7 @@ describe("Bot Screen lifecycle", () => {
     const adapter = new FakeBotScreenRuntimeAdapter();
     h = await startDaemon(undefined, { botScreenAdapter: adapter });
     const owner = await bot(h, await makeBot(h, "Restart Screen"));
-    await waitForState(h, owner, "ready");
+    await activateScreen(h, owner);
     const home = h.home;
 
     await h.disconnectForRestart();
@@ -88,7 +99,7 @@ describe("Bot Screen lifecycle", () => {
     const adapter = new FakeBotScreenRuntimeAdapter();
     h = await startDaemon(undefined, { botScreenAdapter: adapter });
     const owner = await bot(h, await makeBot(h, "Recreate Screen"));
-    await waitForState(h, owner, "ready");
+    await activateScreen(h, owner);
     adapter.rejectReconciliation(owner.surfaceId);
     const home = h.home;
 
@@ -107,7 +118,7 @@ describe("Bot Screen lifecycle", () => {
     h = await startDaemon(undefined, { botScreenAdapter: adapter });
     const first = await bot(h, await makeBot(h, "Repeated Lifecycle"));
     const second = await bot(h, await makeBot(h, "Isolated Lifecycle"));
-    await Promise.all([waitForState(h, first, "ready"), waitForState(h, second, "ready")]);
+    await Promise.all([activateScreen(h, first), activateScreen(h, second)]);
 
     for (let cycle = 0; cycle < 2; cycle += 1) {
       await api<BotDto>(h, "POST", `/api/bots/${first.id}/archive`, {});
@@ -150,7 +161,7 @@ describe("Bot Screen lifecycle", () => {
     h = await startDaemon(undefined, { botScreenAdapter: adapter, botScreenCapacity: 1 });
     const first = await bot(h, await makeBot(h, "Admitted Screen"));
     const second = await bot(h, await makeBot(h, "Busy Screen"));
-    await waitForState(h, first, "ready");
+    await activateScreen(h, first);
 
     const startsBeforeRejection = adapter.starts.length;
     const rejected = await apiStatus(h, "GET", computerPath(second));
@@ -173,7 +184,7 @@ describe("Bot Screen lifecycle", () => {
 
     await api<BotDto>(h, "POST", `/api/bots/${first.id}/archive`, {});
     expect((await apiStatus(h, "GET", computerPath(second))).status).toBe(200);
-    await waitForState(h, second, "ready");
+    await activateScreen(h, second);
     expect(adapter.running(second.surfaceId)).toEqual({ generation: 1 });
   });
 
@@ -184,7 +195,7 @@ describe("Bot Screen lifecycle", () => {
       bot(h, await makeBot(h, "Recovery capacity A")),
       bot(h, await makeBot(h, "Recovery capacity B")),
     ]);
-    await Promise.all(owners.map((owner) => waitForState(h!, owner, "ready")));
+    await Promise.all(owners.map((owner) => activateScreen(h!, owner)));
     const home = h.home;
 
     await h.disconnectForRestart();
@@ -195,4 +206,102 @@ describe("Bot Screen lifecycle", () => {
     expect(owners.filter((owner) => adapter.running(owner.surfaceId) !== undefined)).toHaveLength(1);
   });
 
+
+  test("an invalid native input envelope is rejected without failing its Screen runtime", async () => {
+    const adapter = new FakeBotScreenRuntimeAdapter();
+    h = await startDaemon(undefined, { botScreenAdapter: adapter });
+    const owner = await bot(h, await makeBot(h, "Rejected input envelope"));
+    await activateScreen(h, owner);
+    const source = await h.svc.screens.projectionSource({ botId: owner.id, surfaceId: owner.surfaceId });
+    expect(source).toBeDefined();
+
+    await source!.setInputAuthority(4);
+    await expect(source!.input({
+      type: "motion",
+      surfaceId: source!.surfaceId,
+      runtimeGeneration: source!.runtimeGeneration + 1,
+      geometryGeneration: source!.geometryGeneration,
+      controllerEpoch: 4,
+      sequence: 1,
+      x: 10,
+      y: 10,
+    })).rejects.toThrow("rejected the input envelope");
+
+    expect(h.svc.screens.status({ botId: owner.id, surfaceId: owner.surfaceId })).toEqual({ state: "ready" });
+    await expect(source!.input({
+      type: "motion",
+      surfaceId: source!.surfaceId,
+      runtimeGeneration: source!.runtimeGeneration,
+      geometryGeneration: source!.geometryGeneration,
+      controllerEpoch: 4,
+      sequence: 1,
+      x: 10,
+      y: 10,
+    })).resolves.toBeUndefined();
+    expect(adapter.running(owner.surfaceId)).toEqual({ generation: 1 });
+  });
+
+  test("status stays inactive and a first-start display profile survives changed daemon configuration", async () => {
+    const previousProfile = process.env.OMARCHY_BOT_SCREEN_PROFILE;
+    const previousFrameRate = process.env.OMARCHY_BOT_SCREEN_FRAME_RATE;
+    const adapter = new FakeBotScreenRuntimeAdapter();
+    try {
+      process.env.OMARCHY_BOT_SCREEN_PROFILE = "720p";
+      process.env.OMARCHY_BOT_SCREEN_FRAME_RATE = "9";
+      h = await startDaemon(undefined, { botScreenAdapter: adapter });
+      const owner = await bot(h, await makeBot(h, "Persisted display profile"));
+      expect(h.svc.screens.status({ botId: owner.id, surfaceId: owner.surfaceId })).toEqual({ state: "stopped" });
+      expect(adapter.starts).toHaveLength(0);
+
+      expect(await apiStatus(h, "GET", computerPath(owner))).toMatchObject({
+        status: 200,
+        body: { state: "starting", activity: "Screen starting." },
+      });
+      expect(adapter.starts).toHaveLength(0);
+
+      await activateScreen(h, owner);
+      expect(adapter.starts).toEqual([
+        {
+          surfaceId: owner.surfaceId,
+          generation: 1,
+          geometryGeneration: 1,
+          logicalWidth: 1280,
+          logicalHeight: 720,
+          scale: 1,
+          refreshRate: 60,
+        },
+      ]);
+      expect(
+        h.svc.db
+          .query(
+            `SELECT logical_width, logical_height, scale, refresh_rate
+             FROM bot_surfaces WHERE surface_id = ?`,
+          )
+          .get(owner.surfaceId),
+      ).toEqual({ logical_width: 1280, logical_height: 720, scale: 1, refresh_rate: 60 });
+
+      adapter.rejectReconciliation(owner.surfaceId);
+      const home = h.home;
+      await h.disconnectForRestart();
+      process.env.OMARCHY_BOT_SCREEN_PROFILE = "1080p";
+      process.env.OMARCHY_BOT_SCREEN_FRAME_RATE = "30";
+      h = await startDaemon(home, { botScreenAdapter: adapter });
+      await waitForState(h, owner, "ready");
+
+      expect(adapter.starts.at(-1)).toEqual({
+        surfaceId: owner.surfaceId,
+        generation: 2,
+        geometryGeneration: 1,
+        logicalWidth: 1280,
+        logicalHeight: 720,
+        scale: 1,
+        refreshRate: 60,
+      });
+    } finally {
+      if (previousProfile === undefined) delete process.env.OMARCHY_BOT_SCREEN_PROFILE;
+      else process.env.OMARCHY_BOT_SCREEN_PROFILE = previousProfile;
+      if (previousFrameRate === undefined) delete process.env.OMARCHY_BOT_SCREEN_FRAME_RATE;
+      else process.env.OMARCHY_BOT_SCREEN_FRAME_RATE = previousFrameRate;
+    }
+  });
 });

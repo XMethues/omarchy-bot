@@ -4,7 +4,11 @@ import path from "node:path";
 import type { Database } from "bun:sqlite";
 import { isInputAction, isSurfaceId, type ComputerAction, type SurfaceId } from "@omarchy-bot/domain";
 import type { EventLog } from "../events/eventLog.ts";
-import type { BotScreenManager } from "./botScreenManager.ts";
+import type {
+  BotScreenActionResult,
+  BotScreenManager,
+  BotScreenTransition,
+} from "./botScreenManager.ts";
 
 
 type AgentToolOutput = {
@@ -15,6 +19,7 @@ type AgentToolOutput = {
 };
 
 type TakeoverPhase = "running" | "takeover-requested" | "held" | "completing" | "settled";
+type ComputerAuthority = "idle" | "agent" | "web" | "takeover";
 type Deferred<T> = {
   promise: Promise<T>;
   resolve: (value: T | PromiseLike<T>) => void;
@@ -41,6 +46,7 @@ interface PendingAgentTool {
   completion: Deferred<AgentToolOutput>;
   actionError?: unknown;
   cancellation?: Error;
+  authority: ComputerAuthority;
 }
 
 export type WebControlRevoker = (surfaceId: SurfaceId) => Promise<void>;
@@ -73,6 +79,12 @@ export class ComputerBroker {
     private readonly artifactsDir: string,
     private readonly revokeWebControl: WebControlRevoker,
   ) {
+    this.db
+      .query(
+        `UPDATE computer_surface_coordination
+         SET authority_kind = 'idle', controller_epoch = controller_epoch + 1, updated_at = ?`,
+      )
+      .run(new Date().toISOString());
     this.events.subscribe((event) => {
       if (event.aggregateType !== "bot" || (event.type !== "bot.archived" && event.type !== "bot.deleted")) return;
       const payload = event.payload as { surfaceId?: unknown } | undefined;
@@ -82,6 +94,8 @@ export class ComputerBroker {
       this.#clearSurface(payload.surfaceId, "Computer Surface was removed during pending tool");
     });
     this.#unsubscribeScreens = this.screens.subscribe((transition) => {
+      const owner = this.#ownerForSurface(transition.surfaceId);
+      if (owner !== undefined) this.#lifecycleEvent(owner, transition);
       if (transition.state === "failed") {
         this.#clearSurface(transition.surfaceId, "Bot Screen became unavailable during pending tool");
       } else if (transition.state === "stopped") {
@@ -103,6 +117,13 @@ export class ComputerBroker {
   }
 
 
+  #ownerForSurface(surfaceId: SurfaceId): ComputerSurfaceOwner | undefined {
+    const row = this.db
+      .query(`SELECT bot_id FROM bot_surfaces WHERE surface_id = ?`)
+      .get(surfaceId) as { bot_id: string } | null;
+    return row === null ? undefined : { botId: row.bot_id, surfaceId };
+  }
+
   #requireOwner(owner: ComputerSurfaceOwner): ComputerSurfaceOwner {
     const resolved = this.resolveOwner(owner.botId, owner.surfaceId);
     if (resolved === undefined) throw new Error("unknown, archived, or mismatched Computer Surface owner");
@@ -111,6 +132,29 @@ export class ComputerBroker {
 
   #event(owner: ComputerSurfaceOwner): void {
     this.events.append("computer", owner.surfaceId, "computer.state.changed", owner);
+  }
+
+  #lifecycleEvent(owner: ComputerSurfaceOwner, transition: BotScreenTransition): void {
+    this.events.append("computer", owner.surfaceId, "computer.state.changed", {
+      ...owner,
+      lifecycle: transition.state,
+    });
+  }
+
+  #transitionAuthority(pending: PendingAgentTool, authority: ComputerAuthority): void {
+    if (pending.authority === authority) return;
+    pending.authority = authority;
+    this.db
+      .query(
+        `INSERT INTO computer_surface_coordination
+           (surface_id, authority_kind, controller_epoch, updated_at)
+         VALUES (?, ?, 1, ?)
+         ON CONFLICT(surface_id) DO UPDATE SET
+           authority_kind = excluded.authority_kind,
+           controller_epoch = computer_surface_coordination.controller_epoch + 1,
+           updated_at = excluded.updated_at`,
+      )
+      .run(pending.owner.surfaceId, authority, new Date().toISOString());
   }
 
   state(input: ComputerSurfaceOwner): ComputerBrokerState {
@@ -155,6 +199,7 @@ export class ComputerBroker {
     if (pending.phase === "settled") return { ok: false };
     if (pending.phase === "running") {
       pending.phase = "takeover-requested";
+      this.#transitionAuthority(pending, "takeover");
       this.#event(owner);
     }
 
@@ -171,6 +216,7 @@ export class ComputerBroker {
     if (pending.phase === "takeover-requested") {
       pending.phase = "held";
       pending.activated.resolve();
+      this.#transitionAuthority(pending, "web");
       this.#event(owner);
     }
     return { ok: pending.phase === "held" || pending.phase === "completing" };
@@ -187,23 +233,25 @@ export class ComputerBroker {
     try {
       await this.revokeWebControl(owner.surfaceId);
       if (pending.cancellation !== undefined) throw pending.cancellation;
-      const context = await this.#act(owner, pending.turnId, { name: "observe", args: {} });
+      const capture = await this.#invokeAction(
+        owner,
+        pending.turnId,
+        { name: "screenshot", args: {} },
+      );
       if (pending.cancellation !== undefined) throw pending.cancellation;
-      const screenshot = await this.#act(owner, pending.turnId, { name: "screenshot", args: {} });
-      if (pending.cancellation !== undefined) throw pending.cancellation;
-      const result = await this.#withImageFile(owner, {
-        ...context,
-        ...screenshot,
-        ...(context.text === undefined ? {} : { text: context.text }),
-        ...(context.windowList === undefined ? {} : { windowList: context.windowList }),
-      });
       pending.phase = "settled";
+      this.#transitionAuthority(pending, "idle");
+      const result = await this.#withImageFile(
+        owner,
+        await this.#recordActionResult(owner, capture),
+      );
       pending.completion.resolve(result);
       this.#event(owner);
       return result.text === undefined ? {} : { observation: result.text };
     } catch (error) {
       if (pending.cancellation === undefined) {
         pending.phase = "held";
+        this.#transitionAuthority(pending, "web");
         this.#event(owner);
       }
       throw error;
@@ -217,17 +265,22 @@ export class ComputerBroker {
     return pending === undefined || pending.phase === "held";
   }
 
-  async #act(
+  async #invokeAction(
     input: ComputerSurfaceOwner,
     turnId: string,
     action: ComputerAction,
-  ): Promise<{ text?: string; imageRef?: string; windowList?: unknown }> {
+  ): Promise<BotScreenActionResult> {
     const owner = this.#requireOwner(input);
     const inputAuthority = isInputAction(action.name)
       ? { surfaceId: owner.surfaceId, botId: owner.botId, turnId }
       : undefined;
-    const result = await this.screens.act(owner, action, inputAuthority);
+    return this.screens.act(owner, action, inputAuthority);
+  }
 
+  async #recordActionResult(
+    owner: ComputerSurfaceOwner,
+    result: BotScreenActionResult,
+  ): Promise<{ text?: string; imageRef?: string; windowList?: unknown }> {
     let imageRef: string | undefined;
     if (result.image !== undefined) {
       const id = randomUUID();
@@ -249,6 +302,15 @@ export class ComputerBroker {
     };
   }
 
+  async #act(
+    input: ComputerSurfaceOwner,
+    turnId: string,
+    action: ComputerAction,
+  ): Promise<{ text?: string; imageRef?: string; windowList?: unknown }> {
+    const owner = this.#requireOwner(input);
+    return this.#recordActionResult(owner, await this.#invokeAction(owner, turnId, action));
+  }
+
   /** Executes one SDK computer tool call for its authoritative Bot Screen. */
   async agentToolAct(
     input: ComputerSurfaceOwner,
@@ -267,6 +329,7 @@ export class ComputerBroker {
         turnId,
         toolCallId,
         phase: "running",
+        authority: "idle",
         actionDone: deferred<void>(),
         activated: deferred<void>(),
         completion: deferred<AgentToolOutput>(),
@@ -274,6 +337,7 @@ export class ComputerBroker {
       pending.activated.promise.catch(() => {});
       pending.completion.promise.catch(() => {});
       this.#pendingAgentTools.set(owner.surfaceId, pending);
+      this.#transitionAuthority(pending, "agent");
       this.#event(owner);
       const cancel = (): void => {
         const reason = signal.reason instanceof Error
@@ -284,11 +348,11 @@ export class ComputerBroker {
       signal.addEventListener("abort", cancel, { once: true });
 
       try {
-        let initial: AgentToolOutput;
+        let initial: BotScreenActionResult;
         try {
           await this.revokeWebControl(owner.surfaceId);
           signal.throwIfAborted();
-          initial = await this.#withImageFile(owner, await this.#act(owner, turnId, action));
+          initial = await this.#invokeAction(owner, turnId, action);
           signal.throwIfAborted();
         } catch (error) {
           pending.actionError = error;
@@ -297,13 +361,18 @@ export class ComputerBroker {
           pending.actionDone.resolve();
         }
 
-        if (pending.phase === "running") return initial;
+        if (pending.phase === "running") {
+          pending.phase = "settled";
+          this.#transitionAuthority(pending, "idle");
+          return this.#withImageFile(owner, await this.#recordActionResult(owner, initial));
+        }
         if (pending.phase === "takeover-requested") await pending.activated.promise;
         if (pending.cancellation !== undefined) throw pending.cancellation;
         return await pending.completion.promise;
       } finally {
         signal.removeEventListener("abort", cancel);
         if (this.#pendingAgentTools.get(owner.surfaceId) === pending) {
+          this.#transitionAuthority(pending, "idle");
           this.#pendingAgentTools.delete(owner.surfaceId);
         }
         this.#event(owner);
@@ -328,6 +397,7 @@ export class ComputerBroker {
     for (const pending of this.#pendingAgentTools.values()) {
       const error = new Error("daemon stopped during pending computer tool");
       pending.cancellation = error;
+      this.#transitionAuthority(pending, "idle");
       pending.phase = "settled";
       pending.activated.reject(error);
       pending.completion.reject(error);
@@ -368,6 +438,7 @@ export class ComputerBroker {
     pending.cancellation = error;
     const held = pending.phase === "held" || pending.phase === "completing";
     pending.phase = "settled";
+    this.#transitionAuthority(pending, "idle");
     if (held) await this.revokeWebControl(pending.owner.surfaceId).catch(() => {});
     pending.activated.reject(error);
     pending.completion.reject(error);

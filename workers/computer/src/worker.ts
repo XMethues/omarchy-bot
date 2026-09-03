@@ -219,7 +219,14 @@ await readJsonl(
   Bun.stdin.stream(),
   (msg) => {
     if (msg && typeof msg === "object" && "type" in msg) {
-      void handle(msg as ComputerCommand).then((result) => writeJsonl(result)).catch((err) => {
+      const command = msg as ComputerCommand;
+      void handle(command).then((result) => {
+        if (command.type !== "shutdown") {
+          writeJsonl(result);
+          return;
+        }
+        process.stdout.write(`${JSON.stringify(result)}\n`, () => process.exit(0));
+      }).catch((err) => {
         stderr(`handle failed: ${String(err)}`);
       });
     }

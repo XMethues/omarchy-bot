@@ -1,4 +1,5 @@
 import type { SurfaceId } from "@omarchy-bot/domain";
+import { BotScreenInputRejectedError } from "./botScreenManager.ts";
 import type {
   BotScreenCapture,
   BotScreenInputEvent,
@@ -136,6 +137,9 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     if (this.failure !== undefined) throw new Error(this.failure);
     this.starts.push(provision);
     let stopped = false;
+    let controllerEpoch: number | undefined;
+    let highestControllerEpoch = 0;
+    let lastInputSequence = 0;
     let actionCount = 0;
     const failure = Promise.withResolvers<Error>();
     let record!: FakeRuntimeRecord;
@@ -161,12 +165,31 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
             : {}),
         };
       },
+      setInputAuthority: async (epoch): Promise<void> => {
+        if (!Number.isSafeInteger(epoch) || epoch <= highestControllerEpoch) {
+          throw new BotScreenInputRejectedError("fake Bot Screen rejected stale input authority");
+        }
+        controllerEpoch = epoch;
+        highestControllerEpoch = epoch;
+        lastInputSequence = 0;
+      },
       input: async (event): Promise<void> => {
         this.#inputAttempts += 1;
+        if (
+          event.surfaceId !== provision.surfaceId
+          || event.runtimeGeneration !== provision.generation
+          || event.geometryGeneration !== provision.geometryGeneration
+          || event.controllerEpoch !== controllerEpoch
+          || !Number.isSafeInteger(event.sequence)
+          || event.sequence <= lastInputSequence
+        ) {
+          throw new BotScreenInputRejectedError("fake Bot Screen rejected the input envelope");
+        }
         if (this.options.inputFailureAt === this.#inputAttempts) {
           throw new Error("fake Bot Screen input helper failed");
         }
         if (stopped) throw new Error("fake Bot Screen is stopped");
+        lastInputSequence = event.sequence;
         if (this.options.pointerDelayMs !== undefined && event.type === "motion") {
           await Bun.sleep(this.options.pointerDelayMs);
         }
@@ -195,8 +218,13 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
           else this.#pointerEventWaiters.push(waiter);
         }
       },
-      releaseInput: async (): Promise<void> => {
+      releaseInput: async (epoch): Promise<void> => {
         if (stopped) return;
+        if (epoch !== undefined && epoch !== controllerEpoch) {
+          throw new BotScreenInputRejectedError("fake Bot Screen rejected stale input authority release");
+        }
+        controllerEpoch = undefined;
+        lastInputSequence = 0;
         if (this.options.releaseDelayMs !== undefined) await Bun.sleep(this.options.releaseDelayMs);
         this.releaseCount += 1;
         for (const waiter of this.#releaseWaiters.splice(0)) {

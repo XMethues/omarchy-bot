@@ -39,6 +39,21 @@ export interface ProjectionStatus {
   framesSent: number;
 }
 
+export interface ProjectionLoadMetrics {
+  readonly sessionId: string;
+  readonly surfaceId: SurfaceId;
+  readonly sequence: number;
+  readonly captureAttempts: number;
+  readonly sourceFrames: number;
+  readonly encodedFrames: number;
+  readonly framesSent: number;
+  readonly preCaptureBackpressureSkips: number;
+  readonly encodedBackpressureDrops: number;
+  readonly transportUnavailableSkips: number;
+  readonly invalidFrameDrops: number;
+  readonly sendFailures: number;
+}
+
 
 interface ProjectionSession {
   id: string;
@@ -53,7 +68,15 @@ interface ProjectionSession {
   sequence: number;
   timer?: Timer | undefined;
   nextFrameAt?: number | undefined;
+  captureAttempts: number;
+  sourceFrames: number;
+  encodedFrames: number;
   framesSent: number;
+  preCaptureBackpressureSkips: number;
+  encodedBackpressureDrops: number;
+  transportUnavailableSkips: number;
+  invalidFrameDrops: number;
+  sendFailures: number;
   captureInFlight: boolean;
   inputSuspended: boolean;
 }
@@ -71,7 +94,9 @@ interface InputController {
   draining: boolean;
   revoked: boolean;
   active: boolean;
+  provisioned: boolean;
   heldCodes: Set<string>;
+  heldButtons: Set<"left" | "middle" | "right">;
   release: Promise<void>;
 }
 
@@ -159,7 +184,15 @@ export class ScreenProjectionService {
       sequence: 0,
       inputSuspended: false,
       captureInFlight: false,
+      captureAttempts: 0,
+      sourceFrames: 0,
+      encodedFrames: 0,
       framesSent: 0,
+      preCaptureBackpressureSkips: 0,
+      encodedBackpressureDrops: 0,
+      transportUnavailableSkips: 0,
+      invalidFrameDrops: 0,
+      sendFailures: 0,
     };
     this.#sessions.set(id, session);
 
@@ -225,6 +258,31 @@ export class ScreenProjectionService {
       mode: session.mode,
       framesSent: session.framesSent,
     };
+  }
+
+  /**
+   * Internal diagnostic snapshot for load/conformance harnesses. This is not
+   * exposed by the HTTP projection status contract.
+   */
+  loadMetrics(owner: ComputerSurfaceOwner, sessionId: string): Readonly<ProjectionLoadMetrics> | undefined {
+    const session = this.#sessions.get(sessionId);
+    if (session === undefined || session.owner.botId !== owner.botId || session.owner.surfaceId !== owner.surfaceId) {
+      return undefined;
+    }
+    return Object.freeze({
+      sessionId,
+      surfaceId: session.source.surfaceId,
+      sequence: session.sequence,
+      captureAttempts: session.captureAttempts,
+      sourceFrames: session.sourceFrames,
+      encodedFrames: session.encodedFrames,
+      framesSent: session.framesSent,
+      preCaptureBackpressureSkips: session.preCaptureBackpressureSkips,
+      encodedBackpressureDrops: session.encodedBackpressureDrops,
+      transportUnavailableSkips: session.transportUnavailableSkips,
+      invalidFrameDrops: session.invalidFrameDrops,
+      sendFailures: session.sendFailures,
+    });
   }
 
   close(owner: ComputerSurfaceOwner, sessionId: string): boolean {
@@ -306,7 +364,7 @@ export class ScreenProjectionService {
     session.timer = undefined;
     if (session.mode === "expanded" && mode !== "expanded") this.#revokeInputFor(session);
     const changed = session.mode !== mode;
-    if (mode !== "expanded" || changed) session.inputSuspended = false;
+    session.inputSuspended = false;
     session.mode = mode;
     session.nextFrameAt = mode === "idle" ? undefined : performance.now();
     session.state = mode;
@@ -326,18 +384,33 @@ export class ScreenProjectionService {
   async #projectFrame(session: ProjectionSession): Promise<void> {
     if (session.captureInFlight || session.mode === "idle" || this.#sessions.get(session.id) !== session) return;
     const channel = session.frames;
-    if (channel === undefined || !channel.isOpen() || channel.bufferedAmount() > 0) {
+    if (channel === undefined || !channel.isOpen()) {
+      session.transportUnavailableSkips += 1;
+      this.#scheduleNext(session);
+      return;
+    }
+    if (channel.bufferedAmount() > 0) {
+      session.preCaptureBackpressureSkips += 1;
       this.#scheduleNext(session);
       return;
     }
 
     session.captureInFlight = true;
+    session.captureAttempts += 1;
     try {
       const capture = await session.source.capture();
       if (session.state === "idle" || this.#sessions.get(session.id) !== session) return;
-      if (capture.bytes.byteLength === 0 || capture.bytes.byteLength > MAX_FRAME_BYTES) return;
+      session.sourceFrames += 1;
+      if (capture.bytes.byteLength === 0 || capture.bytes.byteLength > MAX_FRAME_BYTES) {
+        session.invalidFrameDrops += 1;
+        return;
+      }
+      session.encodedFrames += 1;
       const byteLength = capture.bytes.byteLength;
-      if (channel.bufferedAmount() + byteLength > MAX_BUFFERED_BYTES) return;
+      if (channel.bufferedAmount() + byteLength > MAX_BUFFERED_BYTES) {
+        session.encodedBackpressureDrops += 1;
+        return;
+      }
       const chunkCount = Math.ceil(byteLength / CHUNK_BYTES);
       const header = JSON.stringify({
         version: SCREEN_PROJECTION_PROTOCOL_VERSION,
@@ -357,9 +430,15 @@ export class ScreenProjectionService {
         byteLength,
         chunkCount,
       });
-      if (!channel.sendMessage(header)) return;
+      if (!channel.sendMessage(header)) {
+        session.sendFailures += 1;
+        return;
+      }
       for (let offset = 0; offset < byteLength; offset += CHUNK_BYTES) {
-        if (!channel.sendMessageBinary(capture.bytes.subarray(offset, Math.min(offset + CHUNK_BYTES, byteLength)))) return;
+        if (!channel.sendMessageBinary(capture.bytes.subarray(offset, Math.min(offset + CHUNK_BYTES, byteLength)))) {
+          session.sendFailures += 1;
+          return;
+        }
       }
       session.framesSent += 1;
     } catch {
@@ -428,17 +507,42 @@ export class ScreenProjectionService {
       this.#rejectInput(session);
       return;
     }
-    controller.nextSequence += 1;
+    const { surfaceId, runtimeGeneration, geometryGeneration, controllerEpoch, sequence } = message.data;
     if (message.data.type === "release-control") {
+      controller.nextSequence += 1;
       this.#revokeInput(controller);
       return;
     }
 
     let event: BotScreenInputEvent;
     if (message.data.type === "pointer-motion") {
-      event = { type: "motion", x: message.data.x, y: message.data.y };
-    } else if (message.data.type === "pointer-button") {
       event = {
+        surfaceId,
+        runtimeGeneration,
+        geometryGeneration,
+        controllerEpoch,
+        sequence,
+        type: "motion",
+        x: message.data.x,
+        y: message.data.y,
+      };
+    } else if (message.data.type === "pointer-button") {
+      if (message.data.state === "pressed") {
+        if (controller.heldButtons.has(message.data.button)) {
+          this.#rejectInput(session);
+          return;
+        }
+        controller.heldButtons.add(message.data.button);
+      } else if (!controller.heldButtons.delete(message.data.button)) {
+        this.#rejectInput(session);
+        return;
+      }
+      event = {
+        surfaceId,
+        runtimeGeneration,
+        geometryGeneration,
+        controllerEpoch,
+        sequence,
         type: "button",
         x: message.data.x,
         y: message.data.y,
@@ -447,6 +551,11 @@ export class ScreenProjectionService {
       };
     } else if (message.data.type === "pointer-scroll") {
       event = {
+        surfaceId,
+        runtimeGeneration,
+        geometryGeneration,
+        controllerEpoch,
+        sequence,
         type: "scroll",
         x: message.data.x,
         y: message.data.y,
@@ -454,7 +563,15 @@ export class ScreenProjectionService {
         deltaY: message.data.deltaY,
       };
     } else if (message.data.type === "paste") {
-      event = { type: "paste", text: message.data.text };
+      event = {
+        surfaceId,
+        runtimeGeneration,
+        geometryGeneration,
+        controllerEpoch,
+        sequence,
+        type: "paste",
+        text: message.data.text,
+      };
     } else {
       const heldCodes = new Set(controller.heldCodes);
       if (message.data.state === "pressed") {
@@ -485,8 +602,18 @@ export class ScreenProjectionService {
         return;
       }
       controller.heldCodes = heldCodes;
-      event = { type: "key", keyCode: KEY_CODES[message.data.code]!, state: message.data.state };
+      event = {
+        surfaceId,
+        runtimeGeneration,
+        geometryGeneration,
+        controllerEpoch,
+        sequence,
+        type: "key",
+        keyCode: KEY_CODES[message.data.code]!,
+        state: message.data.state,
+      };
     }
+    controller.nextSequence += 1;
     const category: InputDiagnosticCategory | undefined = message.data.type === "pointer-button"
       ? "pointer-button"
       : message.data.type === "pointer-scroll"
@@ -582,18 +709,32 @@ export class ScreenProjectionService {
       draining: false,
       revoked: false,
       active: false,
+      provisioned: false,
       heldCodes: new Set(),
+      heldButtons: new Set(),
       release: Promise.resolve(),
     };
     this.#controllers.set(surfaceId, controller);
     const barrier = this.#releaseBarriers.get(surfaceId) ?? Promise.resolve();
-    controller.release = barrier.then(() => {
+    controller.release = barrier.then(async () => {
       if (
         controller.revoked
         || this.#controllers.get(surfaceId) !== controller
         || this.#sessions.get(session.id) !== session
         || session.mode !== "expanded"
       ) return;
+      await session.source.setInputAuthority(epoch);
+      controller.provisioned = true;
+      if (
+        controller.revoked
+        || this.#controllers.get(surfaceId) !== controller
+        || this.#sessions.get(session.id) !== session
+        || session.mode !== "expanded"
+        || !this.canAcceptWebControl(session.owner)
+      ) {
+        void this.#revokeInput(controller).catch(() => this.#close(session, true));
+        return;
+      }
       controller.active = true;
       this.#sendInputAuthority(controller, true);
       this.#recordDiagnostic(surfaceId, "controller", "accepted", 0);
@@ -634,14 +775,17 @@ export class ScreenProjectionService {
     controller.active = false;
     controller.queue.length = 0;
     controller.heldCodes.clear();
+    controller.heldButtons.clear();
     const surfaceId = controller.session.source.surfaceId;
     if (this.#controllers.get(surfaceId) === controller) this.#controllers.delete(surfaceId);
     this.#sendInputAuthority(controller, false);
-    const prior = this.#releaseBarriers.get(surfaceId) ?? Promise.resolve();
+    const activation = controller.release;
+    const priorRelease = this.#releaseBarriers.get(surfaceId) ?? Promise.resolve();
+    const prior = Promise.all([activation.catch(() => {}), priorRelease.catch(() => {})]);
     const startedAt = Date.now();
-    const release = prior.catch(() => {}).then(async () => {
+    const release = prior.then(async () => {
       try {
-        await controller.session.source.releaseInput();
+        if (controller.provisioned) await controller.session.source.releaseInput(controller.epoch);
         this.#recordDiagnostic(surfaceId, "release", "released", Date.now() - startedAt);
       } catch (error) {
         this.#recordDiagnostic(surfaceId, "release", "failed", Date.now() - startedAt);

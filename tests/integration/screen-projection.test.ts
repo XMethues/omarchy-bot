@@ -33,9 +33,12 @@ async function ownerFor(h: Harness, botId: string): Promise<ComputerSurfaceOwner
   return { botId: bot.id, surfaceId: bot.surfaceId as ComputerSurfaceOwner["surfaceId"] };
 }
 
-function waitFor<T>(subscribe: (resolve: (value: T) => void, reject: (error: Error) => void) => void): Promise<T> {
+function waitFor<T>(
+  description: string,
+  subscribe: (resolve: (value: T) => void, reject: (error: Error) => void) => void,
+): Promise<T> {
   return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error("WebRTC test timed out")), 5_000);
+    const timer = setTimeout(() => reject(new Error(`${description} timed out`)), 5_000);
     subscribe(
       (value) => {
         clearTimeout(timer);
@@ -50,12 +53,14 @@ function waitFor<T>(subscribe: (resolve: (value: T) => void, reject: (error: Err
 }
 
 async function createOffer(peer: PeerConnection): Promise<string> {
-  const gathered = waitFor<void>((resolve) => {
-    peer.onGatheringStateChange((state) => {
-      if (state === "complete") resolve();
-    });
+  const gathered = waitFor<void>("offer ICE gathering", (resolve) => {
+    const resolveIfComplete = (): void => {
+      if (peer.gatheringState() === "complete") resolve();
+    };
+    peer.onGatheringStateChange(resolveIfComplete);
+    queueMicrotask(resolveIfComplete);
   });
-  const described = waitFor<void>((resolve) => peer.onLocalDescription(() => resolve()));
+  const described = waitFor<void>("offer local description", (resolve) => peer.onLocalDescription(() => resolve()));
   peer.createDataChannel("screen.frames.v1", { unordered: false });
   peer.createDataChannel("screen.control.v1", { unordered: false });
   peer.createDataChannel("screen.input.v1", { unordered: false });
@@ -69,9 +74,11 @@ async function createOffer(peer: PeerConnection): Promise<string> {
 
 function openChannel(channel: DataChannel): Promise<DataChannel> {
   if (channel.isOpen()) return Promise.resolve(channel);
-  return waitFor<DataChannel>((resolve, reject) => {
+  return waitFor<DataChannel>(`${channel.getLabel()} channel opening`, (resolve, reject) => {
     channel.onOpen(() => resolve(channel));
     channel.onError((message) => reject(new Error(message)));
+    channel.onClosed(() => reject(new Error(`${channel.getLabel()} closed before opening`)));
+    if (channel.isOpen()) resolve(channel);
   });
 }
 
@@ -88,12 +95,14 @@ async function connectProjection(
   answer: ProjectionAnswer;
 }> {
   const peer = new rtc.PeerConnection(name, { iceServers: [] });
-  const gathered = waitFor<void>((resolve) => {
-    peer.onGatheringStateChange((state) => {
-      if (state === "complete") resolve();
-    });
+  const gathered = waitFor<void>(`${name} ICE gathering`, (resolve) => {
+    const resolveIfComplete = (): void => {
+      if (peer.gatheringState() === "complete") resolve();
+    };
+    peer.onGatheringStateChange(resolveIfComplete);
+    queueMicrotask(resolveIfComplete);
   });
-  const described = waitFor<void>((resolve) => peer.onLocalDescription(() => resolve()));
+  const described = waitFor<void>(`${name} local description`, (resolve) => peer.onLocalDescription(() => resolve()));
   const frames = peer.createDataChannel("screen.frames.v1", { unordered: false });
   const control = peer.createDataChannel("screen.control.v1", { unordered: false });
   const input = peer.createDataChannel("screen.input.v1", { unordered: false });
@@ -125,7 +134,7 @@ function authority(input: DataChannel, active = true): Promise<{
   geometryGeneration: number;
   controllerEpoch: number;
 }> {
-  return waitFor((resolve) => {
+  return waitFor(`${active ? "input authority grant" : "input authority revocation"}`, (resolve, reject) => {
     input.onMessage((raw) => {
       if (typeof raw !== "string") return;
       const message = JSON.parse(raw) as { type?: string };
@@ -133,6 +142,8 @@ function authority(input: DataChannel, active = true): Promise<{
         resolve(message as never);
       }
     });
+    input.onClosed(() => reject(new Error("input channel closed before authority changed")));
+    input.onError((message) => reject(new Error(message)));
   });
 }
 describe("WebRTC Screen Projection signaling", () => {
@@ -152,12 +163,17 @@ describe("WebRTC Screen Projection signaling", () => {
     const owner = await ownerFor(h, await makeBot(h, "Projected screen"));
     peer = new rtc.PeerConnection("projection-test-browser", { iceServers: [] });
 
-    const gathered = waitFor<void>((resolve) => {
-      peer!.onGatheringStateChange((state) => {
-        if (state === "complete") resolve();
-      });
+    const gathered = waitFor<void>("direct projection ICE gathering", (resolve) => {
+      const resolveIfComplete = (): void => {
+        if (peer!.gatheringState() === "complete") resolve();
+      };
+      peer!.onGatheringStateChange(resolveIfComplete);
+      queueMicrotask(resolveIfComplete);
     });
-    const described = waitFor<void>((resolve) => peer!.onLocalDescription(() => resolve()));
+    const described = waitFor<void>(
+      "direct projection local description",
+      (resolve) => peer!.onLocalDescription(() => resolve()),
+    );
     const frames = peer.createDataChannel("screen.frames.v1", { unordered: false });
     const control = peer.createDataChannel("screen.control.v1", { unordered: false });
     const input = peer.createDataChannel("screen.input.v1", { unordered: false });
@@ -212,9 +228,22 @@ describe("WebRTC Screen Projection signaling", () => {
         framesSent: 0,
       },
     });
+    expect(idleBody).not.toHaveProperty("encodedFrames");
+    expect(h.svc.projections.loadMetrics(owner, sessionId)).toMatchObject({
+      sequence: 0,
+      captureAttempts: 0,
+      sourceFrames: 0,
+      encodedFrames: 0,
+      framesSent: 0,
+      preCaptureBackpressureSkips: 0,
+      encodedBackpressureDrops: 0,
+      transportUnavailableSkips: 0,
+      invalidFrameDrops: 0,
+      sendFailures: 0,
+    });
 
     const messages: Array<string | Buffer | ArrayBuffer> = [];
-    const receivedFrame = waitFor<void>((resolve) => {
+    const receivedFrame = waitFor<void>("projected frame", (resolve) => {
       frames.onMessage((message) => {
         messages.push(message);
         if (messages.length === 2) resolve();
@@ -248,6 +277,16 @@ describe("WebRTC Screen Projection signaling", () => {
     const activeStatus = await fetch(statusUrl);
     expect(activeStatus.status).toBe(200);
     expect(await activeStatus.json()).toMatchObject({ state: "preview", mode: "preview", framesSent: 1 });
+    expect(h.svc.projections.loadMetrics(owner, sessionId)).toMatchObject({
+      sequence: 1,
+      captureAttempts: 1,
+      sourceFrames: 1,
+      encodedFrames: 1,
+      framesSent: 1,
+      encodedBackpressureDrops: 0,
+      invalidFrameDrops: 0,
+      sendFailures: 0,
+    });
   }, 15_000);
 
   test("expanded Screen Projection targets at least 15 delivered frames per second", async () => {
@@ -300,7 +339,7 @@ describe("expanded pointer Web Control", () => {
   const peers: PeerConnection[] = [];
 
   afterEach(async () => {
-    for (const connectedPeer of peers) connectedPeer.close();
+    for (const connectedPeer of peers.splice(0)) connectedPeer.close();
     await h.stop();
   });
 
@@ -340,13 +379,6 @@ describe("expanded pointer Web Control", () => {
     expect(taken.status).toBe(200);
     expect(await taken.json()).toMatchObject({ takeover: "active", state: "user-control" });
 
-    projection.control.sendMessage(JSON.stringify({
-      version: 1,
-      type: "view",
-      surfaceId: owner.surfaceId,
-      runtimeGeneration: 1,
-      mode: "preview",
-    }));
     const takeoverAuthority = authority(projection.input);
     projection.control.sendMessage(JSON.stringify({
       version: 1,
@@ -455,13 +487,25 @@ describe("expanded pointer Web Control", () => {
     const firstBatch = runtime.pointerEvents.map(({ event }) => event);
     const motions = firstBatch.filter((event) => event.type === "motion");
     expect(motions.length).toBeLessThan(80);
-    expect(motions.at(-2)).toEqual({ type: "motion", x: 80, y: 160 });
-    expect(motions.at(-1)).toEqual({ type: "motion", x: 400, y: 300 });
-    expect(firstBatch.filter((event) => event.type !== "motion")).toEqual([
+    expect(motions.at(-2)).toMatchObject({ type: "motion", x: 80, y: 160 });
+    expect(motions.at(-1)).toMatchObject({ type: "motion", x: 400, y: 300 });
+    expect(firstBatch.filter((event) => event.type !== "motion")).toMatchObject([
       { type: "button", x: 80, y: 160, button: "left", state: "pressed" },
       { type: "button", x: 400, y: 300, button: "left", state: "released" },
       { type: "scroll", x: 400, y: 300, deltaX: -2, deltaY: 12 },
     ]);
+    expect(firstBatch.at(-1)).toEqual({
+      surfaceId: owner.surfaceId,
+      runtimeGeneration: 1,
+      geometryGeneration: 1,
+      controllerEpoch: firstGrant.controllerEpoch,
+      sequence: 84,
+      type: "scroll",
+      x: 400,
+      y: 300,
+      deltaX: -2,
+      deltaY: 12,
+    });
     const second = await connectProjection(h, owner, "pointer-browser-two");
     peers.push(second.peer);
     const secondAuthority = authority(second.input);
@@ -488,7 +532,7 @@ describe("expanded pointer Web Control", () => {
       y: 120,
     }));
     await runtime.waitForPointerEvents(firstBatch.length + 1);
-    expect(runtime.pointerEvents.at(-1)?.event).toEqual({ type: "motion", x: 100, y: 120 });
+    expect(runtime.pointerEvents.at(-1)?.event).toMatchObject({ type: "motion", x: 100, y: 120 });
 
     second.input.sendMessage(JSON.stringify({
       ...envelope,
@@ -509,6 +553,145 @@ describe("expanded pointer Web Control", () => {
     }));
     await runtime.waitForReleases(2);
     expect(runtime.pointerEvents).toHaveLength(firstBatch.length + 1);
+  }, 20_000);
+
+  test("rejects duplicate and unmatched buttons while clearing held buttons and keys at revocation", async () => {
+    const runtime = new FakeBotScreenRuntimeAdapter();
+    h = await startDaemon(undefined, { botScreenAdapter: runtime });
+    const owner = await ownerFor(h, await makeBot(h, "Validated button transitions"));
+    const grant = async (name: string) => {
+      const projection = await connectProjection(h, owner, name);
+      peers.push(projection.peer);
+      const granted = authority(projection.input);
+      projection.control.sendMessage(JSON.stringify({
+        version: 1,
+        type: "view",
+        surfaceId: owner.surfaceId,
+        runtimeGeneration: 1,
+        mode: "expanded",
+      }));
+      return { ...projection, epoch: (await granted).controllerEpoch };
+    };
+    const envelope = (epoch: number) => ({
+      version: 1,
+      surfaceId: owner.surfaceId,
+      runtimeGeneration: 1,
+      geometryGeneration: 1,
+      controllerEpoch: epoch,
+    });
+
+    const unmatched = await grant("unmatched-button-browser");
+    unmatched.input.sendMessage(JSON.stringify({
+      ...envelope(unmatched.epoch),
+      type: "pointer-button",
+      button: "left",
+      state: "released",
+      x: 10,
+      y: 20,
+      sequence: 1,
+    }));
+    await runtime.waitForReleases(1);
+    expect(runtime.inputEvents).toHaveLength(0);
+
+    const duplicate = await grant("duplicate-button-browser");
+    duplicate.input.sendMessage(JSON.stringify({
+      ...envelope(duplicate.epoch),
+      type: "pointer-button",
+      button: "left",
+      state: "pressed",
+      x: 30,
+      y: 40,
+      sequence: 1,
+    }));
+    await runtime.waitForInputEvents(1);
+    duplicate.input.sendMessage(JSON.stringify({
+      ...envelope(duplicate.epoch),
+      type: "pointer-button",
+      button: "left",
+      state: "pressed",
+      x: 50,
+      y: 60,
+      sequence: 2,
+    }));
+    await runtime.waitForReleases(2);
+    expect(runtime.inputEvents).toHaveLength(1);
+
+    const suspended = await grant("held-button-browser");
+    suspended.input.sendMessage(JSON.stringify({
+      ...envelope(suspended.epoch),
+      type: "key",
+      code: "ShiftLeft",
+      state: "pressed",
+      modifiers: { control: false, alt: false, shift: true, meta: false },
+      sequence: 1,
+    }));
+    suspended.input.sendMessage(JSON.stringify({
+      ...envelope(suspended.epoch),
+      type: "pointer-button",
+      button: "right",
+      state: "pressed",
+      x: 70,
+      y: 80,
+      sequence: 2,
+    }));
+    await runtime.waitForInputEvents(3);
+    suspended.input.sendMessage(JSON.stringify({
+      ...envelope(suspended.epoch),
+      type: "release-control",
+      reason: "visibility-loss",
+      sequence: 3,
+    }));
+    await runtime.waitForReleases(3);
+
+    const rearmed = authority(suspended.input);
+    suspended.control.sendMessage(JSON.stringify({
+      version: 1,
+      type: "view",
+      surfaceId: owner.surfaceId,
+      runtimeGeneration: 1,
+      mode: "expanded",
+    }));
+    const rearmedEpoch = (await rearmed).controllerEpoch;
+    expect(rearmedEpoch).toBeGreaterThan(suspended.epoch);
+    suspended.input.sendMessage(JSON.stringify({
+      ...envelope(rearmedEpoch),
+      type: "pointer-button",
+      button: "right",
+      state: "released",
+      x: 70,
+      y: 80,
+      sequence: 1,
+    }));
+    await runtime.waitForReleases(4);
+    expect(runtime.inputEvents).toHaveLength(3);
+
+    const stillRunning = await grant("still-running-button-browser");
+    stillRunning.input.sendMessage(JSON.stringify({
+      ...envelope(stillRunning.epoch),
+      type: "pointer-button",
+      button: "middle",
+      state: "pressed",
+      x: 90,
+      y: 100,
+      sequence: 1,
+    }));
+    stillRunning.input.sendMessage(JSON.stringify({
+      ...envelope(stillRunning.epoch),
+      type: "pointer-button",
+      button: "middle",
+      state: "released",
+      x: 90,
+      y: 100,
+      sequence: 2,
+    }));
+    await runtime.waitForInputEvents(5);
+    expect(runtime.inputEvents.map(({ event }) => event)).toMatchObject([
+      { type: "button", button: "left", state: "pressed" },
+      { type: "key", keyCode: 42, state: "pressed" },
+      { type: "button", button: "right", state: "pressed" },
+      { type: "button", button: "middle", state: "pressed" },
+      { type: "button", button: "middle", state: "released" },
+    ]);
   }, 20_000);
 
   test("delivers keyboard transitions, modifiers, shortcuts, and one-way paste in controller order", async () => {
@@ -547,7 +730,7 @@ describe("expanded pointer Web Control", () => {
     })));
 
     await runtime.waitForInputEvents(messages.length);
-    expect(runtime.inputEvents.map(({ event }) => event)).toEqual([
+    expect(runtime.inputEvents.map(({ event }) => event)).toMatchObject([
       { type: "key", keyCode: 29, state: "pressed" },
       { type: "key", keyCode: 38, state: "pressed" },
       { type: "key", keyCode: 38, state: "released" },
@@ -742,7 +925,7 @@ describe("expanded pointer Web Control", () => {
     const other = await ownerFor(h, await makeBot(h, "Other pointer screen"));
     let releaseCount = 0;
 
-    const grant = async (name: string): Promise<{ input: DataChannel; epoch: number }> => {
+    const grant = async (name: string): Promise<{ peer: PeerConnection; input: DataChannel; epoch: number }> => {
       const projection = await connectProjection(h, owner, name);
       peers.push(projection.peer);
       const granted = authority(projection.input);
@@ -753,13 +936,17 @@ describe("expanded pointer Web Control", () => {
         runtimeGeneration: 1,
         mode: "expanded",
       }));
-      return { input: projection.input, epoch: (await granted).controllerEpoch };
+      return {
+        peer: projection.peer,
+        input: projection.input,
+        epoch: (await granted).controllerEpoch,
+      };
     };
     const reject = async (
       name: string,
       change: (message: Record<string, unknown>, epoch: number) => void,
     ): Promise<void> => {
-      const { input, epoch } = await grant(name);
+      const { peer, input, epoch } = await grant(name);
       const message: Record<string, unknown> = {
         version: 1,
         type: "pointer-motion",
@@ -775,6 +962,7 @@ describe("expanded pointer Web Control", () => {
       input.sendMessage(JSON.stringify(message));
       releaseCount += 1;
       await runtime.waitForReleases(releaseCount);
+      peer.close();
     };
 
     await reject("wrong-surface-pointer", (message) => {
@@ -818,7 +1006,8 @@ describe("expanded pointer Web Control", () => {
       y: 70,
     }));
     await runtime.waitForReleases(++releaseCount);
-    expect(runtime.pointerEvents.map(({ event }) => event)).toEqual([{ type: "motion", x: 40, y: 50 }]);
+    duplicate.peer.close();
+    expect(runtime.pointerEvents.map(({ event }) => event)).toMatchObject([{ type: "motion", x: 40, y: 50 }]);
   }, 35_000);
   test("revokes held input on browser suspension and helper failure before issuing a new epoch", async () => {
     const runtime = new FakeBotScreenRuntimeAdapter(undefined, { inputFailureAt: 2 });
@@ -878,7 +1067,7 @@ describe("expanded pointer Web Control", () => {
       sequence: 1,
     }));
     await runtime.waitForReleases(2);
-    expect(runtime.inputEvents.map(({ event }) => event)).toEqual([
+    expect(runtime.inputEvents.map(({ event }) => event)).toMatchObject([
       { type: "key", keyCode: 42, state: "pressed" },
     ]);
   }, 15_000);

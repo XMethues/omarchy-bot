@@ -3,6 +3,8 @@ import { expect, test, type Locator, type Page, type Route } from "@playwright/t
 
 const PRIMARY_BOT_ID = "bot_ticket13_primary";
 const SECONDARY_BOT_ID = "bot_ticket13_unavailable";
+const PRIMARY_SURFACE_ID = "surf_11111111111111111111111111111111";
+const SECONDARY_SURFACE_ID = "surf_22222222222222222222222222222222";
 const THREAD_ID = "thread_ticket13_release_review";
 const FIXED_EARLY = "2026-01-15T09:00:00.000Z";
 const FIXED_LATE = "2026-01-15T10:00:00.000Z";
@@ -39,6 +41,7 @@ function botFixtures(primaryStatus: BotStatus) {
   return [
     {
       id: PRIMARY_BOT_ID,
+      surfaceId: PRIMARY_SURFACE_ID,
       name: "Release Partner",
       instructions: "Keep the release review concise and actionable.",
       agentId: "pi",
@@ -55,6 +58,7 @@ function botFixtures(primaryStatus: BotStatus) {
     },
     {
       id: SECONDARY_BOT_ID,
+      surfaceId: SECONDARY_SURFACE_ID,
       name: "Offline Researcher",
       instructions: "Collect primary-source research.",
       agentId: "claude",
@@ -524,7 +528,9 @@ test.describe("ticket 13 responsive, accessible, and visual QA", () => {
     await gotoSeededWorkspace(page);
 
     await page.getByRole("button", { name: "Open Computer Surface", exact: true }).click();
-    await expect(page.getByRole("complementary", { name: "Computer Surface", exact: true })).toBeVisible();
+    const computer = page.getByRole("complementary", { name: "Computer Surface", exact: true });
+    await expect(computer).toBeVisible();
+    await expect(computer.getByRole("heading", { name: "Bot using screen", exact: true })).toBeVisible();
     await expect(page.getByRole("dialog", { name: "Computer Surface" })).toHaveCount(0);
     await captureWorkspace(page, "ticket-13-computer-drawer-dark.png");
   });

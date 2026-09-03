@@ -24,11 +24,16 @@ async function fulfillJson(route: Route, body: unknown): Promise<void> {
   await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
 }
 
-async function installProjectionPeer(page: Page): Promise<void> {
-  await page.addInitScript(({ pngBase64 }) => {
+async function installProjectionPeer(
+  page: Page,
+  options: { inputAuthorityAvailable?: boolean } = {},
+): Promise<void> {
+  await page.addInitScript(({ pngBase64, inputAuthorityAvailable }) => {
     const png = Uint8Array.from(atob(pngBase64), (character) => character.charCodeAt(0)).buffer;
     const inputMessages: unknown[] = [];
     Object.defineProperty(window, "__screenInputMessages", { configurable: true, value: inputMessages });
+    const controlMessages: unknown[] = [];
+    Object.defineProperty(window, "__screenControlMessages", { configurable: true, value: controlMessages });
     class FakeDataChannel extends EventTarget {
       readonly label: string;
       readonly ordered = true;
@@ -88,6 +93,29 @@ async function installProjectionPeer(page: Page): Promise<void> {
       private readonly channels = new Map<string, FakeDataChannel>();
       private surfaceId = "";
       private sequence = 0;
+      constructor() {
+        super();
+        peers.push(this);
+      }
+
+      dispatchInputAuthority(active: boolean, controllerEpoch = 7): void {
+        this.channels.get("screen.input.v1")?.dispatchEvent(new MessageEvent("message", {
+          data: JSON.stringify({
+            version: 1,
+            type: "input-authority",
+            active,
+            surfaceId: this.surfaceId,
+            runtimeGeneration: 1,
+            geometryGeneration: 1,
+            controllerEpoch,
+            logicalWidth: 1000,
+            logicalHeight: 500,
+            videoWidth: 2000,
+            videoHeight: 1000,
+            scale: 2,
+          }),
+        }));
+      }
 
       createDataChannel(label: string): RTCDataChannel {
         const channel = new FakeDataChannel(label, (sentLabel, raw) => {
@@ -95,49 +123,20 @@ async function installProjectionPeer(page: Page): Promise<void> {
             const message = JSON.parse(raw) as { type?: string; controllerEpoch?: number };
             inputMessages.push(message);
             if (message.type === "release-control") {
-              queueMicrotask(() => this.channels.get("screen.input.v1")?.dispatchEvent(new MessageEvent("message", {
-                data: JSON.stringify({
-                  version: 1,
-                  type: "input-authority",
-                  active: false,
-                  surfaceId: this.surfaceId,
-                  runtimeGeneration: 1,
-                  geometryGeneration: 1,
-                  controllerEpoch: message.controllerEpoch,
-                  logicalWidth: 1000,
-                  logicalHeight: 500,
-                  videoWidth: 2000,
-                  videoHeight: 1000,
-                  scale: 2,
-                }),
-              })));
+              queueMicrotask(() => this.dispatchInputAuthority(false, message.controllerEpoch ?? 7));
             }
             return;
           }
           if (sentLabel !== "screen.control.v1") return;
           const message = JSON.parse(raw) as { mode?: string };
+          controlMessages.push(message);
           if (message.mode !== "preview" && message.mode !== "expanded") return;
           const frames = this.channels.get("screen.frames.v1");
           if (frames === undefined) return;
           this.sequence += 1;
           queueMicrotask(() => {
-            if (message.mode === "expanded") {
-              this.channels.get("screen.input.v1")?.dispatchEvent(new MessageEvent("message", {
-                data: JSON.stringify({
-                  version: 1,
-                  type: "input-authority",
-                  active: true,
-                  surfaceId: this.surfaceId,
-                  runtimeGeneration: 1,
-                  geometryGeneration: 1,
-                  controllerEpoch: 7,
-                  logicalWidth: 1000,
-                  logicalHeight: 500,
-                  videoWidth: 2000,
-                  videoHeight: 1000,
-                  scale: 2,
-                }),
-              }));
+            if (message.mode === "expanded" && testControl.inputAuthorityAvailable) {
+              this.dispatchInputAuthority(true);
             }
             frames.dispatchEvent(new MessageEvent("message", {
               data: JSON.stringify({
@@ -187,8 +186,20 @@ async function installProjectionPeer(page: Page): Promise<void> {
       }
     }
 
+    const peers: FakePeerConnection[] = [];
+    const testControl = {
+      inputAuthorityAvailable,
+      revokeInput(): void {
+        testControl.inputAuthorityAvailable = false;
+        peers.at(-1)?.dispatchInputAuthority(false);
+      },
+    };
+    Object.defineProperty(window, "__screenProjectionControl", { configurable: true, value: testControl });
     Object.defineProperty(window, "RTCPeerConnection", { configurable: true, value: FakePeerConnection });
-  }, { pngBase64: PNG.toString("base64") });
+  }, {
+    pngBase64: PNG.toString("base64"),
+    inputAuthorityAvailable: options.inputAuthorityAvailable ?? true,
+  });
 }
 
 async function fulfillProjection(route: Route): Promise<boolean> {
@@ -341,6 +352,7 @@ test.describe("contextual computer sheet", () => {
       }
       await fulfillJson(route, {
         state: "bot-using",
+        takeover: "unavailable",
         botId: url.searchParams.get("botId"),
         surfaceId: url.searchParams.get("surfaceId"),
         activity: "Bot using screen.",
@@ -371,6 +383,7 @@ test.describe("contextual computer sheet", () => {
         botId: url.searchParams.get("botId"),
         surfaceId: url.searchParams.get("surfaceId"),
         state: "ready",
+        takeover: "unavailable",
         activity: "Screen ready.",
       });
     });
@@ -475,6 +488,156 @@ test.describe("contextual computer sheet", () => {
     )).toBe(true);
   });
 
+  test("re-arms an already-expanded takeover and drops pointer transitions outside its authority", async ({ page }) => {
+    await installProjectionPeer(page, { inputAuthorityAvailable: false });
+    let state: ComputerState = "bot-using";
+    let takeover: "available" | "active" = "available";
+    await page.route("**/api/computer/**", async (route) => {
+      if (await fulfillProjection(route)) return;
+      const url = new URL(route.request().url());
+      if (url.pathname === "/api/computer/take-control") {
+        state = "user-control";
+        takeover = "active";
+      }
+      await fulfillJson(route, {
+        botId: url.searchParams.get("botId"),
+        surfaceId: url.searchParams.get("surfaceId"),
+        state,
+        takeover,
+        activity: state === "user-control" ? "You have control." : "Bot using screen.",
+      });
+    });
+    await page.setViewportSize({ width: 1280, height: 760 });
+    await page.goto("/");
+    await createBot(page, "Authority Boundary Bot");
+    await page.getByRole("button", { name: "Open Computer Surface", exact: true }).click();
+    const sheet = page.getByRole("complementary", { name: "Computer Surface", exact: true });
+    await sheet.getByRole("button", { name: "Open Web Control" }).click();
+    const expanded = page.getByAltText("Web Control for Authority Boundary Bot");
+    await expect(expanded).toBeVisible();
+    const imageBox = await expanded.boundingBox();
+    if (imageBox === null) throw new Error("expanded projection has no rendered box");
+    let x = imageBox.x + imageBox.width / 2;
+    let y = imageBox.y + imageBox.height / 2;
+
+    await expanded.dispatchEvent("pointerdown", {
+      pointerId: 99,
+      pointerType: "mouse",
+      button: 0,
+      buttons: 1,
+      clientX: x,
+      clientY: y,
+      bubbles: true,
+      cancelable: true,
+    });
+    expect(await page.evaluate(
+      () => (window as typeof window & { __screenInputMessages: unknown[] }).__screenInputMessages,
+    )).toEqual([]);
+    await expect(expanded).toBeVisible();
+
+    const controlCount = await page.evaluate(
+      () => (window as typeof window & { __screenControlMessages: unknown[] }).__screenControlMessages.length,
+    );
+    await page.evaluate(() => {
+      const control = (window as typeof window & {
+        __screenProjectionControl: { inputAuthorityAvailable: boolean };
+      }).__screenProjectionControl;
+      control.inputAuthorityAvailable = true;
+    });
+    await sheet.locator("button").filter({ hasText: "Take control" }).evaluate((button) => {
+      (button as HTMLButtonElement).click();
+    });
+    await expect.poll(() => page.evaluate(
+      (before) => (window as typeof window & {
+        __screenControlMessages: Array<{ mode?: string }>;
+      }).__screenControlMessages.slice(before).filter(({ mode }) => mode === "expanded").length,
+      controlCount,
+    )).toBeGreaterThan(0);
+    expect(await page.evaluate(
+      (before) => (window as typeof window & {
+        __screenControlMessages: Array<{ mode?: string }>;
+      }).__screenControlMessages.slice(before).map(({ mode }) => mode),
+      controlCount,
+    )).not.toContain("preview");
+    await expanded.dispatchEvent("pointerup", {
+      pointerId: 99,
+      pointerType: "mouse",
+      button: 0,
+      buttons: 0,
+      clientX: x,
+      clientY: y,
+      bubbles: true,
+      cancelable: true,
+    });
+    expect(await page.evaluate(
+      () => (window as typeof window & { __screenInputMessages: unknown[] }).__screenInputMessages,
+    )).toEqual([]);
+    const controlledBox = await expanded.boundingBox();
+    if (controlledBox === null) throw new Error("expanded control has no rendered box");
+    x = controlledBox.x + controlledBox.width / 2;
+    y = controlledBox.y + controlledBox.height / 2;
+    await page.mouse.move(x, y);
+
+    await page.mouse.down();
+    await expanded.dispatchEvent("pointerdown", {
+      pointerId: 1,
+      pointerType: "mouse",
+      button: 0,
+      buttons: 1,
+      clientX: x,
+      clientY: y,
+      bubbles: true,
+      cancelable: true,
+    });
+    await page.mouse.move(x + 8, y + 8);
+    await page.mouse.up();
+    await expanded.dispatchEvent("pointerup", {
+      pointerId: 1,
+      pointerType: "mouse",
+      button: 0,
+      buttons: 0,
+      clientX: x,
+      clientY: y,
+      bubbles: true,
+      cancelable: true,
+    });
+    expect(await page.evaluate(
+      () => (window as typeof window & {
+        __screenInputMessages: Array<{ type?: string; state?: string }>;
+      }).__screenInputMessages
+        .filter(({ type }) => type === "pointer-button")
+        .map(({ type, state }) => ({ type, state })),
+    )).toEqual([
+      { type: "pointer-button", state: "pressed" },
+      { type: "pointer-button", state: "released" },
+    ]);
+
+    if (!await expanded.isVisible()) {
+      await sheet.getByRole("button", { name: "Continue takeover" }).click();
+      await expect(expanded).toBeVisible();
+    }
+    const heldBox = await expanded.boundingBox();
+    if (heldBox === null) throw new Error("expanded control has no held-input box");
+    await page.mouse.move(heldBox.x + heldBox.width / 2, heldBox.y + heldBox.height / 2);
+    await page.mouse.down();
+    await expect.poll(() => page.evaluate(
+      () => (window as typeof window & {
+        __screenInputMessages: Array<{ type?: string }>;
+      }).__screenInputMessages.filter(({ type }) => type === "pointer-button").length,
+    )).toBe(3);
+    await page.evaluate(() => {
+      (window as typeof window & {
+        __screenProjectionControl: { revokeInput(): void };
+      }).__screenProjectionControl.revokeInput();
+    });
+    await page.mouse.up();
+    expect(await page.evaluate(
+      () => (window as typeof window & {
+        __screenInputMessages: Array<{ type?: string; state?: string }>;
+      }).__screenInputMessages.filter(({ type }) => type === "pointer-button").map(({ state }) => state),
+    )).toEqual(["pressed", "released", "pressed"]);
+  });
+
   test("sends shortcuts and plain-text paste only from expanded desktop control and releases on blur", async ({ page }) => {
     await installProjectionPeer(page);
     await page.route("**/api/computer/**", async (route) => {
@@ -484,6 +647,7 @@ test.describe("contextual computer sheet", () => {
         botId: url.searchParams.get("botId"),
         surfaceId: url.searchParams.get("surfaceId"),
         state: "ready",
+        takeover: "unavailable",
         activity: "Screen ready.",
       });
     });
@@ -560,7 +724,9 @@ test.describe("contextual computer sheet", () => {
   });
 
 
-  test("uses a bottom sheet on a narrow screen", async ({ page }) => {
+  test("keeps the narrow-screen preview usable without exposing Takeover", async ({ page }) => {
+    let takeover: "available" | "active" = "available";
+    let takeoverCalls = 0;
     await installProjectionPeer(page);
     await page.route("**/api/computer/projection**", async (route) => {
       await fulfillProjection(route);
@@ -570,8 +736,19 @@ test.describe("contextual computer sheet", () => {
       return fulfillJson(route, {
         botId: url.searchParams.get("botId"),
         surfaceId: url.searchParams.get("surfaceId"),
-        state: "ready",
-        activity: "Screen ready.",
+        state: takeover === "active" ? "user-control" : "ready",
+        takeover,
+        activity: takeover === "active" ? "You have control." : "Screen ready.",
+      });
+    });
+    await page.route("**/api/computer/take-control**", async (route) => {
+      takeoverCalls += 1;
+      await fulfillJson(route, {
+        botId: new URL(route.request().url()).searchParams.get("botId"),
+        surfaceId: new URL(route.request().url()).searchParams.get("surfaceId"),
+        state: "user-control",
+        takeover: "active",
+        activity: "You have control.",
       });
     });
     await page.route("**/api/computer/snapshot**", (route) => route.fulfill({ status: 200, contentType: "image/png", body: PNG }));
@@ -579,8 +756,12 @@ test.describe("contextual computer sheet", () => {
     await createBot(page, "Mobile Computer Bot");
     await page.setViewportSize({ width: 390, height: 780 });
     await page.getByRole("button", { name: "Open Computer Surface", exact: true }).click();
-    await expect(page.getByRole("dialog", { name: "Computer Surface" })).toBeVisible();
-    await expect(page.getByRole("button", { name: "Open Web Control" })).toHaveCount(0);
+    const mobileSheet = page.getByRole("dialog", { name: "Computer Surface" });
+    await expect(mobileSheet).toBeVisible();
+    await expect(mobileSheet.getByAltText("Computer Preview for Mobile Computer Bot")).toBeVisible();
+    await expect(mobileSheet.getByRole("button", { name: "Open Web Control" })).toHaveCount(0);
+    await expect(mobileSheet.getByRole("button", { name: "Take control" })).toHaveCount(0);
+    await expect(mobileSheet.getByRole("button", { name: "Continue takeover" })).toHaveCount(0);
     await page.keyboard.press("Control+L");
     await page.getByRole("dialog", { name: "Computer Surface" }).evaluate((element) => {
       const clipboard = new DataTransfer();
@@ -594,5 +775,41 @@ test.describe("contextual computer sheet", () => {
     expect(await page.evaluate(
       () => (window as typeof window & { __screenInputMessages: unknown[] }).__screenInputMessages,
     )).toEqual([]);
+    takeover = "active";
+    await page.reload();
+    await page.getByRole("button", { name: "Open Computer Surface", exact: true }).click();
+    const activeMobileSheet = page.getByRole("dialog", { name: "Computer Surface" });
+    await expect(activeMobileSheet.getByAltText("Computer Preview for Mobile Computer Bot")).toBeVisible();
+    await expect(activeMobileSheet.getByRole("button", { name: "Take control" })).toHaveCount(0);
+    await expect(activeMobileSheet.getByRole("button", { name: "Continue takeover" })).toHaveCount(0);
+    expect(takeoverCalls).toBe(0);
+  });
+
+  test("renders capacity-full state returned with an expected unavailable response", async ({ page }) => {
+    await page.route("**/api/computer/state**", async (route) => {
+      const url = new URL(route.request().url());
+      await route.fulfill({
+        status: 503,
+        contentType: "application/json",
+        body: JSON.stringify({
+          botId: url.searchParams.get("botId"),
+          surfaceId: url.searchParams.get("surfaceId"),
+          state: "unavailable",
+          takeover: "unavailable",
+          activity: "Bot Screen capacity is full (4/4).",
+          unavailableReason: "capacity",
+          capacity: { active: 4, limit: 4 },
+        }),
+      });
+    });
+    await page.goto("/");
+    await createBot(page, "Capacity Computer Bot");
+
+    const trigger = page.getByRole("button", { name: "Open Computer Surface", exact: true });
+    await expect(trigger).toHaveAttribute("data-state", "unavailable");
+    await trigger.click();
+    const sheet = page.getByRole("complementary", { name: "Computer Surface", exact: true });
+    await expect(sheet).toContainText("Bot Screen capacity is full (4/4).");
+    await expect(sheet).not.toContainText("Bot Screen status could not be loaded.");
   });
 });

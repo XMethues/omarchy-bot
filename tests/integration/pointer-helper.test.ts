@@ -3,40 +3,58 @@ import {
   ensureInputHelper,
 } from "../../apps/daemon/native/pointer-helper/build.ts";
 
+const SURFACE_ID = "surf_11111111111111111111111111111111";
+const CONTEXT = `${SURFACE_ID} 3 1`;
 const PROTOCOL_FIXTURE = [
-  "motion 1 0 0 1920 1080",
-  "button 2 272 1",
-  "motion 3 1919 1079 1920 1080",
-  "button 4 272 0",
-  "scroll 5 -24 120",
-  "key 6 29 1",
-  "key 7 38 1",
-  "key 8 38 0",
-  "key 9 29 0",
-  "paste 10 b25lLXdheSDOuSBwYXN0ZQ==",
-  "release 11",
+  `motion 1 ${CONTEXT} 7 1 0 0`,
+  `authority 2 ${CONTEXT} 7`,
+  `motion 3 ${CONTEXT} 7 1 0 0`,
+  `button 4 surf_22222222222222222222222222222222 3 1 7 2 10 10 272 1`,
+  `button 5 ${SURFACE_ID} 2 1 7 2 10 10 272 1`,
+  `button 6 ${SURFACE_ID} 3 2 7 2 10 10 272 1`,
+  `button 7 ${CONTEXT} 6 2 10 10 272 1`,
+  `motion 8 ${CONTEXT} 7 1 1 1`,
+  `button 9 ${CONTEXT} 7 2 10 10 272 1`,
+  `release 10 ${CONTEXT} 6`,
+  `release 11 ${CONTEXT} 7`,
+  `key 12 ${CONTEXT} 7 3 29 1`,
+  `authority 13 ${CONTEXT} 7`,
+  `authority 14 ${CONTEXT} 8`,
+  `paste 15 ${CONTEXT} 8 10 b25lLXdheSDOuSBwYXN0ZQ==`,
+  `release 16 ${CONTEXT} 0`,
+  `authority 16 ${CONTEXT} 9`,
+  `authority 17 ${CONTEXT} -1`,
+  `authority 18 ${CONTEXT} 9`,
   "",
 ].join("\n");
 
 const EXPECTED_RESPONSES = [
   "READY fixture",
-  "OK 1 motion",
-  "OK 2 button",
-  "OK 3 motion",
-  "OK 4 button",
-  "OK 5 scroll",
-  "OK 6 key",
-  "OK 7 key",
-  "OK 8 key",
-  "OK 9 key",
-  "OK 10 paste",
-  "OK 11 release",
+  "ERR 1 invalid-envelope",
+  "OK 2",
+  "OK 3",
+  "ERR 4 invalid-envelope",
+  "ERR 5 invalid-envelope",
+  "ERR 6 invalid-envelope",
+  "ERR 7 invalid-envelope",
+  "ERR 8 invalid-envelope",
+  "OK 9",
+  "ERR 10 invalid-release",
+  "OK 11",
+  "ERR 12 invalid-envelope",
+  "ERR 13 invalid-authority",
+  "OK 14",
+  "OK 15",
+  "OK 16",
+  "ERR 16 stale-request",
+  "ERR 17 invalid-authority",
+  "OK 18",
   "",
 ].join("\n");
 
-test("native Wayland input helper accepts the deterministic ordered pointer, keyboard, and paste fixture", async () => {
+test("native input helper accepts only explicitly authorized current envelopes and survives rejection", async () => {
   const binary = await ensureInputHelper();
-  const helper = Bun.spawn([binary, "--fixture"], {
+  const helper = Bun.spawn([binary, "--fixture", SURFACE_ID, "3", "1", "1920", "1080"], {
     stdin: new Blob([PROTOCOL_FIXTURE]),
     stdout: "pipe",
     stderr: "pipe",

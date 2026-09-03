@@ -1,6 +1,11 @@
 import { mkdirSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import capacityApproval from "./bot-screen-capacity-approval.json";
+
+
+/** Checked-in schema-v2 measurement that authorizes the shipped default. */
+export const BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL = Object.freeze(capacityApproval);
 
 export interface Config {
   dataDir: string;
@@ -71,11 +76,11 @@ export function loadConfig(): Config {
     ...(voxtypeBin !== undefined ? { voxtypeBin } : {}),
     port: Number(process.env.OMARCHY_BOT_PORT ?? 7321),
     turnTimeoutMs: Number(process.env.OMARCHY_BOT_TURN_TIMEOUT_MS ?? 600_000),
-    botScreenCapacity: positiveInteger("OMARCHY_BOT_SCREEN_CAPACITY", 4),
+    botScreenCapacity: positiveInteger("OMARCHY_BOT_SCREEN_CAPACITY", BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.defaultCapacity),
     botScreenProfile: screenProfile.name,
     botScreenLogicalWidth: screenProfile.logicalWidth,
     botScreenLogicalHeight: screenProfile.logicalHeight,
-    botScreenFrameRate: positiveInteger("OMARCHY_BOT_SCREEN_FRAME_RATE", 16),
+    botScreenFrameRate: positiveInteger("OMARCHY_BOT_SCREEN_FRAME_RATE", BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.captureFrameRate),
   };
   mkdirSync(dataDir, { recursive: true });
   mkdirSync(stateDir, { recursive: true });

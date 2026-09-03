@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import nodePath from "node:path";
+import { ApiClient } from "../../packages/api-client/src/index.ts";
 import { handleComputerRequest } from "../../apps/daemon/src/api/computerRoutes.ts";
 import type { ComputerSurfaceOwner } from "../../apps/daemon/src/modules/computer/broker.ts";
 import type {
@@ -8,6 +9,7 @@ import type {
   BotScreenRuntime,
   BotScreenRuntimeAdapter,
 } from "../../apps/daemon/src/modules/computer/botScreenManager.ts";
+import { FakeBotScreenRuntimeAdapter } from "../../apps/daemon/src/modules/computer/fakeBotScreenRuntime.ts";
 import { WorkerClient, sanitizedEnv } from "../../apps/daemon/src/supervision/workerClient.ts";
 import { api, makeBot, sendToBot, startDaemon, type Harness } from "./helpers/harness.ts";
 
@@ -47,6 +49,7 @@ async function waitForComputerState(
   h: Harness,
   owner: SurfaceOwner,
   expected: string,
+  activate = expected === "ready",
 ): Promise<{
   botId: string;
   surfaceId: string;
@@ -55,6 +58,9 @@ async function waitForComputerState(
   activity?: string;
   previewAt?: string;
 }> {
+  if (activate) {
+    await fetch(`${h.baseUrl}${computerPath("/api/computer/snapshot", owner)}`);
+  }
   const deadline = Date.now() + 5_000;
   for (;;) {
     const result = await computerRequest<{
@@ -153,6 +159,9 @@ class ControlledRuntimeAdapter implements BotScreenRuntimeAdapter {
         if (stopped) throw new Error("test Screen is stopped");
         return { text: `test-${action.name}` };
       },
+      setInputAuthority: async () => {
+        if (stopped) throw new Error("test Screen is stopped");
+      },
       input: async () => {
         if (stopped) throw new Error("test Screen is stopped");
       },
@@ -221,23 +230,59 @@ describe("contextual computer control", () => {
     expect(response.status).toBe(404);
   });
 
-  test("opening Computer lazily reports actual Bot Screen startup and readiness", async () => {
+  test("polling a closed Computer Surface does not provision it", async () => {
+    await h.stop();
+    const adapter = new FakeBotScreenRuntimeAdapter();
+    h = await startDaemon(undefined, { botScreenAdapter: adapter });
     const owner = await ownerFor(h, await makeBot(h, "Lazy screen"));
 
-    const opening = await computerRequest<{ state: string; activity?: string }>(
+    for (let poll = 0; poll < 3; poll += 1) {
+      const status = await computerRequest<{ state: string; activity?: string }>(
+        h,
+        "GET",
+        computerPath("/api/computer/state", owner),
+      );
+      expect(status.body).toMatchObject({ state: "starting", activity: "Screen starting." });
+    }
+    expect(adapter.starts).toHaveLength(0);
+
+    const preview = await computerRequest<ArrayBuffer>(
       h,
       "GET",
-      computerPath("/api/computer/state", owner),
+      computerPath("/api/computer/snapshot", owner),
     );
-    expect(opening.body).toMatchObject({
-      state: "starting",
-      activity: "Screen starting.",
-    });
-
+    expect(preview.response.status).toBe(200);
+    expect(adapter.starts).toHaveLength(1);
     expect(await waitForComputerState(h, owner, "ready")).toMatchObject({
       state: "ready",
       activity: "Screen ready.",
     });
+  });
+
+  test("the shared API client preserves capacity-full Computer state", async () => {
+    await h.stop();
+    const adapter = new FakeBotScreenRuntimeAdapter();
+    h = await startDaemon(undefined, { botScreenAdapter: adapter, botScreenCapacity: 1 });
+    const admitted = await ownerFor(h, await makeBot(h, "Admitted screen"));
+    const waiting = await ownerFor(h, await makeBot(h, "Waiting screen"));
+
+    const admittedPreview = await computerRequest<ArrayBuffer>(
+      h,
+      "GET",
+      computerPath("/api/computer/snapshot", admitted),
+    );
+    expect(admittedPreview.response.status).toBe(200);
+
+    const client = new ApiClient({ baseUrl: h.baseUrl });
+    await expect(client.computerState(waiting)).resolves.toEqual({
+      ...waiting,
+      state: "unavailable",
+      takeover: "unavailable",
+      activity: "Bot Screen capacity is full (1/1).",
+      unavailableReason: "capacity",
+      capacity: { active: 1, limit: 1 },
+    });
+    expect(adapter.starts).toHaveLength(1);
   });
 
   test("missing Hyprland reports Screen unavailable without falling back to the host", async () => {
@@ -252,12 +297,12 @@ describe("contextual computer control", () => {
     }
     const owner = await ownerFor(h, await makeBot(h, "Unavailable screen"));
 
-    const opening = await computerRequest<{ state: string }>(
+    const preview = await computerRequest<{ error: string }>(
       h,
       "GET",
-      computerPath("/api/computer/state", owner),
+      computerPath("/api/computer/snapshot", owner),
     );
-    expect(opening.body.state).toBe("starting");
+    expect(preview.response.status).toBe(503);
 
     expect(await waitForComputerState(h, owner, "unavailable")).toEqual({
       ...owner,
@@ -296,8 +341,9 @@ describe("contextual computer control", () => {
     expect(snapshot.response.headers.get("content-type")).toBe("image/png");
     expect(snapshot.body.byteLength).toBeGreaterThan(0);
 
-    const firstState = await waitForComputerState(h, first, "ready");
-    const secondState = await waitForComputerState(h, second, "ready");
+    h.svc.screens.open(second);
+    const firstState = await waitForComputerState(h, first, "ready", false);
+    const secondState = await waitForComputerState(h, second, "ready", false);
     expect(firstState).toMatchObject({ ...first, state: "ready", previewAt: expect.any(String) });
     expect(secondState).toEqual({
       ...second,
@@ -355,6 +401,81 @@ describe("contextual computer control", () => {
     expect(snapshot.response.status).toBe(200);
     expect(await waitForComputerState(h, unaffected, "ready")).toMatchObject(unaffected);
   });
+
+  test("every Bot Screen lifecycle transition emits Surface-scoped state", async () => {
+    await h.stop();
+    const adapter = new FakeBotScreenRuntimeAdapter();
+    h = await startDaemon(undefined, { botScreenAdapter: adapter });
+    const owner = await ownerFor(h, await makeBot(h, "Lifecycle events"));
+    const lifecycle: string[] = [];
+    const unsubscribe = h.svc.events.subscribe((event) => {
+      if (
+        event.aggregateType !== "computer"
+        || event.aggregateId !== owner.surfaceId
+        || event.type !== "computer.state.changed"
+      ) return;
+      const payload = event.payload;
+      if (
+        payload !== null
+        && typeof payload === "object"
+        && "lifecycle" in payload
+        && typeof payload.lifecycle === "string"
+      ) {
+        lifecycle.push(payload.lifecycle);
+      }
+    });
+
+    try {
+      const preview = await computerRequest<ArrayBuffer>(
+        h,
+        "GET",
+        computerPath("/api/computer/snapshot", owner),
+      );
+      expect(preview.response.status).toBe(200);
+      await waitForComputerState(h, owner, "ready");
+      adapter.crash(owner.surfaceId, "lifecycle event failure");
+      await waitForComputerState(h, owner, "unavailable");
+      await api(h, "POST", `/api/bots/${owner.botId}/archive`, {});
+      expect(lifecycle).toEqual(["starting", "ready", "failed", "stopped"]);
+    } finally {
+      unsubscribe();
+    }
+  });
+
+
+  test("restart recovery emits scoped lifecycle state after Broker subscription", async () => {
+    await h.stop();
+    const adapter = new FakeBotScreenRuntimeAdapter();
+    h = await startDaemon(undefined, { botScreenAdapter: adapter });
+    const owner = await ownerFor(h, await makeBot(h, "Recovery events"));
+    await waitForComputerState(h, owner, "ready");
+    const previousEvents = h.svc.events.replay(0, h.svc.events.oldestCursor()).events;
+    const cursor = previousEvents.at(-1)?.cursor ?? 0;
+    const home = h.home;
+
+    await h.disconnectForRestart();
+    h = await startDaemon(home, { botScreenAdapter: adapter });
+
+    const recoveredLifecycle = h.svc.events
+      .replay(cursor, h.svc.events.oldestCursor())
+      .events
+      .filter((event) =>
+        event.aggregateType === "computer"
+        && event.aggregateId === owner.surfaceId
+        && event.type === "computer.state.changed"
+      )
+      .flatMap((event) => {
+        const payload = event.payload;
+        if (
+          payload !== null
+          && typeof payload === "object"
+          && "lifecycle" in payload
+          && typeof payload.lifecycle === "string"
+        ) return [payload.lifecycle];
+        return [];
+      });
+    expect(recoveredLifecycle).toContain("ready");
+  }, 15_000);
 
   test("restarting one Surface worker does not stop another Surface worker", async () => {
     const first = await ownerFor(h, await makeBot(h, "First worker"));

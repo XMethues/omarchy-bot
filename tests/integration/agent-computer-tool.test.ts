@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
+import path from "node:path";
 import type { ComputerAction, SurfaceId } from "../../packages/domain/src/index.ts";
 import type {
   BotScreenProvision,
@@ -108,6 +110,7 @@ class AgentToolRuntimeAdapter implements BotScreenRuntimeAdapter {
             : {}),
         };
       },
+      setInputAuthority: async () => {},
       input: async () => {},
       releaseInput: async () => {
         this.releases.push(provision.surfaceId);
@@ -121,6 +124,29 @@ class AgentToolRuntimeAdapter implements BotScreenRuntimeAdapter {
 async function botSurface(h: Harness, botId: string): Promise<SurfaceId> {
   const bot = await api<{ surfaceId: SurfaceId }>(h, "GET", `/api/bots/${botId}`);
   return bot.surfaceId;
+}
+
+function coordination(h: Harness, surfaceId: SurfaceId): {
+  authority_kind: "idle" | "agent" | "web" | "takeover";
+  controller_epoch: number;
+} | null {
+  return h.svc.db
+    .query(
+      `SELECT authority_kind, controller_epoch
+       FROM computer_surface_coordination WHERE surface_id = ?`,
+    )
+    .get(surfaceId) as {
+      authority_kind: "idle" | "agent" | "web" | "takeover";
+      controller_epoch: number;
+    } | null;
+}
+
+
+function artifactCount(h: Harness, surfaceId: SurfaceId): number {
+  const row = h.svc.db
+    .query(`SELECT COUNT(*) AS count FROM artifacts WHERE surface_id = ?`)
+    .get(surfaceId) as { count: number };
+  return row.count;
 }
 
 async function messages(h: Harness, threadId: string): Promise<Array<{ author: { kind: string }; kind: string; text?: string; payload?: Record<string, unknown> }>> {
@@ -211,7 +237,7 @@ describe("Bot-bound Pi computer tool", () => {
     }
   });
 
-  test("Takeover holds one native tool call through quiescence and I'm done continues that same turn", async () => {
+  test("Takeover persists one fresh final observation and resumes that same tool call", async () => {
     const adapter = new AgentToolRuntimeAdapter();
     h = await startDaemon(undefined, { botScreenAdapter: adapter });
     const botId = await makeBot(h, "Same-turn Takeover Bot");
@@ -219,14 +245,27 @@ describe("Bot-bound Pi computer tool", () => {
     const owner = { botId, surfaceId };
     adapter.blockActions();
 
-    const sent = await sendToBot(h, botId, "computer:click:takeover");
+    const sent = await sendToBot(h, botId, "computer:screenshot");
     await adapter.waitForActions(1);
+    expect(coordination(h, surfaceId)).toMatchObject({ authority_kind: "agent" });
     expect(await waitForTakeover(h, owner, "available")).toMatchObject({
       state: "bot-using",
       takeover: "available",
     });
 
+    const authorityTransition = Promise.withResolvers<void>();
+    const subscribedHarness = h;
+    const unsubscribeAuthority = h.svc.events.subscribe((event) => {
+      if (
+        event.aggregateType === "computer"
+        && event.aggregateId === surfaceId
+        && coordination(subscribedHarness, surfaceId)?.authority_kind === "takeover"
+      ) {
+        authorityTransition.resolve();
+      }
+    });
     const takeover = computerRequest(h, owner, "POST", "/api/computer/take-control");
+    await authorityTransition.promise.finally(unsubscribeAuthority);
     const beforeQuiescence = await Promise.race([
       takeover.then(() => "takeover-settled" as const),
       computerRequest(h, owner, "GET", "/api/computer/state").then(() => "state-readable" as const),
@@ -238,11 +277,14 @@ describe("Bot-bound Pi computer tool", () => {
     const taken = await takeover;
     expect(taken.response.status).toBe(200);
     expect(taken.body).toMatchObject({ state: "user-control", takeover: "active" });
+    expect(coordination(h, surfaceId)).toMatchObject({ authority_kind: "web" });
     expect(h.svc.threads.turnRow(sent.turnId)?.status).toBe("working");
     expect(adapter.actions).toEqual([
-      { surfaceId, action: { name: "click", args: { marker: "takeover" } } },
+      { surfaceId, action: { name: "screenshot", args: {} } },
     ]);
     adapter.blockActions();
+    const artifactsBeforeReturn = artifactCount(h, surfaceId);
+    expect(artifactsBeforeReturn).toBe(0);
     const returning = computerRequest(h, owner, "POST", "/api/computer/return-to-bot");
     await adapter.waitForActions(2);
     const duplicate = await computerRequest(h, owner, "POST", "/api/computer/return-to-bot");
@@ -251,22 +293,68 @@ describe("Bot-bound Pi computer tool", () => {
     const returned = await returning;
     expect(returned.response.status).toBe(200);
     expect(returned.body).toMatchObject({ takeover: "unavailable" });
+    expect(coordination(h, surfaceId)).toMatchObject({ authority_kind: "idle" });
     await waitThreadIdle(h, sent.threadId);
 
     expect(adapter.actions).toEqual([
-      { surfaceId, action: { name: "click", args: { marker: "takeover" } } },
-      { surfaceId, action: { name: "observe", args: {} } },
+      { surfaceId, action: { name: "screenshot", args: {} } },
       { surfaceId, action: { name: "screenshot", args: {} } },
     ]);
+    expect(artifactCount(h, surfaceId)).toBe(1);
     const transcript = await messages(h, sent.threadId);
     const computerTools = transcript.filter((message) =>
       message.kind === "tool" && message.payload?.name === "computer"
     );
     expect(computerTools).toHaveLength(1);
     expect(transcript.some((message) =>
-      message.text?.includes("Fresh window") && message.text.includes("imageRef")
+      message.text?.includes(`screen:${surfaceId}:screenshot`) && message.text.includes("imageRef")
     )).toBeTrue();
     expect(h.svc.threads.turnRow(sent.turnId)?.status).toBe("completed");
+  });
+
+  test("persisted authority transitions are isolated by Surface", async () => {
+    const adapter = new AgentToolRuntimeAdapter();
+    h = await startDaemon(undefined, { botScreenAdapter: adapter });
+    const firstBotId = await makeBot(h, "Authority owner");
+    const first = { botId: firstBotId, surfaceId: await botSurface(h, firstBotId) };
+    const secondBotId = await makeBot(h, "Authority peer");
+    const second = { botId: secondBotId, surfaceId: await botSurface(h, secondBotId) };
+
+    await h.svc.computer.agentToolAct(
+      second,
+      "authority-second-turn",
+      "authority-second-tool",
+      { name: "observe", args: {} },
+      new AbortController().signal,
+    );
+    const secondSettled = coordination(h, second.surfaceId);
+    expect(secondSettled).toMatchObject({ authority_kind: "idle" });
+
+    adapter.blockActions();
+    const controller = new AbortController();
+    const firstAction = h.svc.computer.agentToolAct(
+      first,
+      "authority-first-turn",
+      "authority-first-tool",
+      { name: "click", args: {} },
+      controller.signal,
+    );
+    await adapter.waitForActions(2);
+    expect(coordination(h, first.surfaceId)).toMatchObject({ authority_kind: "agent" });
+    expect(coordination(h, second.surfaceId)).toEqual(secondSettled);
+
+    const takeover = h.svc.computer.takeOver(first);
+    expect(coordination(h, first.surfaceId)).toMatchObject({ authority_kind: "takeover" });
+    expect(coordination(h, second.surfaceId)).toEqual(secondSettled);
+    adapter.releaseActions();
+    await expect(takeover).resolves.toEqual({ ok: true });
+    expect(coordination(h, first.surfaceId)).toMatchObject({ authority_kind: "web" });
+    expect(coordination(h, second.surfaceId)).toEqual(secondSettled);
+
+    controller.abort(new Error("authority isolation complete"));
+    await expect(firstAction).rejects.toThrow("authority isolation complete");
+    expect(coordination(h, first.surfaceId)).toMatchObject({ authority_kind: "idle" });
+    expect(coordination(h, second.surfaceId)).toEqual(secondSettled);
   });
 
   test("Takeover is unavailable without a pending Broker tool and native cancellation cancels a held waiter", async () => {
@@ -356,10 +444,24 @@ describe("Bot-bound Pi computer tool", () => {
     ])).toBe("state-readable");
     adapter.releaseActions();
     expect((await takeover).body).toMatchObject({ takeover: "active" });
+    const staleAuthority = coordination(h, surfaceId);
+    expect(staleAuthority).toMatchObject({ authority_kind: "web" });
 
     const home = h.home;
     await h.stop();
+    const staleDb = new Database(path.join(home, "db.sqlite"));
+    staleDb
+      .query(
+        `UPDATE computer_surface_coordination
+         SET authority_kind = 'web', controller_epoch = 41, updated_at = ? WHERE surface_id = ?`,
+      )
+      .run(new Date(0).toISOString(), surfaceId);
+    staleDb.close();
     h = await startDaemon(home, { botScreenAdapter: new AgentToolRuntimeAdapter() });
+    expect(coordination(h, surfaceId)).toEqual({
+      authority_kind: "idle",
+      controller_epoch: 42,
+    });
     const turn = h.svc.threads.turnRow(sent.turnId);
     expect(turn?.status).toBe("failed");
     expect(turn?.outcome_reason).toMatch(/daemon (?:stopped|restart)/);

@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include <errno.h>
+#include <ctype.h>
 #include <fcntl.h>
 #include <math.h>
 #include <stdbool.h>
@@ -24,6 +25,7 @@
 #define COORDINATE_SCALE 1000.0
 #define SCROLL_SCALE 12.0
 #define MAX_PASTE_BYTES 65536u
+#define MAX_SAFE_INTEGER 9007199254740991ULL
 
 struct output_binding {
   struct wl_output *output;
@@ -50,6 +52,15 @@ struct input_state {
   struct xkb_keymap *default_keymap;
   struct xkb_keymap *active_keymap;
   struct xkb_state *xkb_state;
+  const char *surface_id;
+  unsigned long long runtime_generation;
+  unsigned long long geometry_generation;
+  unsigned long long controller_epoch;
+  unsigned long long highest_controller_epoch;
+  unsigned long long last_event_sequence;
+  unsigned int logical_width;
+  unsigned int logical_height;
+  bool authority_active;
   bool held_buttons[3];
   bool held_keys[MAX_KEY_CODE + 1];
 };
@@ -142,6 +153,65 @@ static bool parse_sequence(const char *line, unsigned long long *sequence) {
   if (errno != 0 || end == space + 1 || (*end != ' ' && *end != '\n' && *end != '\0')) return false;
   *sequence = parsed;
   return true;
+}
+
+static bool parse_positive_integer(const char *text, unsigned long long *value) {
+  if (text[0] < '0' || text[0] > '9') return false;
+  errno = 0;
+  char *end = NULL;
+  unsigned long long parsed = strtoull(text, &end, 10);
+  if (errno != 0 || end == text || *end != '\0' || parsed == 0 || parsed > MAX_SAFE_INTEGER) return false;
+  *value = parsed;
+  return true;
+}
+
+struct input_envelope {
+  unsigned long long request_sequence;
+  char surface_id[64];
+  unsigned long long runtime_generation;
+  unsigned long long geometry_generation;
+  unsigned long long controller_epoch;
+  unsigned long long event_sequence;
+  int consumed;
+};
+
+static bool parse_input_envelope(const char *line, struct input_envelope *envelope) {
+  return sscanf(line, "%*s %llu %63s %llu %llu %llu %llu %n",
+      &envelope->request_sequence, envelope->surface_id,
+      &envelope->runtime_generation, &envelope->geometry_generation,
+      &envelope->controller_epoch, &envelope->event_sequence,
+      &envelope->consumed) == 6;
+}
+
+static bool trailing_space_only(const char *text) {
+  while (*text != '\0') {
+    if (!isspace((unsigned char)*text)) return false;
+    text++;
+  }
+  return true;
+}
+
+static bool context_matches(const struct input_state *state, const char *surface_id,
+                            unsigned long long runtime_generation,
+                            unsigned long long geometry_generation) {
+  return strcmp(surface_id, state->surface_id) == 0
+      && runtime_generation == state->runtime_generation
+      && geometry_generation == state->geometry_generation;
+}
+
+static bool envelope_is_current(const struct input_state *state,
+                                const struct input_envelope *envelope) {
+  return context_matches(state, envelope->surface_id, envelope->runtime_generation,
+             envelope->geometry_generation)
+      && state->authority_active
+      && envelope->controller_epoch == state->controller_epoch
+      && envelope->event_sequence > state->last_event_sequence
+      && envelope->event_sequence <= MAX_SAFE_INTEGER;
+}
+
+static void protocol_error(unsigned long long request_sequence, const char *reason) {
+  printf("ERR %llu %s\n", request_sequence, reason);
+  fflush(stdout);
 }
 
 static bool supported_button(unsigned int button) {
@@ -369,21 +439,73 @@ static bool paste_text(struct input_state *state, const unsigned char *text, siz
   return ok;
 }
 
-static int fixture_loop(void) {
+static int fixture_loop(struct input_state *state) {
   char line[131072];
+  unsigned long long last_request_sequence = 0;
   puts("READY fixture");
   fflush(stdout);
   while (fgets(line, sizeof(line), stdin) != NULL) {
-    unsigned long long sequence = 0;
-    if (!parse_sequence(line, &sequence)) { puts("ERR malformed"); fflush(stdout); continue; }
-    const char *kind = strncmp(line, "motion ", 7) == 0 ? "motion"
-        : strncmp(line, "button ", 7) == 0 ? "button"
-        : strncmp(line, "scroll ", 7) == 0 ? "scroll"
-        : strncmp(line, "key ", 4) == 0 ? "key"
-        : strncmp(line, "paste ", 6) == 0 ? "paste"
-        : strncmp(line, "release ", 8) == 0 ? "release" : NULL;
-    if (kind == NULL) printf("ERR %llu unknown\n", sequence);
-    else printf("OK %llu %s\n", sequence, kind);
+    unsigned long long request_sequence = 0;
+    if (!parse_sequence(line, &request_sequence)) {
+      protocol_error(0, "malformed");
+      continue;
+    }
+    if (request_sequence <= last_request_sequence) {
+      protocol_error(request_sequence, "stale-request");
+      continue;
+    }
+    last_request_sequence = request_sequence;
+
+    if (strncmp(line, "authority ", 10) == 0) {
+      char surface_id[64];
+      unsigned long long runtime_generation = 0, geometry_generation = 0, controller_epoch = 0;
+      int consumed = 0;
+      if (sscanf(line, "authority %llu %63s %llu %llu %llu %n",
+            &request_sequence, surface_id, &runtime_generation,
+            &geometry_generation, &controller_epoch, &consumed) != 5
+          || !trailing_space_only(line + consumed)
+          || !context_matches(state, surface_id, runtime_generation, geometry_generation)
+          || controller_epoch == 0
+          || controller_epoch > MAX_SAFE_INTEGER
+          || controller_epoch <= state->highest_controller_epoch) {
+        protocol_error(request_sequence, "invalid-authority");
+        continue;
+      }
+      state->authority_active = true;
+      state->controller_epoch = controller_epoch;
+      state->highest_controller_epoch = controller_epoch;
+      state->last_event_sequence = 0;
+    } else if (strncmp(line, "release ", 8) == 0) {
+      char surface_id[64];
+      unsigned long long runtime_generation = 0, geometry_generation = 0, controller_epoch = 0;
+      int consumed = 0;
+      if (sscanf(line, "release %llu %63s %llu %llu %llu %n",
+            &request_sequence, surface_id, &runtime_generation,
+            &geometry_generation, &controller_epoch, &consumed) != 5
+          || !trailing_space_only(line + consumed)
+          || !context_matches(state, surface_id, runtime_generation, geometry_generation)
+          || (controller_epoch != 0
+            && (!state->authority_active || controller_epoch != state->controller_epoch))) {
+        protocol_error(request_sequence, "invalid-release");
+        continue;
+      }
+      state->authority_active = false;
+      state->last_event_sequence = 0;
+    } else {
+      struct input_envelope envelope = {0};
+      bool known = strncmp(line, "motion ", 7) == 0
+          || strncmp(line, "button ", 7) == 0
+          || strncmp(line, "scroll ", 7) == 0
+          || strncmp(line, "key ", 4) == 0
+          || strncmp(line, "paste ", 6) == 0;
+      if (!known || !parse_input_envelope(line, &envelope)
+          || !envelope_is_current(state, &envelope)) {
+        protocol_error(request_sequence, known ? "invalid-envelope" : "unknown");
+        continue;
+      }
+      state->last_event_sequence = envelope.event_sequence;
+    }
+    printf("OK %llu\n", request_sequence);
     fflush(stdout);
   }
   return 0;
@@ -391,57 +513,166 @@ static int fixture_loop(void) {
 
 static int command_loop(struct input_state *state) {
   char line[131072];
-  unsigned long long last_sequence = 0;
+  unsigned long long last_request_sequence = 0;
   printf("READY\n");
   fflush(stdout);
   while (fgets(line, sizeof(line), stdin) != NULL) {
-    unsigned long long sequence = 0;
-    if (!parse_sequence(line, &sequence) || sequence <= last_sequence) return 2;
+    unsigned long long request_sequence = 0;
+    if (!parse_sequence(line, &request_sequence)) {
+      protocol_error(0, "malformed");
+      continue;
+    }
+    if (request_sequence <= last_request_sequence) {
+      protocol_error(request_sequence, "stale-request");
+      continue;
+    }
+    last_request_sequence = request_sequence;
+
+    if (strncmp(line, "authority ", 10) == 0) {
+      char surface_id[64];
+      unsigned long long runtime_generation = 0, geometry_generation = 0, controller_epoch = 0;
+      int consumed = 0;
+      if (sscanf(line, "authority %llu %63s %llu %llu %llu %n",
+            &request_sequence, surface_id, &runtime_generation,
+            &geometry_generation, &controller_epoch, &consumed) != 5
+          || !trailing_space_only(line + consumed)
+          || !context_matches(state, surface_id, runtime_generation, geometry_generation)
+          || controller_epoch == 0
+          || controller_epoch > MAX_SAFE_INTEGER
+          || controller_epoch <= state->highest_controller_epoch) {
+        protocol_error(request_sequence, "invalid-authority");
+        continue;
+      }
+      release_held(state);
+      if (wl_display_roundtrip(state->display) < 0) return 3;
+      state->authority_active = true;
+      state->controller_epoch = controller_epoch;
+      state->highest_controller_epoch = controller_epoch;
+      state->last_event_sequence = 0;
+      printf("OK %llu\n", request_sequence);
+      fflush(stdout);
+      continue;
+    }
+
+    if (strncmp(line, "release ", 8) == 0) {
+      char surface_id[64];
+      unsigned long long runtime_generation = 0, geometry_generation = 0, controller_epoch = 0;
+      int consumed = 0;
+      if (sscanf(line, "release %llu %63s %llu %llu %llu %n",
+            &request_sequence, surface_id, &runtime_generation,
+            &geometry_generation, &controller_epoch, &consumed) != 5
+          || !trailing_space_only(line + consumed)
+          || !context_matches(state, surface_id, runtime_generation, geometry_generation)
+          || (controller_epoch != 0
+            && (!state->authority_active || controller_epoch != state->controller_epoch))) {
+        protocol_error(request_sequence, "invalid-release");
+        continue;
+      }
+      release_held(state);
+      if (wl_display_roundtrip(state->display) < 0) return 3;
+      state->authority_active = false;
+      state->last_event_sequence = 0;
+      printf("OK %llu\n", request_sequence);
+      fflush(stdout);
+      continue;
+    }
+
+    struct input_envelope envelope = {0};
+    if (!parse_input_envelope(line, &envelope)
+        || !envelope_is_current(state, &envelope)) {
+      protocol_error(request_sequence, "invalid-envelope");
+      continue;
+    }
+
     uint32_t now = monotonic_milliseconds();
+    bool dispatched = false;
     if (strncmp(line, "motion ", 7) == 0) {
-      double x = 0, y = 0; unsigned int width = 0, height = 0;
-      if (sscanf(line, "motion %llu %lf %lf %u %u", &sequence, &x, &y, &width, &height) != 5
-          || !isfinite(x) || !isfinite(y) || width == 0 || height == 0
-          || x < 0 || y < 0 || x >= width || y >= height) return 2;
-      zwlr_virtual_pointer_v1_motion_absolute(state->pointer, now,
-          (uint32_t)llround(x * COORDINATE_SCALE), (uint32_t)llround(y * COORDINATE_SCALE),
-          (uint32_t)llround(width * COORDINATE_SCALE), (uint32_t)llround(height * COORDINATE_SCALE));
-      zwlr_virtual_pointer_v1_frame(state->pointer);
+      double x = 0, y = 0;
+      int consumed = 0;
+      if (sscanf(line + envelope.consumed, "%lf %lf %n", &x, &y, &consumed) == 2
+          && trailing_space_only(line + envelope.consumed + consumed)
+          && isfinite(x) && isfinite(y)
+          && x >= 0 && y >= 0 && x < state->logical_width && y < state->logical_height) {
+        zwlr_virtual_pointer_v1_motion_absolute(state->pointer, now,
+            (uint32_t)llround(x * COORDINATE_SCALE), (uint32_t)llround(y * COORDINATE_SCALE),
+            (uint32_t)llround(state->logical_width * COORDINATE_SCALE),
+            (uint32_t)llround(state->logical_height * COORDINATE_SCALE));
+        zwlr_virtual_pointer_v1_frame(state->pointer);
+        dispatched = true;
+      }
     } else if (strncmp(line, "button ", 7) == 0) {
+      double x = 0, y = 0;
       unsigned int button = 0, pressed = 0;
-      if (sscanf(line, "button %llu %u %u", &sequence, &button, &pressed) != 3
-          || !supported_button(button) || pressed > 1
-          || state->held_buttons[button_index(button)] == (pressed != 0)) return 2;
-      zwlr_virtual_pointer_v1_button(state->pointer, now, button,
-          pressed ? WL_POINTER_BUTTON_STATE_PRESSED : WL_POINTER_BUTTON_STATE_RELEASED);
-      zwlr_virtual_pointer_v1_frame(state->pointer);
-      state->held_buttons[button_index(button)] = pressed != 0;
+      int consumed = 0;
+      if (sscanf(line + envelope.consumed, "%lf %lf %u %u %n",
+            &x, &y, &button, &pressed, &consumed) == 4
+          && trailing_space_only(line + envelope.consumed + consumed)
+          && isfinite(x) && isfinite(y)
+          && x >= 0 && y >= 0 && x < state->logical_width && y < state->logical_height
+          && supported_button(button) && pressed <= 1
+          && state->held_buttons[button_index(button)] != (pressed != 0)) {
+        zwlr_virtual_pointer_v1_motion_absolute(state->pointer, now,
+            (uint32_t)llround(x * COORDINATE_SCALE), (uint32_t)llround(y * COORDINATE_SCALE),
+            (uint32_t)llround(state->logical_width * COORDINATE_SCALE),
+            (uint32_t)llround(state->logical_height * COORDINATE_SCALE));
+        zwlr_virtual_pointer_v1_button(state->pointer, now, button,
+            pressed ? WL_POINTER_BUTTON_STATE_PRESSED : WL_POINTER_BUTTON_STATE_RELEASED);
+        zwlr_virtual_pointer_v1_frame(state->pointer);
+        state->held_buttons[button_index(button)] = pressed != 0;
+        dispatched = true;
+      }
     } else if (strncmp(line, "scroll ", 7) == 0) {
-      double delta_x = 0, delta_y = 0;
-      if (sscanf(line, "scroll %llu %lf %lf", &sequence, &delta_x, &delta_y) != 3
-          || !isfinite(delta_x) || !isfinite(delta_y) || (delta_x == 0 && delta_y == 0)) return 2;
-      zwlr_virtual_pointer_v1_axis_source(state->pointer, WL_POINTER_AXIS_SOURCE_WHEEL);
-      if (delta_x != 0) zwlr_virtual_pointer_v1_axis(state->pointer, now,
-          WL_POINTER_AXIS_HORIZONTAL_SCROLL, wl_fixed_from_double(delta_x / SCROLL_SCALE));
-      if (delta_y != 0) zwlr_virtual_pointer_v1_axis(state->pointer, now,
-          WL_POINTER_AXIS_VERTICAL_SCROLL, wl_fixed_from_double(delta_y / SCROLL_SCALE));
-      zwlr_virtual_pointer_v1_frame(state->pointer);
+      double x = 0, y = 0, delta_x = 0, delta_y = 0;
+      int consumed = 0;
+      if (sscanf(line + envelope.consumed, "%lf %lf %lf %lf %n",
+            &x, &y, &delta_x, &delta_y, &consumed) == 4
+          && trailing_space_only(line + envelope.consumed + consumed)
+          && isfinite(x) && isfinite(y) && isfinite(delta_x) && isfinite(delta_y)
+          && x >= 0 && y >= 0 && x < state->logical_width && y < state->logical_height
+          && (delta_x != 0 || delta_y != 0)) {
+        zwlr_virtual_pointer_v1_motion_absolute(state->pointer, now,
+            (uint32_t)llround(x * COORDINATE_SCALE), (uint32_t)llround(y * COORDINATE_SCALE),
+            (uint32_t)llround(state->logical_width * COORDINATE_SCALE),
+            (uint32_t)llround(state->logical_height * COORDINATE_SCALE));
+        zwlr_virtual_pointer_v1_axis_source(state->pointer, WL_POINTER_AXIS_SOURCE_WHEEL);
+        if (delta_x != 0) zwlr_virtual_pointer_v1_axis(state->pointer, now,
+            WL_POINTER_AXIS_HORIZONTAL_SCROLL, wl_fixed_from_double(delta_x / SCROLL_SCALE));
+        if (delta_y != 0) zwlr_virtual_pointer_v1_axis(state->pointer, now,
+            WL_POINTER_AXIS_VERTICAL_SCROLL, wl_fixed_from_double(delta_y / SCROLL_SCALE));
+        zwlr_virtual_pointer_v1_frame(state->pointer);
+        dispatched = true;
+      }
     } else if (strncmp(line, "key ", 4) == 0) {
       unsigned int key = 0, pressed = 0;
-      if (sscanf(line, "key %llu %u %u", &sequence, &key, &pressed) != 3
-          || pressed > 1 || !emit_key(state, key, pressed != 0, true)) return 2;
+      int consumed = 0;
+      if (sscanf(line + envelope.consumed, "%u %u %n", &key, &pressed, &consumed) == 2
+          && trailing_space_only(line + envelope.consumed + consumed)
+          && pressed <= 1 && emit_key(state, key, pressed != 0, true)) {
+        dispatched = true;
+      }
     } else if (strncmp(line, "paste ", 6) == 0) {
-      char *encoded = strchr(strchr(line, ' ') + 1, ' ');
-      unsigned char *decoded = NULL; size_t decoded_size = 0;
-      if (encoded == NULL || !decode_base64(encoded + 1, &decoded, &decoded_size)
-          || !paste_text(state, decoded, decoded_size)) { free(decoded); return 2; }
+      const char *encoded = line + envelope.consumed;
+      while (isspace((unsigned char)*encoded)) encoded++;
+      size_t encoded_length = strcspn(encoded, "\r\n");
+      unsigned char *decoded = NULL;
+      size_t decoded_size = 0;
+      if (encoded_length > 0) {
+        char saved = encoded[encoded_length];
+        ((char *)encoded)[encoded_length] = '\0';
+        dispatched = decode_base64(encoded, &decoded, &decoded_size)
+            && paste_text(state, decoded, decoded_size);
+        ((char *)encoded)[encoded_length] = saved;
+      }
       free(decoded);
-    } else if (strncmp(line, "release ", 8) == 0) {
-      release_held(state);
-    } else return 2;
+    }
+
+    if (!dispatched) {
+      protocol_error(request_sequence, "invalid-input");
+      continue;
+    }
     if (wl_display_roundtrip(state->display) < 0) return 3;
-    last_sequence = sequence;
-    printf("OK %llu\n", sequence);
+    state->last_event_sequence = envelope.event_sequence;
+    printf("OK %llu\n", request_sequence);
     fflush(stdout);
   }
   release_held(state);
@@ -450,9 +681,28 @@ static int command_loop(struct input_state *state) {
 }
 
 int main(int argc, char **argv) {
-  if (argc == 2 && strcmp(argv[1], "--fixture") == 0) return fixture_loop();
-  if (argc != 2 || argv[1][0] == '\0') {
-    fprintf(stderr, "usage: %s OUTPUT_NAME\n", argv[0]); return 2;
+  unsigned long long runtime_generation = 0, geometry_generation = 0;
+  unsigned long long logical_width = 0, logical_height = 0;
+  if (argc != 7 || argv[1][0] == '\0' || argv[2][0] == '\0'
+      || !parse_positive_integer(argv[3], &runtime_generation)
+      || !parse_positive_integer(argv[4], &geometry_generation)
+      || !parse_positive_integer(argv[5], &logical_width)
+      || !parse_positive_integer(argv[6], &logical_height)
+      || logical_width > UINT32_MAX || logical_height > UINT32_MAX) {
+    fprintf(stderr,
+        "usage: %s OUTPUT_NAME SURFACE_ID RUNTIME_GENERATION GEOMETRY_GENERATION LOGICAL_WIDTH LOGICAL_HEIGHT\n",
+        argv[0]);
+    return 2;
+  }
+  if (strcmp(argv[1], "--fixture") == 0) {
+    struct input_state fixture_state = {
+      .surface_id = argv[2],
+      .runtime_generation = runtime_generation,
+      .geometry_generation = geometry_generation,
+      .logical_width = (unsigned int)logical_width,
+      .logical_height = (unsigned int)logical_height,
+    };
+    return fixture_loop(&fixture_state);
   }
   struct registry_state registry_state = { .target_name = argv[1] };
   registry_state.display = wl_display_connect(NULL);
@@ -483,6 +733,11 @@ int main(int argc, char **argv) {
         registry_state.keyboard_manager, registry_state.seat),
     .xkb_context = xkb_context,
     .default_keymap = keymap,
+    .surface_id = argv[2],
+    .runtime_generation = runtime_generation,
+    .geometry_generation = geometry_generation,
+    .logical_width = (unsigned int)logical_width,
+    .logical_height = (unsigned int)logical_height,
   };
   if (!activate_keymap(&input_state, keymap) || wl_display_roundtrip(registry_state.display) < 0) return 3;
   int result = command_loop(&input_state);

@@ -16,17 +16,35 @@ export interface BotScreenActionResult {
   windowList?: unknown;
 }
 
-export type BotScreenInputEvent =
+export type BotScreenInputContext = Readonly<{
+  surfaceId: SurfaceId;
+  runtimeGeneration: number;
+  geometryGeneration: number;
+  controllerEpoch: number;
+  sequence: number;
+}>;
+
+export type BotScreenInputAction =
   | { type: "motion"; x: number; y: number }
   | { type: "button"; x: number; y: number; button: "left" | "middle" | "right"; state: "pressed" | "released" }
   | { type: "scroll"; x: number; y: number; deltaX: number; deltaY: number }
   | { type: "key"; keyCode: number; state: "pressed" | "released" }
   | { type: "paste"; text: string };
 
+export type BotScreenInputEvent = BotScreenInputContext & BotScreenInputAction;
+
+export class BotScreenInputRejectedError extends Error {
+  constructor(message = "Bot Screen input was rejected") {
+    super(message);
+    this.name = "BotScreenInputRejectedError";
+  }
+}
+
 
 export interface BotScreenProvision {
   surfaceId: SurfaceId;
   generation: number;
+  geometryGeneration: number;
   logicalWidth: number;
   logicalHeight: number;
   scale: number;
@@ -43,16 +61,18 @@ export interface BotScreenProjectionSource {
   videoHeight: number;
   scale: number;
   capture(): Promise<BotScreenCapture>;
+  setInputAuthority(controllerEpoch: number): Promise<void>;
   input(event: BotScreenInputEvent): Promise<void>;
-  releaseInput(): Promise<void>;
+  releaseInput(controllerEpoch?: number): Promise<void>;
 }
 
 /** Internal platform seam. Runtime handles keep process and socket facts private. */
 export interface BotScreenRuntime {
   capture(): Promise<BotScreenCapture>;
   act(action: ComputerAction, inputAuthority?: ComputerInputAuthority): Promise<BotScreenActionResult>;
+  setInputAuthority(controllerEpoch: number): Promise<void>;
   input(event: BotScreenInputEvent): Promise<void>;
-  releaseInput(): Promise<void>;
+  releaseInput(controllerEpoch?: number): Promise<void>;
   /** Resolves only when the runtime exits; deliberate stops are ignored by the manager. */
   exited: Promise<Error>;
   stop(): Promise<void>;
@@ -80,7 +100,6 @@ export interface BotScreenManagerOptions {
   capacity: number;
   logicalWidth: number;
   logicalHeight: number;
-  frameRate: number;
 }
 
 interface SurfaceRow {
@@ -216,8 +235,16 @@ export class BotScreenManager {
     return { state: "starting" };
   }
 
-  state(owner: ComputerSurfaceOwner): BotScreenLifecycle {
-    return this.#lifecycle(this.#row(owner.surfaceId));
+  status(owner: ComputerSurfaceOwner): BotScreenLifecycle {
+    const lifecycle = this.#lifecycle(this.#row(owner.surfaceId));
+    if (lifecycle.state !== "stopped" || this.#stops.has(owner.surfaceId)) return lifecycle;
+    const active = this.#reservedCapacity();
+    return active < this.options.capacity
+      ? lifecycle
+      : {
+          state: "stopped",
+          admission: { reason: "capacity", active, limit: this.options.capacity },
+        };
   }
 
   async capture(owner: ComputerSurfaceOwner): Promise<BotScreenCapture | undefined> {
@@ -234,8 +261,8 @@ export class BotScreenManager {
       const runtime = await this.#readyRuntime(owner);
       const entry = this.#entries.get(owner.surfaceId);
       if (runtime === undefined || entry?.runtime !== runtime) return undefined;
+      const { geometryGeneration } = entry.provision;
       const generation = this.#row(owner.surfaceId).runtime_generation;
-      const geometryGeneration = 1;
       const { logicalWidth, logicalHeight, scale } = entry.provision;
       const currentEntry = (): RuntimeEntry => {
         const row = this.#row(owner.surfaceId);
@@ -262,13 +289,17 @@ export class BotScreenManager {
           this.#serialize(owner.surfaceId, () =>
             this.#invoke(owner.surfaceId, currentEntry(), () => runtime.capture())
           ),
+        setInputAuthority: (controllerEpoch) =>
+          this.#serialize(owner.surfaceId, () =>
+            this.#invoke(owner.surfaceId, currentEntry(), () => runtime.setInputAuthority(controllerEpoch))
+          ),
         input: (event) =>
           this.#serialize(owner.surfaceId, () =>
             this.#invoke(owner.surfaceId, currentEntry(), () => runtime.input(event))
           ),
-        releaseInput: () =>
+        releaseInput: (controllerEpoch) =>
           this.#serialize(owner.surfaceId, () =>
-            this.#invoke(owner.surfaceId, currentEntry(), () => runtime.releaseInput())
+            this.#invoke(owner.surfaceId, currentEntry(), () => runtime.releaseInput(controllerEpoch))
           ),
       };
     });
@@ -286,7 +317,7 @@ export class BotScreenManager {
       const runtime = await this.#readyRuntime(owner);
       const entry = this.#entries.get(owner.surfaceId);
       if (runtime === undefined || entry?.runtime !== runtime) {
-        throw new Error(this.state(owner).failure ?? "Bot Screen is unavailable");
+        throw new Error(this.status(owner).failure ?? "Bot Screen is unavailable");
       }
       return this.#invoke(owner.surfaceId, entry, () => runtime.act(action, inputAuthority));
     });
@@ -335,21 +366,28 @@ export class BotScreenManager {
     this.#operations.clear();
   }
 
-  async #start(owner: ComputerSurfaceOwner, row: SurfaceRow): Promise<void> {
+  async #start(owner: ComputerSurfaceOwner, existingRow: SurfaceRow): Promise<void> {
     if (this.#entries.has(owner.surfaceId)) return;
+    const row = existingRow.runtime_generation === 0
+      ? {
+          ...existingRow,
+          logical_width: this.options.logicalWidth,
+          logical_height: this.options.logicalHeight,
+        }
+      : existingRow;
     const generation = row.runtime_generation + 1;
     this.db
       .query(
         `UPDATE bot_surfaces
-         SET lifecycle_state = 'starting', runtime_generation = ?, last_failure = NULL, transitioned_at = ?
+         SET runtime_generation = ?, logical_width = ?, logical_height = ?
          WHERE surface_id = ?`,
       )
-      .run(generation, new Date().toISOString(), owner.surfaceId);
-
+      .run(generation, row.logical_width, row.logical_height, owner.surfaceId);
     const provision = this.#provision(owner.surfaceId, generation, row);
     const start = Promise.resolve().then(() => this.adapter.start(provision));
     const entry: RuntimeEntry = { provision, start };
     this.#entries.set(owner.surfaceId, entry);
+    this.#transition(owner.surfaceId, "starting", null);
     try {
       const runtime = await start;
       if (this.#entries.get(owner.surfaceId) !== entry) {
@@ -413,7 +451,9 @@ export class BotScreenManager {
     try {
       return await operation();
     } catch (error) {
-      if (this.#entries.get(surfaceId) === entry) await this.#failRuntime(surfaceId, entry, error);
+      if (!(error instanceof BotScreenInputRejectedError) && this.#entries.get(surfaceId) === entry) {
+        await this.#failRuntime(surfaceId, entry, error);
+      }
       throw error;
     }
   }
@@ -434,14 +474,16 @@ export class BotScreenManager {
     }
   }
 
-  #provision(surfaceId: SurfaceId, generation: number, _row: SurfaceRow): BotScreenProvision {
+
+  #provision(surfaceId: SurfaceId, generation: number, row: SurfaceRow): BotScreenProvision {
     return {
       surfaceId,
       generation,
-      logicalWidth: this.options.logicalWidth,
-      logicalHeight: this.options.logicalHeight,
-      scale: 1,
-      refreshRate: this.options.frameRate,
+      geometryGeneration: 1,
+      logicalWidth: row.logical_width,
+      logicalHeight: row.logical_height,
+      scale: row.scale,
+      refreshRate: row.refresh_rate,
     };
   }
 

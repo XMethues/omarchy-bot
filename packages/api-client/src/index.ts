@@ -23,7 +23,10 @@ import type {
   ServerToClient,
   ThreadDto,
 } from "@omarchy-bot/protocol";
-import { DeleteBotResultDto as DeleteBotResultSchema } from "@omarchy-bot/protocol";
+import {
+  ComputerViewDto as ComputerViewSchema,
+  DeleteBotResultDto as DeleteBotResultSchema,
+} from "@omarchy-bot/protocol";
 
 export interface ApiClientOptions {
   baseUrl?: string;
@@ -221,8 +224,18 @@ export class ApiClient {
 
 
   // ----- computer -----
-  computerState(owner: ComputerSurfaceOwner): Promise<ComputerViewDto> {
-    return this.req(this.computerPath("/api/computer/state", owner));
+  async computerState(owner: ComputerSurfaceOwner): Promise<ComputerViewDto> {
+    try {
+      return ComputerViewSchema.parse(
+        await this.req<unknown>(this.computerPath("/api/computer/state", owner)),
+      );
+    } catch (error) {
+      if (error !== null && typeof error === "object" && "body" in error) {
+        const result = ComputerViewSchema.safeParse(error.body);
+        if (result.success && result.data.unavailableReason === "capacity") return result.data;
+      }
+      throw error;
+    }
   }
   takeControl(owner: ComputerSurfaceOwner): Promise<ComputerViewDto> {
     return this.req(this.computerPath("/api/computer/take-control", owner), { method: "POST" });

@@ -11,8 +11,17 @@ import {
 import os from "node:os";
 import path from "node:path";
 import rtc, { type DataChannel, type PeerConnection } from "node-datachannel";
+import { BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL } from "../../apps/daemon/src/bootstrap/config.ts";
+import type { ProjectionLoadMetrics } from "../../apps/daemon/src/modules/computer/screenProjection.ts";
 import type { SurfaceId } from "../../packages/domain/src/ids.ts";
 import { api, apiStatus, makeBot, startDaemon, type Harness } from "./helpers/harness.ts";
+import {
+  buildFinalWebClient,
+  FinalWebBrowserHarness,
+  type BrowserSurfaceSession,
+  type BrowserWindowMetric,
+} from "./helpers/bot-screen-browser-load.ts";
+import { requireApprovedDefaultRow } from "./helpers/bot-screen-capacity-report.ts";
 
 const loadTest = process.env.OMARCHY_BOT_REAL_SCREEN_LOAD === "1" ? test : test.skip;
 const ROLES = ["compositor", "application", "input", "worker"] as const;
@@ -178,11 +187,30 @@ class ProjectionClient {
     const answer = await response.json() as ProjectionAnswer;
     peer.setRemoteDescription(answer.sdp, "answer");
     for (const candidate of answer.candidates) peer.addRemoteCandidate(candidate.candidate, candidate.sdpMid);
-    await withTimeout(
-      Promise.all([openChannel(frameChannel), openChannel(controlChannel), openChannel(inputChannel)]),
-      10_000,
-      "Screen Projection data channels did not open",
-    );
+    try {
+      await withTimeout(
+        Promise.all([openChannel(frameChannel), openChannel(controlChannel), openChannel(inputChannel)]),
+        10_000,
+        "Screen Projection data channels did not open",
+      );
+    } catch (error) {
+      const connectionState = `peer=${peer.state()}, ice=${peer.iceState()}, gathering=${peer.gatheringState()}`;
+      await fetch(
+        `${harness.baseUrl}/api/computer/projection?botId=${owner.botId}&surfaceId=${owner.surfaceId}`,
+        {
+          method: "DELETE",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ sessionId: answer.sessionId }),
+        },
+      ).catch(() => undefined);
+      peer.close();
+      await until(
+        () => peer.state() === "closed" ? true : undefined,
+        5_000,
+        `Failed Screen Projection peer ${answer.sessionId} did not close`,
+      );
+      throw new Error(`${error instanceof Error ? error.message : String(error)} (${connectionState})`);
+    }
     return new ProjectionClient(owner, answer, peer, frameChannel, controlChannel, inputChannel);
   }
 
@@ -222,12 +250,26 @@ class ProjectionClient {
   }
 
   async close(harness: Harness): Promise<void> {
-    await fetch(`${harness.baseUrl}/api/computer/projection?botId=${this.owner.botId}&surfaceId=${this.owner.surfaceId}`, {
-      method: "DELETE",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ sessionId: this.answer.sessionId }),
-    }).catch(() => undefined);
-    this.peer.close();
+    const peerClosed = until(
+      () => this.peer.state() === "closed" ? true : undefined,
+      5_000,
+      `Screen Projection peer ${this.answer.sessionId} did not close`,
+    );
+    let response: Response;
+    try {
+      response = await fetch(
+        `${harness.baseUrl}/api/computer/projection?botId=${this.owner.botId}&surfaceId=${this.owner.surfaceId}`,
+        {
+          method: "DELETE",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ sessionId: this.answer.sessionId }),
+        },
+      );
+    } finally {
+      this.peer.close();
+      await peerClosed;
+    }
+    if (!response.ok) throw new Error(`projection teardown failed: ${response.status} ${await response.text()}`);
   }
 
   #sendInput(type: "pointer-motion" | "pointer-scroll", payload: Record<string, number>): number {
@@ -433,6 +475,7 @@ async function currentGeneration(harness: Harness, owner: Owner): Promise<number
 
 async function waitReady(harness: Harness, owner: Owner): Promise<number> {
   const startedAt = performance.now();
+  harness.svc.screens.open(owner);
   await until(async () => {
     const response = await fetch(`${harness.baseUrl}/api/computer/state?botId=${owner.botId}&surfaceId=${owner.surfaceId}`);
     const view = await response.json() as { state?: string; activity?: string };
@@ -479,7 +522,7 @@ function createBrowserFixture(root: string): string {
   const html = path.join(root, "load.html");
   writeFileSync(html, `<!doctype html><meta charset="utf-8"><title>Bot Screen load</title>
 <style>html{font:28px sans-serif;background:#102033;color:#fff}body{margin:0;min-height:24000px;background:repeating-linear-gradient(#102033 0 120px,#284d70 120px 240px)}#status{position:fixed;inset:20px 20px auto 20px;padding:20px;background:#000c;border:3px solid #7df}</style>
-<div id="status">ready</div><script>let n=0;const s=document.querySelector('#status');for(const event of ['wheel','pointermove','keydown'])addEventListener(event,()=>s.textContent=event+':'+(++n));</script>`);
+<div id="status">ready</div><script>let n=0;const s=document.querySelector('#status');for(const event of ['wheel','pointermove','keydown'])addEventListener(event,()=>{s.textContent=event+':'+(++n);s.style.background=n%2?'#8b1e3f':'#14532d'});</script>`);
   const launcher = path.join(root, "bot-screen-browser");
   writeFileSync(launcher, `#!/bin/sh
 exec /usr/bin/brave --user-data-dir="$XDG_STATE_HOME/brave" --no-first-run --no-default-browser-check --disable-background-networking --disable-sync --password-store=basic --ozone-platform=wayland --app="file://${html}"
@@ -492,7 +535,10 @@ async function runRow(profile: "1080p" | "720p", count: number, durationMs: numb
   const harness = await startDaemon(undefined, { useProductionBotScreen: true, botScreenCapacity: 8 });
   const owners: Owner[] = [];
   const clients: ProjectionClient[] = [];
+  const browserSessions: BrowserSurfaceSession[] = [];
   const startupMs: number[] = [];
+  let browserHarness: FinalWebBrowserHarness | undefined;
+  let browserMetadata: Record<string, unknown> | null = null;
   let simultaneousAgentAndWebInputCompleted = false;
   const teardownMs: number[] = [];
   const cycleStartupMs: number[] = [];
@@ -502,7 +548,9 @@ async function runRow(profile: "1080p" | "720p", count: number, durationMs: numb
   let rowError: string | undefined;
   let idle!: ResourceWindow;
   let active!: ResourceWindow;
-  let frameMetrics: Array<Record<string, unknown>> = [];
+  let staticPreview!: ResourceWindow;
+  let frameMetrics: BrowserWindowMetric[] = [];
+  let staticPreviewFrameMetrics: BrowserWindowMetric[] = [];
   let churnConnections = 0;
   let takeoverCompleted = false;
   let crashes: Array<Record<string, unknown>> = [];
@@ -528,83 +576,133 @@ async function runRow(profile: "1080p" | "720p", count: number, durationMs: numb
       idleEncodeProcessesObserved += activeCaptureCount(owners);
       await Bun.sleep(50);
     }
-
     console.log(`Bot Screen load ${profile}/${count}: idle measured`);
-    for (const [index, owner] of owners.entries()) {
-      const client = await ProjectionClient.connect(harness, owner, `${profile}-${count}-${index}`);
-      clients.push(client);
-      await client.mode("preview");
-      const expected = profile === "1080p" ? [1920, 1080] : [1280, 720];
-      if (client.answer.videoWidth !== expected[0] || client.answer.videoHeight !== expected[1]) {
-        throw new Error(`projection used ${client.answer.videoWidth}x${client.answer.videoHeight}, expected ${expected.join("x")}`);
-      }
-    }
-    await Promise.all(clients.map((client) => client.waitForFrame(1, 5_000)));
-    await Promise.all(clients.map((client) => client.mode("expanded")));
 
-    for (let sample = 0; sample < 5; sample += 1) {
-      await Promise.all(clients.map(async (client) => {
-        const baseline = client.frames.at(-1);
-        if (baseline === undefined) throw new Error("expanded projection has no baseline frame");
-        const sentAt = performance.now();
-        client.sendScroll(
-          Math.floor(client.answer.logicalWidth / 2),
-          Math.floor(client.answer.logicalHeight / 2),
-          sample % 2 === 0 ? 360 : -360,
-        );
-        const visible = await until(
-          () => client.frames.find((frame) => frame.receivedAtMs >= sentAt && frame.digest !== baseline.digest),
-          5_000,
-          `Screen ${client.owner.surfaceId} did not show Web input`,
-        );
-        inputLatenciesMs.push(visible.receivedAtMs - sentAt);
-      }));
-    }
-    console.log(`Bot Screen load ${profile}/${count}: input latency measured`);
+    const finalWebBrowser = await FinalWebBrowserHarness.start(harness.baseUrl);
+    browserHarness = finalWebBrowser;
+    browserMetadata = {
+      finalWebClient: true,
+      mode: "headless",
+      secureContext: true,
+      lanEndpoint: finalWebBrowser.lanEndpoint,
+      lanInterface: finalWebBrowser.lanInterface,
+      browser: finalWebBrowser.browserName,
+    };
+    browserSessions.push(...await Promise.all(owners.map((owner) => finalWebBrowser.open(owner))));
 
-    const frameStart = new Map(clients.map((client) => [client.owner.surfaceId, client.frames.at(-1)?.sequence ?? 0]));
-    const agentActions = Promise.all(owners.map(async (owner) => {
-      const source = await harness.svc.screens.projectionSource(owner);
-      if (source === undefined) throw new Error(`Agent input source ${owner.surfaceId} is unavailable`);
-      await source.input({ type: "key", keyCode: 57, state: "pressed" });
-      await source.input({ type: "key", keyCode: 57, state: "released" });
-    }));
-    const activeStartedAt = performance.now();
+    await Promise.all(browserSessions.map((session) => session.startWindow()));
+    staticPreview = await resourceWindow(owners, generationBySurface, durationMs);
+    staticPreviewFrameMetrics = await Promise.all(browserSessions.map((session) => session.finishWindow()));
+    console.log(`Bot Screen load ${profile}/${count}: sustained static preview measured`);
+
+    await Promise.all(browserSessions.map((session) => session.expand()));
+    for (let sample = 0; sample < 4; sample += 1) {
+      inputLatenciesMs.push(...await Promise.all(browserSessions.map((session) =>
+        session.measureInputToVisible()
+      )));
+    }
+    console.log(`Bot Screen load ${profile}/${count}: browser-painted input latency measured`);
+
+    const productionStarts = browserSessions.map((session) => {
+      const metrics = harness.svc.projections.loadMetrics(session.owner, session.projectionSessionId);
+      if (metrics === undefined) throw new Error(`projection load metrics unavailable for ${session.owner.surfaceId}`);
+      return metrics;
+    });
+    await Promise.all(browserSessions.map((session) => session.startWindow()));
     active = await resourceWindow(owners, generationBySurface, durationMs, async (deadline) => {
       let step = 0;
       while (performance.now() < deadline) {
-        for (const client of clients) {
-          const x = 100 + (step * 37) % Math.max(1, client.answer.logicalWidth - 200);
-          const y = 100 + (step * 19) % Math.max(1, client.answer.logicalHeight - 200);
-          client.sendMotion(x, y);
-          if (step % 4 === 0) client.sendScroll(x, y, step % 8 === 0 ? 240 : -240);
-        }
+        await Promise.all(browserSessions.map((session) => session.movePointer(step)));
         step += 1;
         await Bun.sleep(50);
       }
     });
-    const activeElapsedMs = performance.now() - activeStartedAt;
-    const frameEnd = new Map(clients.map((client) => [client.owner.surfaceId, client.frames.at(-1)?.sequence ?? 0]));
-    await withTimeout(agentActions, 15_000, "simultaneous Agent input did not complete");
-    simultaneousAgentAndWebInputCompleted = true;
-    frameMetrics = clients.map((client) => {
-      const first = frameStart.get(client.owner.surfaceId) ?? 0;
-      const delivered = client.frames.filter((frame) =>
-        frame.sequence > first && frame.sequence <= (frameEnd.get(client.owner.surfaceId) ?? 0)
+    const productionEnds = browserSessions.map((session) => {
+      const metrics = harness.svc.projections.loadMetrics(session.owner, session.projectionSessionId);
+      if (metrics === undefined) throw new Error(`projection load metrics unavailable for ${session.owner.surfaceId}`);
+      return metrics;
+    });
+    const browserMetrics = await Promise.all(browserSessions.map((session, index) =>
+      session.finishWindow({
+        afterSequence: productionStarts[index]!.sequence,
+        throughSequence: productionEnds[index]!.sequence,
+        durationMs: active.durationMs,
+      })
+    ));
+    const expectedFrames = Math.floor(BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.targetFps * active.durationMs / 1_000);
+    const metricDelta = (
+      after: ProjectionLoadMetrics,
+      before: ProjectionLoadMetrics,
+      key: Exclude<keyof ProjectionLoadMetrics, "sessionId" | "surfaceId">,
+    ): number => after[key] - before[key];
+    frameMetrics = browserMetrics.map((browserMetric, index) => {
+      const before = productionStarts[index]!;
+      const after = productionEnds[index]!;
+      const sourceFrames = metricDelta(after, before, "sourceFrames");
+      const encodedFrames = metricDelta(after, before, "encodedFrames");
+      const sentFrames = metricDelta(after, before, "framesSent");
+      const preCaptureBackpressureSkips = metricDelta(after, before, "preCaptureBackpressureSkips");
+      const encodedBackpressureDrops = metricDelta(after, before, "encodedBackpressureDrops");
+      const transportUnavailableSkips = metricDelta(after, before, "transportUnavailableSkips");
+      const invalidFrameDrops = metricDelta(after, before, "invalidFrameDrops");
+      const sendFailures = metricDelta(after, before, "sendFailures");
+      const seconds = active.durationMs / 1_000;
+      const unexplainedProductionDrops = Math.max(
+        0,
+        encodedFrames - sentFrames - encodedBackpressureDrops - sendFailures,
       );
-      const expected = Math.floor(activeElapsedMs * 15 / 1_000);
-      let sequenceGaps = 0;
-      for (let index = 1; index < delivered.length; index += 1) {
-        sequenceGaps += Math.max(0, delivered[index]!.sequence - delivered[index - 1]!.sequence - 1);
-      }
+      const unexplainedTransportDrops = Math.max(0, sentFrames - browserMetric.receivedFrames);
       return {
-        surfaceId: client.owner.surfaceId,
-        deliveredFrames: delivered.length,
-        actualFps: Number((delivered.length / (activeElapsedMs / 1_000)).toFixed(2)),
-        droppedFrames: { sequenceGaps, targetFrameShortfall: Math.max(0, expected - delivered.length) },
+        ...browserMetric,
+        sourceFrames,
+        encodedFrames,
+        sentFrames,
+        sourceFps: Number((sourceFrames / seconds).toFixed(2)),
+        encodedFps: Number((encodedFrames / seconds).toFixed(2)),
+        sentFps: Number((sentFrames / seconds).toFixed(2)),
+        preCaptureBackpressureSkips,
+        encodedBackpressureDrops,
+        transportUnavailableSkips,
+        invalidFrameDrops,
+        sendFailures,
+        unexplainedDrops: unexplainedProductionDrops + unexplainedTransportDrops,
+        targetFrameShortfall: {
+          source: Math.max(0, expectedFrames - sourceFrames),
+          encoded: Math.max(0, expectedFrames - encodedFrames),
+          sent: Math.max(0, expectedFrames - sentFrames),
+          received: Math.max(0, expectedFrames - browserMetric.receivedFrames),
+          decoded: Math.max(0, expectedFrames - browserMetric.decodedFrames),
+          displayed: Math.max(0, expectedFrames - browserMetric.displayedFrames),
+        },
       };
     });
-    console.log(`Bot Screen load ${profile}/${count}: active delivery measured`);
+    console.log(`Bot Screen load ${profile}/${count}: final-client browser delivery measured`);
+
+    inputLatenciesMs.push(...await Promise.all(browserSessions.map((session, index) =>
+      session.measureInputToVisible(async () => {
+        await harness.svc.computer.agentToolAct(
+          owners[index]!,
+          `simultaneous-turn-${profile}-${count}-${index}`,
+          `simultaneous-tool-${profile}-${count}-${index}`,
+          { name: "type", args: { text: `AGENT-${index}` } },
+          new AbortController().signal,
+        );
+      })
+    )));
+    simultaneousAgentAndWebInputCompleted = true;
+    console.log(`Bot Screen load ${profile}/${count}: simultaneous Broker Agent and Web input measured`);
+
+    await Promise.all(browserSessions.splice(0, browserSessions.length).map((session) => session.close()));
+    await browserHarness.close();
+    browserHarness = undefined;
+
+    // Native clients remain only for non-visual Takeover/reconnect fault setup.
+    for (const [index, owner] of owners.entries()) {
+      const client = await ProjectionClient.connect(harness, owner, `${profile}-${count}-fault-${index}`);
+      clients.push(client);
+      await client.mode("expanded");
+      await client.waitForFrame(0);
+    }
 
     if (owners.length > 0) {
       const owner = owners[0]!;
@@ -669,16 +767,18 @@ async function runRow(profile: "1080p" | "720p", count: number, durationMs: numb
       const role = index === 0 && owners.length > 1 ? "input" as const : "compositor" as const;
       await killUnit(owner, generation, role);
       await until(
-        () => harness.svc.screens.state(owner).state === "failed" ? true : undefined,
+        () => harness.svc.screens.status(owner).state === "failed" ? true : undefined,
         5_000,
         `${role} crash was not observed`,
       );
-      crashes.push({ surfaceId: owner.surfaceId, role, isolated: owners.slice(crashTargets.length).every((active) => harness.svc.screens.state(active).state === "ready") });
+      crashes.push({ surfaceId: owner.surfaceId, role, isolated: owners.slice(crashTargets.length).every((active) => harness.svc.screens.status(active).state === "ready") });
     }
   } catch (error) {
     rowError = error instanceof Error ? error.message : String(error);
   } finally {
     await Promise.all(clients.splice(0, clients.length).map((client) => client.close(harness)));
+    await Promise.all(browserSessions.splice(0, browserSessions.length).map((session) => session.close()));
+    await browserHarness?.close();
     for (const owner of owners) {
       try {
         if ((await api<{ archived: boolean }>(harness, "GET", `/api/bots/${owner.botId}`)).archived !== true) {
@@ -707,25 +807,40 @@ async function runRow(profile: "1080p" | "720p", count: number, durationMs: numb
   const gpuAfter = await gpuSnapshot();
   const p50 = percentile(inputLatenciesMs, 0.5);
   const p95 = percentile(inputLatenciesMs, 0.95);
+  const captureToBrowserSamples = frameMetrics.flatMap((metric) => metric.captureToBrowserMs);
+  const captureToBrowserP50 = percentile(captureToBrowserSamples, 0.5);
+  const captureToBrowserP95 = percentile(captureToBrowserSamples, 0.95);
   const performancePassed = rowError === undefined
     && frameMetrics.length === count
-    && frameMetrics.every((metric) => Number(metric.actualFps) >= 15)
+    && staticPreviewFrameMetrics.length === count
+    && staticPreviewFrameMetrics.every((metric) => metric.displayedFrames > 0)
+    && frameMetrics.every((metric) =>
+      metric.encodedFps !== undefined
+      && metric.encodedFps >= BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.targetFps
+      && metric.displayedFps >= BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.targetFps
+      && metric.unexplainedDrops === 0
+      && metric.targetFrameShortfall?.encoded === 0
+      && metric.targetFrameShortfall.displayed === 0
+    )
     && p50 !== null
     && simultaneousAgentAndWebInputCompleted
-    && p50 <= 200;
+    && p50 <= BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.inputToVisibleP50LimitMs;
   return {
     profile,
     screens: count,
     resolution: profile === "1080p" ? { width: 1920, height: 1080 } : { width: 1280, height: 720 },
-    targetFps: 15,
+    targetFps: BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.targetFps,
     durationMs,
     performancePassed,
     ...(rowError === undefined ? {} : { error: rowError }),
     startupMs: { samples: startupMs, p50: percentile(startupMs, 0.5), p95: percentile(startupMs, 0.95) },
     teardownMs: { samples: teardownMs, p50: percentile(teardownMs, 0.5), p95: percentile(teardownMs, 0.95) },
     repeatedCycles: { startupMs: cycleStartupMs, teardownMs: cycleTeardownMs },
-    inputToVisibleMs: { samples: inputLatenciesMs.map((value) => Number(value.toFixed(2))), p50: p50 === null ? null : Number(p50.toFixed(2)), p95: p95 === null ? null : Number(p95.toFixed(2)) },
+    inputToVisibleMs: { source: "browser-paint", samples: inputLatenciesMs.map((value) => Number(value.toFixed(2))), p50: p50 === null ? null : Number(p50.toFixed(2)), p95: p95 === null ? null : Number(p95.toFixed(2)) },
+    captureToBrowserMs: { source: "browser-paint", samples: captureToBrowserSamples, p50: captureToBrowserP50 === null ? null : Number(captureToBrowserP50.toFixed(2)), p95: captureToBrowserP95 === null ? null : Number(captureToBrowserP95.toFixed(2)) },
     frames: frameMetrics,
+    browser: browserMetadata,
+    staticPreview: { frames: staticPreviewFrameMetrics, resources: staticPreview ?? null },
     idleResources: idle ?? null,
     idleEncoding: { unopenedNoRuntime, attributableCaptureProcessesObserved: idleEncodeProcessesObserved },
     activeResources: active ?? null,
@@ -748,10 +863,12 @@ async function admissionProof(capacity: number): Promise<Record<string, unknown>
       owners.push({ botId, surfaceId: bot.surfaceId });
     }
     await Promise.all(owners.slice(0, capacity).map((owner) => waitReady(harness, owner)));
-    const rejected = await apiStatus(harness, "GET", `/api/computer/state?botId=${owners[capacity]!.botId}&surfaceId=${owners[capacity]!.surfaceId}`);
-    const noPartialRuntime = !existsSync(path.join(harness.svc.cfg.botScreenRuntimeDir, owners[capacity]!.surfaceId));
-    const activeUnaffected = owners.slice(0, capacity).every((owner) => harness.svc.screens.state(owner).state === "ready");
-    return { capacity, rejected, noPartialRuntime, activeUnaffected };
+    const overflow = owners[capacity]!;
+    const openAttempt = harness.svc.screens.open(overflow);
+    const rejected = await apiStatus(harness, "GET", `/api/computer/state?botId=${overflow.botId}&surfaceId=${overflow.surfaceId}`);
+    const noPartialRuntime = !existsSync(path.join(harness.svc.cfg.botScreenRuntimeDir, overflow.surfaceId));
+    const activeUnaffected = owners.slice(0, capacity).every((owner) => harness.svc.screens.status(owner).state === "ready");
+    return { capacity, openAttempt, rejected, noPartialRuntime, activeUnaffected };
   } finally {
     for (const owner of owners) await archive(harness, owner).catch(() => undefined);
     await harness.stop();
@@ -770,6 +887,7 @@ loadTest("measures sustained final-stack Bot Screen capacity and admission", asy
   ) throw new Error("OMARCHY_BOT_LOAD_MATRIX may contain only 1,2,4,8");
   const includeFallback = process.env.OMARCHY_BOT_LOAD_FALLBACK !== "0";
   if (Bun.which("brave") === null) throw new Error("the real load harness requires Brave");
+  await buildFinalWebClient(path.resolve(import.meta.dir, "../.."));
   const fixtureRoot = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-screen-load-"));
   const prior = {
     application: process.env.OMARCHY_BOT_SCREEN_APP_BIN,
@@ -777,7 +895,7 @@ loadTest("measures sustained final-stack Bot Screen capacity and admission", asy
     frameRate: process.env.OMARCHY_BOT_SCREEN_FRAME_RATE,
   };
   process.env.OMARCHY_BOT_SCREEN_APP_BIN = createBrowserFixture(fixtureRoot);
-  process.env.OMARCHY_BOT_SCREEN_FRAME_RATE = "16";
+  process.env.OMARCHY_BOT_SCREEN_FRAME_RATE = String(BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.captureFrameRate);
   const rows: Array<Record<string, unknown>> = [];
   try {
     process.env.OMARCHY_BOT_SCREEN_PROFILE = "1080p";
@@ -797,16 +915,30 @@ loadTest("measures sustained final-stack Bot Screen capacity and admission", asy
       else process.env[name] = value;
     }
   }
-  const passing1080 = rows
-    .filter((row) => row.profile === "1080p" && row.performancePassed === true)
-    .map((row) => Number(row.screens));
-  const chosenDefault = Math.max(1, ...passing1080.filter((count) => count <= 4));
-  const admission = await admissionProof(chosenDefault);
+  const chosenDefault = BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.defaultCapacity;
+  let releaseGateError: Error | undefined;
+  try {
+    requireApprovedDefaultRow(rows, chosenDefault, BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL);
+  } catch (error) {
+    releaseGateError = error instanceof Error ? error : new Error(String(error));
+  }
+  const admission = releaseGateError === undefined ? await admissionProof(chosenDefault) : null;
   const report = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     generatedAt: new Date().toISOString(),
     reproducibleCommand: "OMARCHY_BOT_REAL_SCREEN_LOAD=1 bun test tests/integration/bot-screen-capacity.load.test.ts",
-    configuration: { durationMs, matrix, fallback: includeFallback ? { profile: "720p", screens: 8 } : null, targetFps: 15, captureFrameRate: 16, medianLatencyLimitMs: 200 },
+    configuration: {
+      durationMs,
+      matrix,
+      fallback: includeFallback ? { profile: "720p", screens: 8 } : null,
+      targetFps: BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.targetFps,
+      captureFrameRate: BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.captureFrameRate,
+      medianLatencyLimitMs: BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.inputToVisibleP50LimitMs,
+    },
+    defaultCapacityApproval: BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL,
+    releaseGate: releaseGateError === undefined
+      ? { passed: true }
+      : { passed: false, error: releaseGateError.message },
     machine: {
       hostname: os.hostname(),
       platform: `${os.platform()} ${os.release()} ${os.arch()}`,
@@ -824,7 +956,20 @@ loadTest("measures sustained final-stack Bot Screen capacity and admission", asy
   const reportPath = process.env.OMARCHY_BOT_LOAD_REPORT ?? path.join(os.tmpdir(), "omarchy-bot-screen-load-report.json");
   writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`);
   console.log(`BOT_SCREEN_LOAD_REPORT=${reportPath}`);
+  if (releaseGateError !== undefined) throw releaseGateError;
   expect(rows).toHaveLength(matrix.length + (includeFallback ? 1 : 0));
   expect(rows.every((row) => (row.cleanup as { clean?: boolean }).clean === true)).toBeTrue();
-  expect(admission).toMatchObject({ noPartialRuntime: true, activeUnaffected: true });
+  expect(admission).toMatchObject({
+    openAttempt: { state: "stopped", admission: { reason: "capacity", active: chosenDefault, limit: chosenDefault } },
+    rejected: {
+      body: {
+        state: "unavailable",
+        activity: `Bot Screen capacity is full (${chosenDefault}/${chosenDefault}).`,
+        unavailableReason: "capacity",
+        capacity: { active: chosenDefault, limit: chosenDefault },
+      },
+    },
+    noPartialRuntime: true,
+    activeUnaffected: true,
+  });
 }, 1_200_000);

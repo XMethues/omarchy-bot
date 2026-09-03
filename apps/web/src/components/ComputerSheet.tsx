@@ -122,7 +122,7 @@ function ComputerSheetContent({
   onProjectionRetry,
   onExpandPreview,
 }: ComputerSheetContentProps): JSX.Element {
-  const canTakeControl = view.takeover === "available";
+  const canTakeControl = !compactHeading && view.takeover === "available";
   const projectionUnavailable = projectionState === "unavailable";
   const projectionWaiting = frameUrl === undefined && !projectionUnavailable;
 
@@ -210,7 +210,7 @@ function ComputerSheetContent({
             data-testid="computer-take-control"
           />
         ) : null}
-        {view.takeover === "active" && !loading ? (
+        {!compactHeading && view.takeover === "active" && !loading ? (
           <Button
             label="Continue takeover"
             variant="primary"
@@ -252,6 +252,15 @@ export function ComputerSheet({
     frameUrlRef.current = nextUrl;
     setFrameUrl(nextUrl);
   }, []);
+  const clearBrowserHeldInput = useCallback((): void => {
+    for (const pointerId of pressedPointersRef.current.keys()) {
+      if (expandedRef.current?.hasPointerCapture(pointerId)) {
+        expandedRef.current.releasePointerCapture(pointerId);
+      }
+    }
+    pressedPointersRef.current.clear();
+    browserPasteKeysRef.current.clear();
+  }, []);
   const closePanel = useCallback((): void => {
     setPreviewExpanded(false);
     onClose();
@@ -269,7 +278,11 @@ export function ComputerSheet({
     const connection = new ScreenProjectionConnection(
       projectionUrl,
       { botId: bot.id, surfaceId: view.surfaceId },
-      { onState: setProjectionState, onFrame: replaceFrame },
+      {
+        onState: setProjectionState,
+        onFrame: replaceFrame,
+        onControlRevoked: clearBrowserHeldInput,
+      },
     );
     connectionRef.current = connection;
     connection.setMode(previewExpanded && !isSmallScreen ? "expanded" : "preview");
@@ -279,34 +292,40 @@ export function ComputerSheet({
       connection.close();
       replaceFrame(undefined);
     };
-  }, [bot.id, open, projectionAttempt, projectionUrl, replaceFrame, view.state === "unavailable", view.surfaceId]);
+  }, [
+    bot.id,
+    clearBrowserHeldInput,
+    open,
+    projectionAttempt,
+    projectionUrl,
+    replaceFrame,
+    view.state === "unavailable",
+    view.surfaceId,
+  ]);
 
   useEffect(() => {
     if (isSmallScreen && previewExpanded) setPreviewExpanded(false);
-    if (!previewExpanded || isSmallScreen) pressedPointersRef.current.clear();
+    if (!previewExpanded || isSmallScreen) clearBrowserHeldInput();
     connectionRef.current?.setMode(previewExpanded && !isSmallScreen ? "expanded" : "preview");
-  }, [isSmallScreen, previewExpanded]);
+  }, [clearBrowserHeldInput, isSmallScreen, previewExpanded]);
 
   useEffect(() => {
     if (!open || isSmallScreen || !previewExpanded) return;
     const connection = connectionRef.current;
     requestAnimationFrame(() => expandedRef.current?.focus());
-    browserPasteKeysRef.current.clear();
+    clearBrowserHeldInput();
     const releaseForBlur = (): void => {
-      pressedPointersRef.current.clear();
-      browserPasteKeysRef.current.clear();
+      clearBrowserHeldInput();
       connection?.releaseControl("blur");
     };
     const resumeAfterFocus = (): void => connection?.resumeControl();
     const releaseForNavigation = (): void => {
-      pressedPointersRef.current.clear();
-      browserPasteKeysRef.current.clear();
+      clearBrowserHeldInput();
       connection?.releaseControl("navigation");
     };
     const handleVisibility = (): void => {
       if (document.visibilityState === "hidden") {
-        pressedPointersRef.current.clear();
-        browserPasteKeysRef.current.clear();
+        clearBrowserHeldInput();
         connection?.releaseControl("visibility-loss");
       } else {
         connection?.resumeControl();
@@ -320,12 +339,11 @@ export function ComputerSheet({
       window.removeEventListener("blur", releaseForBlur);
       window.removeEventListener("focus", resumeAfterFocus);
       window.removeEventListener("pagehide", releaseForNavigation);
-      browserPasteKeysRef.current.clear();
+      clearBrowserHeldInput();
       document.removeEventListener("visibilitychange", handleVisibility);
-      pressedPointersRef.current.clear();
       connection?.releaseControl("teardown");
     };
-  }, [isSmallScreen, open, previewExpanded]);
+  }, [clearBrowserHeldInput, isSmallScreen, open, previewExpanded]);
 
   useEffect(() => {
     if (!open || isSmallScreen) return;
@@ -351,21 +369,34 @@ export function ComputerSheet({
     if (event.target instanceof Element && event.target.closest("button") !== null) return;
     const image = event.currentTarget.querySelector("img");
     if (image === null || event.button < 0 || event.button > 2) return;
+    const sent = connectionRef.current?.pointerButton(
+      event.clientX,
+      event.clientY,
+      image,
+      event.button,
+      "pressed",
+    ) ?? false;
+    if (!sent) return;
     event.preventDefault();
-    event.currentTarget.setPointerCapture(event.pointerId);
     pressedPointersRef.current.set(event.pointerId, event.button);
-    connectionRef.current?.pointerButton(event.clientX, event.clientY, image, event.button, "pressed");
+    event.currentTarget.setPointerCapture(event.pointerId);
   };
   const releaseExpandedPointer = (event: ReactPointerEvent<HTMLDialogElement>): void => {
     const button = pressedPointersRef.current.get(event.pointerId);
+    if (button === undefined) return;
     const image = event.currentTarget.querySelector("img");
-    if (button === undefined || image === null) return;
-    event.preventDefault();
+    const sent = image !== null && connectionRef.current?.pointerButton(
+      event.clientX,
+      event.clientY,
+      image,
+      button,
+      "released",
+    ) === true;
     pressedPointersRef.current.delete(event.pointerId);
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId);
     }
-    connectionRef.current?.pointerButton(event.clientX, event.clientY, image, button, "released");
+    if (sent) event.preventDefault();
   };
   const scrollExpandedPointer = (event: ReactWheelEvent<HTMLDialogElement>): void => {
     if (event.target instanceof Element && event.target.closest("button") !== null) return;
@@ -401,12 +432,15 @@ export function ComputerSheet({
     if (connectionRef.current?.paste(event.clipboardData.getData("text/plain")) === true) event.preventDefault();
   };
   const beginTakeover = useCallback((): void => {
+    if (isSmallScreen) return;
     void onTakeControl()
       .then((taken) => {
-        if (taken) setPreviewExpanded(true);
+        if (!taken) return;
+        setPreviewExpanded(true);
+        if (!isSmallScreen) connectionRef.current?.setMode("expanded");
       })
       .catch(() => {});
-  }, [onTakeControl]);
+  }, [isSmallScreen, onTakeControl]);
   const finishTakeover = useCallback((): void => {
     void onReturnToBot()
       .then((returned) => {

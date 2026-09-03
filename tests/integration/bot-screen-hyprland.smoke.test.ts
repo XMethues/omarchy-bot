@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { existsSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import type { BotScreenInputAction } from "../../apps/daemon/src/modules/computer/botScreenManager.ts";
 import type { SurfaceId } from "../../packages/domain/src/ids.ts";
 import { api, makeBot, startDaemon, type Harness } from "./helpers/harness.ts";
 
@@ -89,10 +90,10 @@ platformTest("two real nested Hyprland Screens act and capture concurrently with
 
     const openings = await Promise.all(owners.map((owner) =>
       fetch(
-        `${harness.baseUrl}/api/computer/state?botId=${encodeURIComponent(owner.botId)}&surfaceId=${encodeURIComponent(owner.surfaceId)}`,
-      ).then((response) => response.json()) as Promise<{ state: string }>
+        `${harness.baseUrl}/api/computer/snapshot?botId=${encodeURIComponent(owner.botId)}&surfaceId=${encodeURIComponent(owner.surfaceId)}`,
+      )
     ));
-    expect(openings.map((opening) => opening.state)).toEqual(["starting", "starting"]);
+    expect(openings.map((opening) => opening.status)).toEqual([200, 200]);
     await Promise.all(owners.map((owner) => waitUntilReady(harness, owner.botId, owner.surfaceId)));
 
     expect(await hostClientAddresses()).toEqual(beforeClients);
@@ -155,34 +156,59 @@ platformTest("two real nested Hyprland Screens act and capture concurrently with
     const firstSource = sources[0]!;
     const secondSource = sources[1]!;
     const secondBeforePointer = (await secondSource.capture()).bytes;
+    let firstEpoch = 1;
+    let firstSequence = 0;
+    let secondSequence = 0;
+    const firstInput = (action: BotScreenInputAction): Promise<void> =>
+      firstSource.input({
+        surfaceId: firstSource.surfaceId,
+        runtimeGeneration: firstSource.runtimeGeneration,
+        geometryGeneration: firstSource.geometryGeneration,
+        controllerEpoch: firstEpoch,
+        sequence: ++firstSequence,
+        ...action,
+      });
+    const secondInput = (action: BotScreenInputAction): Promise<void> =>
+      secondSource.input({
+        surfaceId: secondSource.surfaceId,
+        runtimeGeneration: secondSource.runtimeGeneration,
+        geometryGeneration: secondSource.geometryGeneration,
+        controllerEpoch: 1,
+        sequence: ++secondSequence,
+        ...action,
+      });
+    await Promise.all([firstSource.setInputAuthority(firstEpoch), secondSource.setInputAuthority(1)]);
 
-    await firstSource.input({ type: "motion", x: 100, y: 120 });
-    await firstSource.input({ type: "button", x: 100, y: 120, button: "left", state: "pressed" });
-    await firstSource.input({ type: "button", x: 100, y: 120, button: "left", state: "released" });
-    await firstSource.input({ type: "button", x: 80, y: 100, button: "left", state: "pressed" });
-    await firstSource.input({ type: "motion", x: 600, y: 180 });
-    await firstSource.input({ type: "button", x: 600, y: 180, button: "left", state: "released" });
-    await firstSource.input({ type: "scroll", x: 600, y: 180, deltaX: 0, deltaY: -720 });
-    await firstSource.input({ type: "key", keyCode: 29, state: "pressed" });
-    await firstSource.input({ type: "key", keyCode: 38, state: "pressed" });
-    await firstSource.input({ type: "key", keyCode: 38, state: "released" });
-    await firstSource.input({ type: "key", keyCode: 29, state: "released" });
-    await firstSource.input({ type: "paste", text: "WEB-CONTROL-PASTE λ" });
-    await firstSource.input({ type: "key", keyCode: 28, state: "pressed" });
-    await firstSource.input({ type: "key", keyCode: 28, state: "released" });
+    await firstInput({ type: "motion", x: 100, y: 120 });
+    await firstInput({ type: "button", x: 100, y: 120, button: "left", state: "pressed" });
+    await firstInput({ type: "button", x: 100, y: 120, button: "left", state: "released" });
+    await firstInput({ type: "button", x: 80, y: 100, button: "left", state: "pressed" });
+    await firstInput({ type: "motion", x: 600, y: 180 });
+    await firstInput({ type: "button", x: 600, y: 180, button: "left", state: "released" });
+    await firstInput({ type: "scroll", x: 600, y: 180, deltaX: 0, deltaY: -720 });
+    await firstInput({ type: "key", keyCode: 29, state: "pressed" });
+    await firstInput({ type: "key", keyCode: 38, state: "pressed" });
+    await firstInput({ type: "key", keyCode: 38, state: "released" });
+    await firstInput({ type: "key", keyCode: 29, state: "released" });
+    await firstInput({ type: "paste", text: "WEB-CONTROL-PASTE λ" });
+    await firstInput({ type: "key", keyCode: 28, state: "pressed" });
+    await firstInput({ type: "key", keyCode: 28, state: "released" });
     const firstAfterKeyboard = (await firstSource.capture()).bytes;
     expect(await differingPixels(previews[0]!, firstAfterKeyboard, harness.home)).toBeGreaterThan(0);
     const secondAfterFirstInput = (await secondSource.capture()).bytes;
     expect(await differingPixels(secondBeforePointer, secondAfterFirstInput, harness.home)).toBeLessThan(10_000);
-    await secondSource.input({ type: "motion", x: 700, y: 400 });
-    await firstSource.input({ type: "key", keyCode: 42, state: "pressed" });
-    await firstSource.input({ type: "button", x: 600, y: 180, button: "left", state: "pressed" });
-    await firstSource.releaseInput();
-    await firstSource.input({ type: "key", keyCode: 42, state: "pressed" });
-    await firstSource.input({ type: "key", keyCode: 42, state: "released" });
-    await firstSource.input({ type: "button", x: 600, y: 180, button: "left", state: "pressed" });
-    await firstSource.input({ type: "button", x: 600, y: 180, button: "left", state: "released" });
-    await Promise.all([firstSource.releaseInput(), secondSource.releaseInput()]);
+    await secondInput({ type: "motion", x: 700, y: 400 });
+    await firstInput({ type: "key", keyCode: 42, state: "pressed" });
+    await firstInput({ type: "button", x: 600, y: 180, button: "left", state: "pressed" });
+    await firstSource.releaseInput(firstEpoch);
+    firstEpoch = 2;
+    firstSequence = 0;
+    await firstSource.setInputAuthority(firstEpoch);
+    await firstInput({ type: "key", keyCode: 42, state: "pressed" });
+    await firstInput({ type: "key", keyCode: 42, state: "released" });
+    await firstInput({ type: "button", x: 600, y: 180, button: "left", state: "pressed" });
+    await firstInput({ type: "button", x: 600, y: 180, button: "left", state: "released" });
+    await Promise.all([firstSource.releaseInput(firstEpoch), secondSource.releaseInput(1)]);
 
     expect(await run(["hyprctl", "-j", "cursorpos"])).toBe(hostPointerBefore);
 

@@ -61,7 +61,7 @@ export async function handleComputerRequest(
   const currentView = (): ComputerViewDto => computerView(computer.state(owner), screens.open(owner));
 
   if (url.pathname === "/api/computer/state" && req.method === "GET") {
-    const lifecycle = screens.open(owner);
+    const lifecycle = screens.status(owner);
     return json(computerView(computer.state(owner), lifecycle), lifecycle.admission === undefined ? 200 : 503);
   }
   if (url.pathname === "/api/computer/take-control" && req.method === "POST") {

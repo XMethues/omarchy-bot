@@ -25,6 +25,7 @@ export interface ScreenProjectionOwner {
 export interface ScreenProjectionCallbacks {
   onState(state: ScreenProjectionState): void;
   onFrame(frame: Blob | undefined): void;
+  onControlRevoked?(): void;
 }
 
 
@@ -40,6 +41,8 @@ interface PointerContentRect {
   width: number;
   height: number;
 }
+type PointerButton = "left" | "middle" | "right";
+
 
 interface ProjectionGeometry {
   geometryGeneration: number;
@@ -68,6 +71,7 @@ export class ScreenProjectionConnection {
   #releasingEpoch: number | undefined;
   #resumeAfterRelease = false;
   #geometry: ProjectionGeometry | undefined;
+  readonly #heldPointerButtons = new Set<PointerButton>();
 
   constructor(
     private readonly endpoint: string,
@@ -150,6 +154,7 @@ export class ScreenProjectionConnection {
       this.#inputAuthority = undefined;
       this.#releasingEpoch = undefined;
       this.#resumeAfterRelease = false;
+      this.#clearHeldInput();
     }
     this.#desiredMode = mode;
     this.#activate();
@@ -166,16 +171,27 @@ export class ScreenProjectionConnection {
     renderedVideo: Element,
     button: number,
     state: "pressed" | "released",
-  ): void {
-    const namedButton = button === 0 ? "left" : button === 1 ? "middle" : button === 2 ? "right" : undefined;
-    if (namedButton === undefined) return;
+  ): boolean {
+    const namedButton: PointerButton | undefined =
+      button === 0 ? "left" : button === 1 ? "middle" : button === 2 ? "right" : undefined;
+    if (namedButton === undefined) return false;
+    if (
+      (state === "pressed" && this.#heldPointerButtons.has(namedButton))
+      || (state === "released" && !this.#heldPointerButtons.has(namedButton))
+    ) return false;
     const position = this.#mapPointer(
       clientX,
       clientY,
       renderedVideo.getBoundingClientRect(),
       state === "released",
     );
-    if (position !== undefined) this.#sendPointer("pointer-button", { ...position, button: namedButton, state });
+    if (
+      position === undefined
+      || !this.#sendPointer("pointer-button", { ...position, button: namedButton, state })
+    ) return false;
+    if (state === "pressed") this.#heldPointerButtons.add(namedButton);
+    else this.#heldPointerButtons.delete(namedButton);
+    return true;
   }
 
   pointerScroll(clientX: number, clientY: number, renderedVideo: Element, deltaX: number, deltaY: number): void {
@@ -209,6 +225,7 @@ export class ScreenProjectionConnection {
     if (this.#sendInput({ type: "release-control", reason })) {
       this.#releasingEpoch = authority.controllerEpoch;
       this.#inputAuthority = undefined;
+      this.#clearHeldInput();
     }
   }
 
@@ -228,6 +245,7 @@ export class ScreenProjectionConnection {
     this.#abort.abort();
     this.#pending = undefined;
     this.#inputAuthority = undefined;
+    this.#clearHeldInput();
     this.#geometry = undefined;
     this.#releasingEpoch = undefined;
     this.#resumeAfterRelease = false;
@@ -296,6 +314,7 @@ export class ScreenProjectionConnection {
       ) {
         this.#inputAuthority = undefined;
         this.#releasingEpoch = undefined;
+        this.#clearHeldInput();
         if (this.#resumeAfterRelease) {
           this.#resumeAfterRelease = false;
           queueMicrotask(() => this.#activate());
@@ -303,6 +322,10 @@ export class ScreenProjectionConnection {
       }
       return;
     }
+    if (
+      this.#inputAuthority !== undefined
+      && this.#inputAuthority.controllerEpoch !== authority.data.controllerEpoch
+    ) this.#clearHeldInput();
     this.#inputAuthority = authority.data;
     this.#inputSequence = 0;
     this.#releasingEpoch = undefined;
@@ -357,8 +380,8 @@ export class ScreenProjectionConnection {
   #sendPointer(
     type: "pointer-motion" | "pointer-button" | "pointer-scroll",
     event: Record<string, number | string>,
-  ): void {
-    this.#sendInput({ type, ...event });
+  ): boolean {
+    return this.#sendInput({ type, ...event });
   }
 
   #sendInput(event: Record<string, unknown>): boolean {
@@ -379,6 +402,11 @@ export class ScreenProjectionConnection {
     }));
     return true;
   }
+  #clearHeldInput(): void {
+    this.#heldPointerButtons.clear();
+    this.callbacks.onControlRevoked?.();
+  }
+
   #receive(raw: unknown): void {
     if (this.#closed) return;
     if (typeof raw === "string") {
