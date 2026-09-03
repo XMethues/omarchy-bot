@@ -566,6 +566,36 @@ DROP TABLE IF EXISTS legacy_unscoped_artifacts;
       }
     },
   },
+  {
+    // A database may have been opened by another release after the original
+    // renderer cutover. Reassert the current recipe contract on upgrade so an
+    // unsupported style can never reach the browser renderer.
+    name: "0014-enforce-current-avatar-recipes",
+    sql: `
+UPDATE bots
+SET avatar_kind = 'generated',
+    avatar_recipe = json_object(
+      'rendererVersion', '${AVATAR_RENDERER_ID}',
+      'style', 'shapes',
+      'seed', id,
+      'options', json('{}')
+    )
+WHERE avatar_kind IN ('generated', 'recipe')
+  AND CASE
+    WHEN json_valid(avatar_recipe) = 1 THEN
+      CASE
+        WHEN json_type(avatar_recipe, '$') = 'object' THEN NOT (
+          json_extract(avatar_recipe, '$.rendererVersion') = '${AVATAR_RENDERER_ID}'
+          AND json_extract(avatar_recipe, '$.style') IN ('shapes', 'pixelbot', 'thumbs')
+          AND json_type(avatar_recipe, '$.seed') = 'text'
+          AND json_type(avatar_recipe, '$.options') = 'object'
+        )
+        ELSE 1
+      END
+    ELSE 1
+  END;
+`,
+  },
 ];
 export function openDb(cfg: Config): Database {
   const db = new Database(cfg.dbPath, { create: true });
