@@ -1,0 +1,5 @@
+# Defer Web Control authentication and transport security
+
+The first Web Control release may be reachable from arbitrary networks without application authentication, authorization, or an HTTPS/WSS requirement. Account, pairing, permission, and trusted-network policy are explicitly deferred so the first release can focus on Bot Screen projection and input behavior.
+
+This is not a secure remote-access boundary: any party that can reach the daemon may observe a selected Bot Screen, acquire Web Control, send input and one-way pasted text, and replace its current controller; plaintext signaling and control traffic may also be observed or modified in transit. WebRTC still applies its mandatory media-channel encryption, but unauthenticated signaling does not establish peer identity. The product and documentation must not describe this mode as secure, and authentication will be a breaking public-protocol cutover rather than an optional hardening detail.

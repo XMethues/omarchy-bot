@@ -1,5 +1,7 @@
 # ComputerBroker executes desktop actions through the computer-use-linux MCP server, not bespoke input code
 
+_Single-Shared-Screen and Web Control backend portions are superseded by [ADR 0007](./0007-provision-nested-hyprland-per-bot.md); Emergency Control portions are superseded by [ADR 0006](./0006-remove-emergency-control.md)._
+
 The Computer boundary requires that only `computer-worker` touches real desktop input, and that every Agent adapter sees one consistent tool surface (observe, screenshot, windows, click/type/key/scroll). We decided `workers/computer` is an MCP **client** that spawns the official `@agent-sh/computer-use-linux` stdio MCP server as its backend, adding only the small actions that server lacks (open app/URL, desktop notifications) natively.
 
 Considered options:
