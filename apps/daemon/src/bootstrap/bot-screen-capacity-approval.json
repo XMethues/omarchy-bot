@@ -1,21 +1,79 @@
 {
-  "schemaVersion": 2,
-  "measuredAt": "2026-09-03T23:51:08.577Z",
+  "schemaVersion": 3,
+  "measuredAt": "2026-09-04T14:03:40.632Z",
   "machine": {
     "hostname": "omarchy",
     "platform": "linux 7.1.9-arch1-2 x64",
     "cpu": "AMD Ryzen 9 7900X 12-Core Processor",
-    "gpu": "NVIDIA GeForce RTX 2080 Ti",
-    "hyprland": "0.56.2",
-    "aquamarine": "0.14.0"
+    "logicalCpus": 24,
+    "memoryMiB": 63496,
+    "waylandDisplay": null,
+    "cage": {
+      "available": true,
+      "requested": "/tmp/cage-portable.sh",
+      "path": "/tmp/cage-portable.sh",
+      "versionArgs": [
+        "-v"
+      ],
+      "status": 0,
+      "stdout": "Cage version 0.3.1-b7b774a (branch 'makepkg')",
+      "stderr": ""
+    },
+    "hyprland": {
+      "available": true,
+      "requested": "Hyprland",
+      "path": "/usr/bin/Hyprland",
+      "versionArgs": [
+        "--version"
+      ],
+      "status": 0,
+      "stdout": "Hyprland 0.56.2 built from branch v0.56.2 at commit efb50993780079460b0cbed1363e2166a2de1d9f clean ([gha] Nix: update inputs).\nDate: Wed Aug 5 14:13:21 2026\nTag: v0.56.2, commits: 7661\n\nLibraries:\nHyprgraphics: built against 0.5.1, system has 0.5.1\nHyprutils: built against 0.14.0, system has 0.14.1\nHyprcursor: built against 0.1.13, system has 0.1.13\nHyprlang: built against 0.6.8, system has 0.6.8\nAquamarine: built against 0.14.0, system has 0.14.0\n\nVersion ABI string: efb50993780079460b0cbed1363e2166a2de1d9f_aq_0.14_hu_0.14_hg_0.5_hc_0.1_hlg_0.6\nno flags were set",
+      "stderr": ""
+    },
+    "ffmpeg": {
+      "available": true,
+      "requested": "ffmpeg",
+      "path": "/usr/bin/ffmpeg",
+      "versionArgs": [
+        "-version"
+      ],
+      "status": 0,
+      "stdout": "ffmpeg version n9.0.1 Copyright (c) 2000-2026 the FFmpeg developers\nbuilt with gcc 16 (GCC)\nconfiguration: --prefix=/usr --disable-debug --disable-static --disable-stripping --enable-amf --enable-avisynth --enable-cuda-llvm --enable-lto --enable-fontconfig --enable-frei0r --enable-gmp --enable-gnutls --enable-gpl --enable-ladspa --enable-lcms2 --enable-libaom --enable-libass --enable-libbluray --enable-libbs2b --enable-libdav1d --enable-libdrm --enable-libdvdnav --enable-libdvdread --enable-libfreetype --enable-libfribidi --enable-libgsm --enable-libharfbuzz --enable-libiec61883 --enable-libjack --enable-libjxl --enable-libmodplug --enable-libmp3lame --enable-libopencore_amrnb --enable-libopencore_amrwb --enable-libopenjpeg --enable-libopenmpt --enable-libopus --enable-libplacebo --enable-libpulse --enable-librav1e --enable-librsvg --enable-librubberband --enable-libsnappy --enable-libsoxr --enable-libspeex --enable-libsrt --enable-libssh --enable-libsvtav1 --enable-libtheora --enable-libv4l2 --enable-libvidstab --enable-libvmaf --enable-libvorbis --enable-libvpl --enable-libvpx --enable-libwebp --enable-libx264 --enable-libx265 --enable-libxcb --enable-libxml2 --enable-libxvid --enable-libzimg --enable-libzmq --enable-nvdec --enable-nvenc --enable-opencl --enable-opengl --enable-shared --enable-vapoursynth --enable-version3 --enable-vulkan --disable-decoder=magicyuv\nlibavutil      61.  1.101 / 61.  1.101\nlibavcodec     63.  1.101 / 63.  1.101\nlibavformat    63.  1.101 / 63.  1.101\nlibavdevice    63.  1.101 / 63.  1.101\nlibavfilter    12.  1.101 / 12.  1.101\nlibswscale     10.  1.101 / 10.  1.101\nlibswresample   7.  1.101 /  7.  1.101\n\nExiting with exit code 0",
+      "stderr": ""
+    },
+    "browser": {
+      "available": true,
+      "requested": "/home/colin/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome",
+      "path": "/home/colin/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome",
+      "versionArgs": [
+        "--version"
+      ],
+      "status": 0,
+      "stdout": "Google Chrome for Testing 151.0.7922.34",
+      "stderr": ""
+    },
+    "gpu": {
+      "available": true,
+      "attributionAvailable": false,
+      "reason": "nvidia-smi does not expose attributable graphics-process VRAM on this stack",
+      "systemTotals": [
+        {
+          "name": "NVIDIA GeForce RTX 2080 Ti",
+          "utilizationPercent": 1,
+          "usedMiB": 4963,
+          "totalMiB": 11264
+        }
+      ]
+    }
   },
+  "runtime": "cage",
   "profile": "1080p",
   "resolution": {
     "width": 1920,
     "height": 1080
   },
   "defaultCapacity": 4,
-  "captureFrameRate": 16,
+  "captureFrameRate": 18,
   "targetFps": 15,
   "durationMs": 15000,
   "lifecycleProof": {
@@ -24,41 +82,155 @@
   },
   "finalClient": {
     "built": true,
-    "browser": "Brave Browser 152.1.94.119",
+    "browser": {
+      "available": true,
+      "requested": "/home/colin/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome",
+      "path": "/home/colin/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome",
+      "versionArgs": [
+        "--version"
+      ],
+      "status": 0,
+      "stdout": "Google Chrome for Testing 151.0.7922.34",
+      "stderr": ""
+    },
     "mode": "headless",
-    "transport": "WebRTC data channels",
+    "transport": "WebRTC H.264 video track",
     "lanInterface": "eno1",
-    "lanEndpoint": "https://192.168.10.25:43245",
-    "measurement": "daemon encoded/sent counters correlated by frame sequence with final-client receive, decode, rendering opportunity, and paint"
+    "lanEndpoint": "https://192.168.10.25:45039",
+    "measurement": "daemon source/encode/send counters, browser WebRTC decode, video paint, and canvas readback"
   },
   "observedSourceFps": {
-    "minimum": 15.69,
-    "maximum": 15.76
+    "minimum": 17.7,
+    "maximum": 18.16
   },
   "observedEncodedFps": {
-    "minimum": 15.69,
-    "maximum": 15.76
+    "minimum": 17.7,
+    "maximum": 18.16
+  },
+  "observedSentFps": {
+    "minimum": 17.7,
+    "maximum": 18.16
+  },
+  "observedReceivedFps": {
+    "minimum": 17.7,
+    "maximum": 18.16
+  },
+  "observedDecodedFps": {
+    "minimum": 17.76,
+    "maximum": 18.23
   },
   "observedDisplayedFps": {
-    "minimum": 15.69,
-    "maximum": 15.76
+    "minimum": 17.57,
+    "maximum": 18.16
   },
+  "observedEncodedBytes": 6991670,
+  "observedEncodedBitrateBps": 3707468.92,
   "observedDrops": {
-    "transportSequenceGaps": 0,
-    "decodeDrops": 0,
-    "paintDrops": 0,
     "preCaptureBackpressureSkips": 0,
+    "invalidFrameDrops": 0,
     "encodedBackpressureDrops": 0,
+    "transportUnavailableSkips": 0,
+    "transportDrops": 0,
+    "decodeDrops": 0,
+    "paintDrops": 11,
     "unexplainedDrops": 0
   },
-  "observedInputToVisibleP50Ms": 155,
-  "observedInputToVisibleP95Ms": 480.4,
-  "observedCaptureToBrowserP50Ms": 34,
-  "observedCaptureToBrowserP95Ms": 43,
+  "observedInputToVisibleP50Ms": 36,
+  "observedInputToVisibleP95Ms": 93.9,
+  "observedCaptureToBrowserMs": {
+    "available": false,
+    "reason": "WebRTC H.264 did not negotiate an absolute capture timestamp"
+  },
   "staticPreviewDisplayedFps": {
     "minimum": 0.98,
     "maximum": 0.98
   },
+  "activeResources": {
+    "pssMiB": 1512.4,
+    "rssMiB": 7183.98,
+    "cpuPercent": 217.18
+  },
+  "compositorMemory": {
+    "passed": true,
+    "minimumReductionPercent": 25,
+    "reductionPercent": 61.25,
+    "baseline": {
+      "runtime": "hyprland",
+      "resolution": {
+        "width": 1920,
+        "height": 1080
+      },
+      "pssMiB": 116.54,
+      "rssMiB": 364.53,
+      "processes": [
+        {
+          "pid": 2730181,
+          "role": "compositor",
+          "executable": "Hyprland",
+          "pssMiB": 116.54,
+          "rssMiB": 364.53,
+          "cpuPercent": 4
+        }
+      ]
+    },
+    "candidate": {
+      "runtime": "cage",
+      "resolution": {
+        "width": 1920,
+        "height": 1080
+      },
+      "pssMiB": 45.16,
+      "rssMiB": 268.62,
+      "processes": [
+        {
+          "pid": 2730935,
+          "role": "compositor",
+          "executable": "cage",
+          "pssMiB": 45.02,
+          "rssMiB": 266.46,
+          "cpuPercent": 0
+        },
+        {
+          "pid": 2730955,
+          "role": "compositor",
+          "executable": "omarchy-bot-desktop",
+          "pssMiB": 0.14,
+          "rssMiB": 2.16,
+          "cpuPercent": 0
+        }
+      ]
+    }
+  },
+  "admission": {
+    "capacity": 4,
+    "openAttempt": {
+      "state": "stopped",
+      "admission": {
+        "reason": "capacity",
+        "active": 4,
+        "limit": 4
+      }
+    },
+    "rejected": {
+      "status": 503,
+      "body": {
+        "botId": "bot_a7b67735604b4097a77e182a5864c4a3",
+        "surfaceId": "surf_242e413f49be40ab91f8828fb2a83574",
+        "takeover": "unavailable",
+        "state": "unavailable",
+        "activity": "Bot Screen capacity is full (4/4).",
+        "unavailableReason": "capacity",
+        "capacity": {
+          "active": 4,
+          "limit": 4
+        }
+      }
+    },
+    "noPartialRuntime": true,
+    "activeUnaffected": true,
+    "activeEnvelopeMaintained": true
+  },
   "inputToVisibleP50LimitMs": 200,
-  "reproducibleCommand": "OMARCHY_BOT_REAL_SCREEN_LOAD=1 OMARCHY_BOT_LOAD_MATRIX=4 OMARCHY_BOT_LOAD_FALLBACK=0 OMARCHY_BOT_LOAD_LAN_INTERFACE=eno1 bun test tests/integration/bot-screen-capacity.load.test.ts"
+  "inputToVisibleP95EnvelopeMs": 480.4,
+  "reproducibleCommand": "OMARCHY_BOT_REAL_SCREEN_LOAD=1 OMARCHY_BOT_SCREEN_RUNTIME=cage OMARCHY_BOT_LOAD_MATRIX=1,2,4,8 OMARCHY_BOT_LOAD_FALLBACK=1 OMARCHY_BOT_LOAD_LAN_INTERFACE=<lan-interface> OMARCHY_BOT_LOAD_REPORT=<report.json> OMARCHY_BOT_LOAD_APPROVAL=<approval.json> bun test tests/integration/bot-screen-capacity.load.test.ts"
 }

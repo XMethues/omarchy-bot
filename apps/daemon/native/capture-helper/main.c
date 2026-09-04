@@ -189,8 +189,21 @@ static void request_copy(struct capture *capture) {
     || capture->width > UINT32_MAX / 4
     || capture->stride < capture->width * 4
     || capture->stride > INT32_MAX
-    || (capture->format != WL_SHM_FORMAT_ARGB8888 && capture->format != WL_SHM_FORMAT_XRGB8888)
+    || (
+      capture->format != WL_SHM_FORMAT_ARGB8888
+      && capture->format != WL_SHM_FORMAT_XRGB8888
+      && capture->format != WL_SHM_FORMAT_ABGR8888
+      && capture->format != WL_SHM_FORMAT_XBGR8888
+    )
   ) {
+    if (
+      capture->format != WL_SHM_FORMAT_ARGB8888
+      && capture->format != WL_SHM_FORMAT_XRGB8888
+      && capture->format != WL_SHM_FORMAT_ABGR8888
+      && capture->format != WL_SHM_FORMAT_XBGR8888
+    ) {
+      fprintf(stderr, "unsupported shared-memory frame format 0x%08x\n", capture->format);
+    }
     capture->failed = true;
     capture->done = true;
     return;
@@ -349,10 +362,14 @@ static bool emit_capture(struct capture *capture) {
       : y;
     uint8_t *row = (uint8_t *)capture->data + (size_t)source_y * capture->stride;
     for (uint32_t x = 0; x < capture->width; x += 1) {
-      uint8_t blue = row[x * 4];
-      row[x * 4] = row[x * 4 + 2];
-      row[x * 4 + 2] = blue;
-      if (capture->format == WL_SHM_FORMAT_XRGB8888) row[x * 4 + 3] = 0xff;
+      if (capture->format == WL_SHM_FORMAT_ARGB8888 || capture->format == WL_SHM_FORMAT_XRGB8888) {
+        uint8_t blue = row[x * 4];
+        row[x * 4] = row[x * 4 + 2];
+        row[x * 4 + 2] = blue;
+      }
+      if (capture->format == WL_SHM_FORMAT_XRGB8888 || capture->format == WL_SHM_FORMAT_XBGR8888) {
+        row[x * 4 + 3] = 0xff;
+      }
     }
     if (!write_all(row, (size_t)capture->width * 4)) return false;
   }

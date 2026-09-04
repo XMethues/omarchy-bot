@@ -575,10 +575,8 @@ export class ScreenProjectionConnection {
   #publishInputAuthority(): void {
     const authority = this.#offeredInputAuthority;
     if (authority === undefined || this.#desiredMode !== "expanded" || !this.#videoReady) return;
-    if (
-      this.#inputAuthority !== undefined
-      && this.#inputAuthority.controllerEpoch !== authority.controllerEpoch
-    ) this.#clearHeldInput();
+    if (this.#inputAuthority?.controllerEpoch === authority.controllerEpoch) return;
+    if (this.#inputAuthority !== undefined) this.#clearHeldInput();
     this.callbacks.onControlStateChange?.(true);
     this.#inputAuthority = authority;
     this.#inputSequence = 0;

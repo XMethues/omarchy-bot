@@ -376,6 +376,7 @@ class WaylandCaptureStream implements BotScreenCaptureStream {
   private constructor(
     private readonly process: CaptureProcess,
     private readonly protocol: CaptureProtocolReader,
+    private readonly stderrOutput: Promise<string>,
     private readonly expectedWidth: number,
     private readonly expectedHeight: number,
   ) {}
@@ -394,12 +395,13 @@ class WaylandCaptureStream implements BotScreenCaptureStream {
       stderr: "pipe",
     });
     const protocol = new CaptureProtocolReader(process.stdout.getReader());
+    const stderrOutput = new Response(process.stderr).text();
     let ready: string;
     try {
       ready = await Promise.race([
         protocol.readLine(),
         process.exited.then(async (status) => {
-          const stderr = await new Response(process.stderr).text();
+          const stderr = await stderrOutput;
           throw new Error(
             `Bot Screen capture helper exited with status ${status}${stderr.trim() === "" ? "" : `: ${stderr.trim()}`}`,
           );
@@ -416,7 +418,7 @@ class WaylandCaptureStream implements BotScreenCaptureStream {
       await terminateCapture(process);
       throw new Error("Bot Screen capture helper returned an invalid readiness response");
     }
-    return new WaylandCaptureStream(process, protocol, expectedWidth, expectedHeight);
+    return new WaylandCaptureStream(process, protocol, stderrOutput, expectedWidth, expectedHeight);
   }
 
   async next(): Promise<BotScreenCaptureFrame> {
@@ -462,9 +464,14 @@ class WaylandCaptureStream implements BotScreenCaptureStream {
         }),
       ]);
     } catch (cause) {
-      const error = cause instanceof Error ? cause : new Error(String(cause));
-      this.#terminalError = error;
       this.process.kill("SIGTERM");
+      const stderr = await Promise.race([
+        this.stderrOutput,
+        Bun.sleep(100).then(() => ""),
+      ]);
+      const message = cause instanceof Error ? cause.message : String(cause);
+      const error = new Error(`${message}${stderr.trim() === "" ? "" : `: ${stderr.trim()}`}`);
+      this.#terminalError = error;
       throw error;
     } finally {
       clearTimeout(timeout);

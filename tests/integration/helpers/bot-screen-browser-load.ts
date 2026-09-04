@@ -21,10 +21,20 @@ interface InstrumentFrame {
   captureToBrowserMs?: number;
 }
 
+interface VideoStats {
+  framesReceived: number;
+  framesDecoded: number;
+  framesDropped: number;
+  packetsLost: number;
+}
+
 interface InstrumentState {
   received: InstrumentFrame[];
   decoded: InstrumentFrame[];
   displayed: InstrumentFrame[];
+  inputAuthorityMessages: Array<{ active: boolean; controllerEpoch: number; receivedAtMs: number }>;
+  inputAuthorityActive: boolean;
+  sentInputMessages: Array<{ type: string | null; state?: string; reason?: string; sentAtMs: number }>;
   pendingInput?: {
     baselineSequence: number;
     baselineSignature: number;
@@ -32,6 +42,7 @@ interface InstrumentState {
     visibleAtMs?: number;
   };
   armInput(): void;
+  sampleVideoStats(): Promise<VideoStats>;
 }
 
 declare global {
@@ -42,11 +53,15 @@ declare global {
 
 export interface BrowserWindowMetric extends BrowserFrameMetric {
   durationMs: number;
-  sequences: number[];
-  transportSequenceGaps: number;
+  renderingSequences: number[];
+  transportDrops: number;
   decodeDrops: number;
   paintDrops: number;
   captureToBrowserMs: number[];
+  pipelineBoundary: {
+    start: { received: number; decoded: number; dropped: number; displayed: number };
+    end: { received: number; decoded: number; dropped: number; displayed: number };
+  };
 }
 
 export function selectNonLoopbackLanAddress(
@@ -98,6 +113,7 @@ function installBrowserInstrumentation(): void {
   const frameByUrl = new Map<string, InstrumentFrame>();
   const processedUrls = new Set<string>();
   const observedVideos = new WeakSet<HTMLVideoElement>();
+  const peerConnections = new Set<RTCPeerConnection>();
   let videoSequence = 0;
   let pendingHeader: { sequence: number; chunkCount: number; capturedAt?: string } | undefined;
   let chunks = 0;
@@ -106,6 +122,9 @@ function installBrowserInstrumentation(): void {
     received,
     decoded,
     displayed,
+    inputAuthorityMessages: [],
+    inputAuthorityActive: false,
+    sentInputMessages: [],
     armInput() {
       const baseline = displayed.at(-1);
       if (baseline === undefined) throw new Error("cannot arm input before a browser-painted frame");
@@ -113,6 +132,36 @@ function installBrowserInstrumentation(): void {
         baselineSequence: baseline.sequence,
         baselineSignature: baseline.signature,
       };
+    },
+    async sampleVideoStats() {
+      const totals: VideoStats = {
+        framesReceived: 0,
+        framesDecoded: 0,
+        framesDropped: 0,
+        packetsLost: 0,
+      };
+      for (const peer of peerConnections) {
+        const report = await peer.getStats();
+        report.forEach((entry) => {
+          const metric = entry as RTCStats & {
+            kind?: string;
+            mediaType?: string;
+            framesReceived?: number;
+            framesDecoded?: number;
+            framesDropped?: number;
+            packetsLost?: number;
+          };
+          if (
+            metric.type !== "inbound-rtp"
+            || (metric.kind ?? metric.mediaType) !== "video"
+          ) return;
+          totals.framesReceived += metric.framesReceived ?? 0;
+          totals.framesDecoded += metric.framesDecoded ?? 0;
+          totals.framesDropped += metric.framesDropped ?? 0;
+          totals.packetsLost += Math.max(0, metric.packetsLost ?? 0);
+        });
+      }
+      return totals;
     },
   };
   Object.defineProperty(window, "__botScreenLoad", { value: instrument });
@@ -127,6 +176,7 @@ function installBrowserInstrumentation(): void {
 
   const nativeCreateDataChannel = RTCPeerConnection.prototype.createDataChannel;
   RTCPeerConnection.prototype.createDataChannel = function(label, options): RTCDataChannel {
+    peerConnections.add(this);
     const channel = nativeCreateDataChannel.call(this, label, options);
     if (label === "screen.preview.v2") {
       channel.addEventListener("message", (event: MessageEvent<unknown>) => {
@@ -161,21 +211,52 @@ function installBrowserInstrumentation(): void {
       });
     }
     if (label === "screen.input.v2") {
+      channel.addEventListener("message", (event: MessageEvent<unknown>) => {
+        if (typeof event.data !== "string") return;
+        try {
+          const message = JSON.parse(event.data) as {
+            type?: string;
+            active?: boolean;
+            controllerEpoch?: number;
+          };
+          if (
+            message.type !== "input-authority"
+            || typeof message.active !== "boolean"
+            || typeof message.controllerEpoch !== "number"
+          ) return;
+          instrument.inputAuthorityActive = message.active;
+          instrument.inputAuthorityMessages.push({
+            active: message.active,
+            controllerEpoch: message.controllerEpoch,
+            receivedAtMs: performance.now(),
+          });
+        } catch {
+          // Production client owns validation; instrumentation records only valid authority messages.
+        }
+      });
       const nativeSend = channel.send.bind(channel);
       channel.send = (data: string | Blob | ArrayBuffer | ArrayBufferView<ArrayBuffer>): void => {
         const pendingInput = instrument.pendingInput;
-        if (typeof data === "string" && pendingInput?.sentAtMs === undefined) {
+        if (typeof data === "string") {
           try {
-            const event = JSON.parse(data) as { type?: string; state?: string };
-            if (event.type === "key" && event.state === "pressed" && pendingInput !== undefined) {
-              pendingInput.sentAtMs = performance.now();
-            }
+            const event = JSON.parse(data) as { type?: string; state?: string; reason?: string };
+            instrument.sentInputMessages.push({
+              type: event.type ?? null,
+              ...(event.state === undefined ? {} : { state: event.state }),
+              ...(event.reason === undefined ? {} : { reason: event.reason }),
+              sentAtMs: performance.now(),
+            });
+            if (
+              event.type === "key"
+              && event.state === "pressed"
+              && pendingInput !== undefined
+              && pendingInput.sentAtMs === undefined
+            ) pendingInput.sentAtMs = performance.now();
           } catch {
-            // Production client owns validation; instrumentation only timestamps accepted sends.
+            // Production client owns validation; instrumentation timestamps parseable sends.
           }
-        }
-        if (typeof data === "string") nativeSend(data);
-        else if (data instanceof Blob) nativeSend(data);
+          nativeSend(data);
+        } else if (data instanceof Blob) nativeSend(data);
         else if (data instanceof ArrayBuffer) nativeSend(data);
         else nativeSend(data);
       };
@@ -185,12 +266,13 @@ function installBrowserInstrumentation(): void {
 
   const observeImage = async (image: HTMLImageElement): Promise<void> => {
     const url = image.src;
-    const frame = frameByUrl.get(url);
+    const frame = frameByUrl.get(url)
+      ?? received.findLast((candidate) => candidate.decodedAtMs === undefined);
     if (frame === undefined || processedUrls.has(url)) return;
-    processedUrls.add(url);
     try {
       await image.decode();
       if (image.src !== url) return;
+      processedUrls.add(url);
       frame.decodedAtMs = performance.now();
       decoded.push(frame);
       await new Promise<void>((resolve) => requestAnimationFrame(() => setTimeout(resolve, 0)));
@@ -285,12 +367,21 @@ function installBrowserInstrumentation(): void {
       childList: true,
       subtree: true,
     });
+    document.addEventListener("load", (event) => {
+      if (event.target instanceof HTMLImageElement) void observeImage(event.target);
+    }, true);
     scan();
   }, { once: true });
 }
 
+type ProjectionFailureLookup = (
+  owner: BrowserOwner,
+  sessionId: string,
+) => unknown;
+
 export class BrowserSurfaceSession {
   #windowStartedAtMs?: number;
+  #windowStartedVideoStats?: VideoStats;
 
   private constructor(
     readonly owner: BrowserOwner,
@@ -300,9 +391,15 @@ export class BrowserSurfaceSession {
     private readonly videoHeight: number,
     private readonly page: Page,
     private readonly context: BrowserContext,
+    private readonly failureLookup?: ProjectionFailureLookup,
   ) {}
 
-  static async open(browser: Browser, lanEndpoint: string, owner: BrowserOwner): Promise<BrowserSurfaceSession> {
+  static async open(
+    browser: Browser,
+    lanEndpoint: string,
+    owner: BrowserOwner,
+    failureLookup?: ProjectionFailureLookup,
+  ): Promise<BrowserSurfaceSession> {
     const context = await browser.newContext({
       viewport: { width: 1920, height: 1080 },
       ignoreHTTPSErrors: true,
@@ -343,8 +440,43 @@ export class BrowserSurfaceSession {
       || typeof answer.videoWidth !== "number"
       || typeof answer.videoHeight !== "number"
     ) throw new Error("final web client projection answer lacked its media contract");
-    await page.getByTestId("computer-preview").waitFor({ state: "visible", timeout: 15_000 });
-    await page.waitForFunction(() => window.__botScreenLoad.displayed.length > 0);
+    const preview = page.getByTestId("computer-preview");
+    await preview.waitFor({ state: "visible", timeout: 15_000 });
+    try {
+      await page.waitForFunction(() => window.__botScreenLoad.displayed.length > 0, undefined, { timeout: 15_000 });
+    } catch {
+      const pageDiagnostics = await page.evaluate(async ({ botId, surfaceId, sessionId }) => {
+        const image = document.querySelector<HTMLImageElement>('img[data-testid="computer-preview"]');
+        const response = await fetch(
+          `/api/computer/projection?botId=${encodeURIComponent(botId)}&surfaceId=${encodeURIComponent(surfaceId)}&sessionId=${encodeURIComponent(sessionId)}`,
+        );
+        return {
+          instrumentation: {
+            received: window.__botScreenLoad.received.length,
+            decoded: window.__botScreenLoad.decoded.length,
+            displayed: window.__botScreenLoad.displayed.length,
+          },
+          image: image === null
+            ? null
+            : {
+                srcScheme: (image.currentSrc || image.src).split(":", 1)[0] ?? "",
+                srcLength: (image.currentSrc || image.src).length,
+                complete: image.complete,
+                naturalWidth: image.naturalWidth,
+                naturalHeight: image.naturalHeight,
+              },
+          projection: {
+            status: response.status,
+            body: await response.text(),
+          },
+        };
+      }, { botId: owner.botId, surfaceId: owner.surfaceId, sessionId: answer.sessionId });
+      const diagnostics = {
+        ...pageDiagnostics,
+        internalFailure: failureLookup?.(owner, answer.sessionId) ?? null,
+      };
+      throw new Error(`final web client did not paint Computer Preview: ${JSON.stringify(diagnostics)}`);
+    }
     return new BrowserSurfaceSession(
       owner,
       lanEndpoint,
@@ -353,6 +485,7 @@ export class BrowserSurfaceSession {
       answer.videoHeight,
       page,
       context,
+      failureLookup,
     );
   }
 
@@ -365,7 +498,8 @@ export class BrowserSurfaceSession {
         const video = document.querySelector<HTMLVideoElement>('video[data-testid="computer-expanded-video"]');
         return video?.videoWidth === width
           && video.videoHeight === height
-          && window.__botScreenLoad.displayed.length > after;
+          && window.__botScreenLoad.displayed.length > after
+          && window.__botScreenLoad.inputAuthorityActive;
       },
       { width: this.videoWidth, height: this.videoHeight, after: previewPaints },
       { timeout: 10_000 },
@@ -387,7 +521,33 @@ export class BrowserSurfaceSession {
       if (sent) break;
       await this.page.waitForTimeout(50);
     }
-    if (!sent) throw new Error("Web Control did not send browser input");
+    if (!sent) {
+      const pageDiagnostics = await this.page.evaluate(async ({ botId, surfaceId, sessionId }) => {
+        const response = await fetch(
+          `/api/computer/projection?botId=${encodeURIComponent(botId)}&surfaceId=${encodeURIComponent(surfaceId)}&sessionId=${encodeURIComponent(sessionId)}`,
+        );
+        return {
+          inputAuthority: {
+            active: window.__botScreenLoad.inputAuthorityActive,
+            messages: window.__botScreenLoad.inputAuthorityMessages,
+          },
+          sentInputMessages: window.__botScreenLoad.sentInputMessages,
+          projection: {
+            status: response.status,
+            body: await response.text(),
+          },
+        };
+      }, {
+        botId: this.owner.botId,
+        surfaceId: this.owner.surfaceId,
+        sessionId: this.projectionSessionId,
+      });
+      const diagnostics = {
+        ...pageDiagnostics,
+        internalFailure: this.failureLookup?.(this.owner, this.projectionSessionId) ?? null,
+      };
+      throw new Error(`Web Control did not send browser input: ${JSON.stringify(diagnostics)}`);
+    }
     await afterWebInputSent?.();
     try {
       await this.page.waitForFunction(() => {
@@ -395,12 +555,34 @@ export class BrowserSurfaceSession {
         return input?.sentAtMs !== undefined && input.visibleAtMs !== undefined;
       }, undefined, { timeout: 5_000 });
     } catch {
-      const diagnostics = await this.page.evaluate(() => ({
-        input: window.__botScreenLoad.pendingInput,
-        received: window.__botScreenLoad.received.slice(-5),
-        decoded: window.__botScreenLoad.decoded.slice(-5),
-        displayed: window.__botScreenLoad.displayed.slice(-5),
-      }));
+      const pageDiagnostics = await this.page.evaluate(async ({ botId, surfaceId, sessionId }) => {
+        const response = await fetch(
+          `/api/computer/projection?botId=${encodeURIComponent(botId)}&surfaceId=${encodeURIComponent(surfaceId)}&sessionId=${encodeURIComponent(sessionId)}`,
+        );
+        return {
+          input: window.__botScreenLoad.pendingInput,
+          inputAuthority: {
+            active: window.__botScreenLoad.inputAuthorityActive,
+            messages: window.__botScreenLoad.inputAuthorityMessages,
+          },
+          sentInputMessages: window.__botScreenLoad.sentInputMessages,
+          received: window.__botScreenLoad.received.slice(-5),
+          decoded: window.__botScreenLoad.decoded.slice(-5),
+          displayed: window.__botScreenLoad.displayed.slice(-5),
+          projection: {
+            status: response.status,
+            body: await response.text(),
+          },
+        };
+      }, {
+        botId: this.owner.botId,
+        surfaceId: this.owner.surfaceId,
+        sessionId: this.projectionSessionId,
+      });
+      const diagnostics = {
+        ...pageDiagnostics,
+        internalFailure: this.failureLookup?.(this.owner, this.projectionSessionId) ?? null,
+      };
       throw new Error(`browser input did not produce painted feedback: ${JSON.stringify(diagnostics)}`);
     }
     return this.page.evaluate(() => {
@@ -411,7 +593,12 @@ export class BrowserSurfaceSession {
   }
 
   async startWindow(): Promise<void> {
-    this.#windowStartedAtMs = await this.page.evaluate(() => performance.now());
+    const started = await this.page.evaluate(async () => ({
+      startedAtMs: performance.now(),
+      videoStats: await window.__botScreenLoad.sampleVideoStats(),
+    }));
+    this.#windowStartedAtMs = started.startedAtMs;
+    this.#windowStartedVideoStats = started.videoStats;
   }
 
   async movePointer(step: number): Promise<void> {
@@ -425,32 +612,23 @@ export class BrowserSurfaceSession {
     if (step % 4 === 0) await this.page.mouse.wheel(0, step % 8 === 0 ? 240 : -240);
   }
 
-  async finishWindow(sequenceWindow?: {
-    afterSequence: number;
-    throughSequence: number;
-    durationMs: number;
-  }): Promise<BrowserWindowMetric> {
+  async finishWindow(videoWindow?: { durationMs: number }): Promise<BrowserWindowMetric> {
     const startedAtMs = this.#windowStartedAtMs;
     if (startedAtMs === undefined) throw new Error("browser measurement window was not started");
-    if (
-      sequenceWindow !== undefined
-      && sequenceWindow.throughSequence > sequenceWindow.afterSequence
-    ) {
-      await this.page.waitForFunction(
-        (throughSequence) => window.__botScreenLoad.received.some((frame) => frame.sequence >= throughSequence),
-        sequenceWindow.throughSequence,
-        { timeout: 2_000 },
-      ).catch(() => undefined);
+    const startVideoStats = this.#windowStartedVideoStats;
+    if (startVideoStats === undefined) throw new Error("browser video stats window was not started");
+    if (videoWindow !== undefined) {
       await this.page.evaluate(() => new Promise<void>((resolve) =>
         requestAnimationFrame(() => setTimeout(resolve, 0))
       ));
     }
     const surfaceId: string = this.owner.surfaceId;
     const lanEndpoint = this.lanEndpoint;
-    return this.page.evaluate(({ start, surfaceId, lanEndpoint, sequenceWindow }) => {
+    return this.page.evaluate(async ({ start, startVideoStats, surfaceId, lanEndpoint, videoWindow }) => {
       const state = window.__botScreenLoad;
       const endedAtMs = performance.now();
-      const durationMs = sequenceWindow?.durationMs ?? endedAtMs - start;
+      const endVideoStats = await state.sampleVideoStats();
+      const durationMs = videoWindow?.durationMs ?? endedAtMs - start;
       const received = state.received.filter((frame) =>
         frame.receivedAtMs >= start && frame.receivedAtMs <= endedAtMs
       );
@@ -460,30 +638,57 @@ export class BrowserSurfaceSession {
       const displayed = state.displayed.filter((frame) =>
         (frame.displayedAtMs ?? -1) >= start && (frame.displayedAtMs ?? Infinity) <= endedAtMs
       );
-      const sequences = [...new Set(received.map((frame) => frame.sequence))].sort((left, right) => left - right);
-      const transportSequenceGaps = sequences.slice(1).reduce((gaps, sequence, index) =>
-        gaps + Math.max(0, sequence - sequences[index]! - 1), 0);
+      const video = videoWindow !== undefined;
+      const receivedFrames = video
+        ? endVideoStats.framesReceived - startVideoStats.framesReceived
+        : received.length;
+      const decodedFrames = video
+        ? endVideoStats.framesDecoded - startVideoStats.framesDecoded
+        : decoded.length;
+      const displayedFrames = displayed.length;
+      const renderingSequences = [...new Set(displayed.map((frame) => frame.sequence))]
+        .sort((left, right) => left - right);
       const seconds = durationMs / 1_000;
       return {
         surfaceId,
         lanEndpoint,
         finalWebClient: true as const,
         durationMs: Number(durationMs.toFixed(2)),
-        sequences,
-        transportSequenceGaps,
-        receivedFrames: received.length,
-        decodedFrames: decoded.length,
-        displayedFrames: displayed.length,
-        decodeDrops: received.length - decoded.length,
-        paintDrops: decoded.length - displayed.length,
-        receivedFps: Number((received.length / seconds).toFixed(2)),
-        decodedFps: Number((decoded.length / seconds).toFixed(2)),
-        displayedFps: Number((displayed.length / seconds).toFixed(2)),
+        renderingSequences,
+        pipelineBoundary: {
+          start: {
+            received: startVideoStats.framesReceived,
+            decoded: startVideoStats.framesDecoded,
+            dropped: startVideoStats.framesDropped,
+            displayed: state.displayed.filter((frame) => (frame.displayedAtMs ?? Infinity) < start).length,
+          },
+          end: {
+            received: endVideoStats.framesReceived,
+            decoded: endVideoStats.framesDecoded,
+            dropped: endVideoStats.framesDropped,
+            displayed: state.displayed.length,
+          },
+        },
+        transportDrops: 0,
+        browserFramesDropped: video
+          ? endVideoStats.framesDropped - startVideoStats.framesDropped
+          : 0,
+        packetsLost: video
+          ? endVideoStats.packetsLost - startVideoStats.packetsLost
+          : 0,
+        receivedFrames,
+        decodedFrames,
+        displayedFrames,
+        decodeDrops: receivedFrames - decodedFrames,
+        paintDrops: decodedFrames - displayedFrames,
+        receivedFps: Number((receivedFrames / seconds).toFixed(2)),
+        decodedFps: Number((decodedFrames / seconds).toFixed(2)),
+        displayedFps: Number((displayedFrames / seconds).toFixed(2)),
         captureToBrowserMs: displayed.flatMap((frame) =>
           frame.captureToBrowserMs === undefined ? [] : [Number(frame.captureToBrowserMs.toFixed(2))]
         ),
       };
-    }, { start: startedAtMs, surfaceId, lanEndpoint, sequenceWindow });
+    }, { start: startedAtMs, startVideoStats, surfaceId, lanEndpoint, videoWindow });
   }
 
   async close(): Promise<void> {
@@ -506,6 +711,7 @@ export class FinalWebBrowserHarness {
     lanInterface: string,
     browserName: string,
     tlsRoot: string,
+    private readonly failureLookup?: ProjectionFailureLookup,
   ) {
     this.#browser = browser;
     this.#proxy = proxy;
@@ -515,7 +721,10 @@ export class FinalWebBrowserHarness {
     this.#tlsRoot = tlsRoot;
   }
 
-  static async start(upstreamBaseUrl: string): Promise<FinalWebBrowserHarness> {
+  static async start(
+    upstreamBaseUrl: string,
+    failureLookup?: ProjectionFailureLookup,
+  ): Promise<FinalWebBrowserHarness> {
     const selected = selectNonLoopbackLanAddress(os.networkInterfaces(), process.env.OMARCHY_BOT_LOAD_LAN_INTERFACE);
     const upstream = new URL(upstreamBaseUrl);
     const tlsRoot = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-screen-load-tls-"));
@@ -587,6 +796,7 @@ export class FinalWebBrowserHarness {
         selected.interfaceName,
         path.basename(executablePath),
         tlsRoot,
+        failureLookup,
       );
     } catch (error) {
       proxy.stop(true);
@@ -596,7 +806,7 @@ export class FinalWebBrowserHarness {
   }
 
   open(owner: BrowserOwner): Promise<BrowserSurfaceSession> {
-    return BrowserSurfaceSession.open(this.#browser, this.lanEndpoint, owner);
+    return BrowserSurfaceSession.open(this.#browser, this.lanEndpoint, owner, this.failureLookup);
   }
 
   async close(): Promise<void> {

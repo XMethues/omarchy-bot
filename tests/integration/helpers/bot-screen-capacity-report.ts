@@ -7,8 +7,8 @@ export interface BrowserFrameMetric {
   lanEndpoint: string;
   finalWebClient: true;
   durationMs: number;
-  sequences: number[];
-  transportSequenceGaps: number;
+  renderingSequences: number[];
+  transportDrops: number;
   receivedFrames: number;
   decodedFrames: number;
   displayedFrames: number;
@@ -17,18 +17,37 @@ export interface BrowserFrameMetric {
   receivedFps: number;
   decodedFps: number;
   displayedFps: number;
+  captureAttempts?: number;
   sourceFrames?: number;
+  encoderInputs?: number;
   encodedFrames?: number;
   sentFrames?: number;
   sourceFps?: number;
   encodedFps?: number;
   sentFps?: number;
+  encodedBytes?: number;
+  encodedBitrateBps?: number;
   preCaptureBackpressureSkips?: number;
   encodedBackpressureDrops?: number;
   transportUnavailableSkips?: number;
   invalidFrameDrops?: number;
   sendFailures?: number;
   unexplainedDrops?: number;
+  pipelineBoundaryCarry?: {
+    start: Record<"capture" | "encode" | "rtp" | "receive" | "decode" | "paint", number>;
+    end: Record<"capture" | "encode" | "rtp" | "receive" | "decode" | "paint", number>;
+    unexplainedByStage: Record<"capture" | "encode" | "rtp" | "receive" | "decode" | "paint", number>;
+  };
+  captureLatencyMs?: {
+    samples: number;
+    mean: number | null;
+    lifetimeMax: number;
+  };
+  encodeLatencyMs?: {
+    samples: number;
+    mean: number | null;
+    lifetimeMax: number;
+  };
   targetFrameShortfall?: {
     source: number;
     encoded: number;
@@ -42,8 +61,8 @@ export interface BrowserFrameMetric {
 export interface BrowserLatencyMetric {
   source: "browser-paint";
   samples: number[];
-  p50: number | null;
-  p95: number | null;
+  p50: number;
+  p95: number;
 }
 
 export interface CapacityRowForGate {
@@ -62,8 +81,14 @@ export interface CapacityRowForGate {
   simultaneousAgentAndWebInputCompleted?: unknown;
   takeoverCompleted?: unknown;
   reconnects?: unknown;
+  reconnectRecovery?: unknown;
+  nativePeerRecovery?: unknown;
   crashes?: unknown;
   cleanup?: unknown;
+  activeResources?: unknown;
+  aggregateMetrics?: unknown;
+  encodingLifecycle?: unknown;
+  admission?: unknown;
 }
 
 export function isNonLoopbackLanEndpoint(value: unknown): boolean {
@@ -82,19 +107,35 @@ export function isNonLoopbackLanEndpoint(value: unknown): boolean {
   }
 }
 
+function validStageLatency(value: unknown): boolean {
+  if (value === null || typeof value !== "object") return false;
+  if (!("samples" in value) || !("mean" in value) || !("lifetimeMax" in value)) return false;
+  return typeof value.samples === "number"
+    && Number.isSafeInteger(value.samples)
+    && value.samples > 0
+    && typeof value.mean === "number"
+    && Number.isFinite(value.mean)
+    && value.mean >= 0
+    && typeof value.lifetimeMax === "number"
+    && Number.isFinite(value.lifetimeMax)
+    && value.lifetimeMax >= value.mean;
+}
+
 function validBrowserFrames(value: unknown, expectedCount: number, targetFps: number): value is BrowserFrameMetric[] {
   if (!Array.isArray(value) || value.length !== expectedCount) return false;
   return value.every((entry: unknown) => {
     if (entry === null || typeof entry !== "object") return false;
     const metric = entry as Partial<BrowserFrameMetric>;
     const wholeNumbers = [
-      metric.transportSequenceGaps,
       metric.receivedFrames,
+      metric.transportDrops,
       metric.decodedFrames,
       metric.displayedFrames,
       metric.decodeDrops,
       metric.paintDrops,
+      metric.captureAttempts,
       metric.sourceFrames,
+      metric.encoderInputs,
       metric.encodedFrames,
       metric.sentFrames,
       metric.preCaptureBackpressureSkips,
@@ -108,55 +149,98 @@ function validBrowserFrames(value: unknown, expectedCount: number, targetFps: nu
     const targetFrames = typeof metric.durationMs === "number"
       ? Math.floor(targetFps * metric.durationMs / 1_000)
       : Number.NaN;
-    const calculatedUnexplainedDrops = Math.max(
-      0,
-      metric.encodedFrames! - metric.sentFrames! - metric.encodedBackpressureDrops! - metric.sendFailures!,
-    ) + Math.max(0, metric.sentFrames! - metric.receivedFrames!);
+    const boundary = metric.pipelineBoundaryCarry;
+    const stages = ["capture", "encode", "rtp", "receive", "decode", "paint"] as const;
+    const validBoundary = boundary !== undefined
+      && stages.every((stage) =>
+        Number.isSafeInteger(boundary.start[stage])
+        && boundary.start[stage] >= 0
+        && Number.isSafeInteger(boundary.end[stage])
+        && boundary.end[stage] >= 0
+        && Number.isSafeInteger(boundary.unexplainedByStage[stage])
+        && boundary.unexplainedByStage[stage] >= 0
+      );
+    const {
+      receivedFrames,
+      transportDrops,
+      decodedFrames,
+      decodeDrops,
+      displayedFrames,
+      paintDrops,
+    } = metric;
+    const balanced = validBoundary
+      && boundary !== undefined
+      && typeof receivedFrames === "number"
+      && typeof transportDrops === "number"
+      && typeof decodedFrames === "number"
+      && typeof decodeDrops === "number"
+      && typeof displayedFrames === "number"
+      && typeof paintDrops === "number"
+      && metric.captureAttempts! + metric.preCaptureBackpressureSkips! + boundary.start.capture
+        === metric.sourceFrames! + metric.preCaptureBackpressureSkips! + boundary.end.capture
+          + boundary.unexplainedByStage.capture
+      && metric.encoderInputs! + boundary.start.encode
+        === metric.encodedFrames! + metric.invalidFrameDrops! + metric.encodedBackpressureDrops!
+          + boundary.end.encode + boundary.unexplainedByStage.encode
+      && metric.encodedFrames! + boundary.start.rtp
+        === metric.sentFrames! + metric.transportUnavailableSkips! + metric.sendFailures!
+          + boundary.end.rtp + boundary.unexplainedByStage.rtp
+      && metric.sentFrames! + boundary.start.receive
+        === receivedFrames + transportDrops + boundary.end.receive
+          + boundary.unexplainedByStage.receive
+      && receivedFrames + boundary.start.decode
+        === decodedFrames + decodeDrops + boundary.end.decode
+          + boundary.unexplainedByStage.decode
+      && decodedFrames + boundary.start.paint
+        === displayedFrames + paintDrops + boundary.end.paint
+          + boundary.unexplainedByStage.paint
+      && metric.unexplainedDrops === stages.reduce(
+        (sum, stage) => sum + boundary.unexplainedByStage[stage],
+        0,
+      );
     return typeof metric.surfaceId === "string"
       && metric.finalWebClient === true
       && isNonLoopbackLanEndpoint(metric.lanEndpoint)
       && typeof metric.durationMs === "number"
       && Number.isFinite(metric.durationMs)
       && metric.durationMs > 0
-      && Array.isArray(metric.sequences)
-      && metric.sequences.length === metric.receivedFrames
-      && metric.sequences.every((sequence, index) =>
-        Number.isSafeInteger(sequence) && sequence > 0 && (index === 0 || sequence > metric.sequences![index - 1]!)
+      && Array.isArray(metric.renderingSequences)
+      && metric.renderingSequences.length === metric.displayedFrames
+      && metric.renderingSequences.every((sequence, index) =>
+        Number.isSafeInteger(sequence)
+        && sequence > 0
+        && (index === 0 || sequence > metric.renderingSequences![index - 1]!)
       )
-      && metric.transportSequenceGaps! >= metric.sequences.slice(1).reduce((gaps, sequence, index) =>
-        gaps + Math.max(0, sequence - metric.sequences![index]! - 1), 0)
       && wholeNumbers.every((number) => Number.isSafeInteger(number) && number! >= 0)
-      && metric.sourceFrames! >= metric.encodedFrames!
-      && metric.encodedFrames! >= metric.sentFrames!
-      && metric.sentFrames! >= metric.receivedFrames!
-      && metric.receivedFrames! >= metric.decodedFrames!
-      && metric.decodedFrames! >= metric.displayedFrames!
-      && metric.decodeDrops === metric.receivedFrames! - metric.decodedFrames!
-      && metric.paintDrops === metric.decodedFrames! - metric.displayedFrames!
+      && balanced
       && typeof metric.sourceFps === "number"
-      && Number.isFinite(metric.sourceFps)
+      && metric.sourceFps >= targetFps
       && typeof metric.encodedFps === "number"
       && metric.encodedFps >= targetFps
       && typeof metric.sentFps === "number"
-      && Number.isFinite(metric.sentFps)
+      && metric.sentFps >= targetFps
       && typeof metric.receivedFps === "number"
-      && Number.isFinite(metric.receivedFps)
+      && metric.receivedFps >= targetFps
       && typeof metric.decodedFps === "number"
-      && Number.isFinite(metric.decodedFps)
+      && metric.decodedFps >= targetFps
       && typeof metric.displayedFps === "number"
       && metric.displayedFps >= targetFps
-      && metric.unexplainedDrops === calculatedUnexplainedDrops
+      && Number.isSafeInteger(metric.encodedBytes)
+      && metric.encodedBytes! > 0
+      && typeof metric.encodedBitrateBps === "number"
+      && Number.isFinite(metric.encodedBitrateBps)
+      && metric.encodedBitrateBps > 0
+      && validStageLatency(metric.captureLatencyMs)
+      && validStageLatency(metric.encodeLatencyMs)
       && metric.unexplainedDrops === 0
       && shortfall !== undefined
-      && Object.values(shortfall).every((number) => Number.isSafeInteger(number) && number >= 0)
+      && Object.values(shortfall).every((number) => number === 0)
       && shortfall.source === Math.max(0, targetFrames - metric.sourceFrames!)
       && shortfall.encoded === Math.max(0, targetFrames - metric.encodedFrames!)
       && shortfall.sent === Math.max(0, targetFrames - metric.sentFrames!)
       && shortfall.received === Math.max(0, targetFrames - metric.receivedFrames!)
       && shortfall.decoded === Math.max(0, targetFrames - metric.decodedFrames!)
-      && shortfall.displayed === Math.max(0, targetFrames - metric.displayedFrames!)
-      && shortfall.encoded === 0
-      && shortfall.displayed === 0;
+      && shortfall.displayed === Math.max(0, targetFrames - metric.displayedFrames!);
   });
 }
 
@@ -206,6 +290,21 @@ function validProvisionDestroy(value: unknown, minimumCycles: number): boolean {
     return true;
   });
 }
+function validPeerRecovery(value: unknown, expectedSuccesses: number): boolean {
+  if (value === null || typeof value !== "object") return false;
+  const record = value as Record<string, unknown>;
+  return record.maxAttemptsPerConnection === 3
+    && Number.isSafeInteger(record.attempts)
+    && (record.attempts as number) >= expectedSuccesses
+    && (record.attempts as number) <= expectedSuccesses * 3
+    && Number.isSafeInteger(record.failures)
+    && record.failures === (record.attempts as number) - expectedSuccesses
+    && record.successfulFreshFrames === expectedSuccesses
+    && Array.isArray(record.failureDetails)
+    && record.failureDetails.length === record.failures
+    && record.failureDetails.every((detail: unknown) => typeof detail === "string" && detail.length > 0);
+}
+
 
 /**
  * Rejects any requested load row that did not finish the non-performance
@@ -224,6 +323,11 @@ export function requireCompletedOperationalRows(rows: readonly CapacityRowForGat
       : [];
     const crashes = Array.isArray(row.crashes) ? row.crashes : [];
     const cleanup = row.cleanup;
+    const encoding = row.encodingLifecycle;
+    const resources = row.activeResources;
+    const aggregate = row.aggregateMetrics;
+    const reconnectRecovery = row.reconnectRecovery;
+    const nativePeerRecovery = row.nativePeerRecovery;
     const complete = Number.isSafeInteger(count)
       && (count as number) > 0
       && row.error === undefined
@@ -241,10 +345,62 @@ export function requireCompletedOperationalRows(rows: readonly CapacityRowForGat
       && row.simultaneousAgentAndWebInputCompleted === true
       && row.takeoverCompleted === true
       && row.reconnects === (count as number) * 2
-      && crashes.length === Math.min(2, count as number)
+      && reconnectRecovery !== null
+      && typeof reconnectRecovery === "object"
+      && "maxAttemptsPerConnection" in reconnectRecovery
+      && reconnectRecovery.maxAttemptsPerConnection === 3
+      && "attempts" in reconnectRecovery
+      && Number.isSafeInteger(reconnectRecovery.attempts)
+      && (reconnectRecovery.attempts as number) >= (count as number) * 2
+      && (reconnectRecovery.attempts as number) <= (count as number) * 2 * 3
+      && "failures" in reconnectRecovery
+      && Number.isSafeInteger(reconnectRecovery.failures)
+      && reconnectRecovery.failures === (reconnectRecovery.attempts as number) - (count as number) * 2
+      && "successfulFreshFrames" in reconnectRecovery
+      && reconnectRecovery.successfulFreshFrames === (count as number) * 2
+      && "failureDetails" in reconnectRecovery
+      && Array.isArray(reconnectRecovery.failureDetails)
+      && reconnectRecovery.failureDetails.length === reconnectRecovery.failures
+      && validPeerRecovery(nativePeerRecovery, (count as number) * 3 + 2)
+      && crashes.length === 4
+      && new Set(crashes.flatMap((crash: unknown) =>
+        crash !== null && typeof crash === "object" && "role" in crash && typeof crash.role === "string"
+          ? [crash.role]
+          : []
+      )).size === 4
       && crashes.every((crash: unknown) =>
-        crash !== null && typeof crash === "object" && "isolated" in crash && crash.isolated === true
+        crash !== null
+        && typeof crash === "object"
+        && "isolated" in crash
+        && crash.isolated === true
+        && (!("role" in crash) || (crash.role !== "capture-helper" && crash.role !== "encoder")
+          || ("snapshotFallback" in crash && crash.snapshotFallback === true))
       )
+      && encoding !== null
+      && typeof encoding === "object"
+      && "unopenedNoRuntime" in encoding
+      && encoding.unopenedNoRuntime === true
+      && "idleEncoderProcessesObserved" in encoding
+      && encoding.idleEncoderProcessesObserved === 0
+      && "staticPreviewEncoderProcessesObserved" in encoding
+      && encoding.staticPreviewEncoderProcessesObserved === 0
+      && "expandedEncoderProcessesObserved" in encoding
+      && encoding.expandedEncoderProcessesObserved === count
+      && "postExpandedEncoderProcessesObserved" in encoding
+      && encoding.postExpandedEncoderProcessesObserved === 0
+      && resources !== null
+      && typeof resources === "object"
+      && "screens" in resources
+      && Array.isArray(resources.screens)
+      && resources.screens.length === count
+      && "total" in resources
+      && resources.total !== null
+      && typeof resources.total === "object"
+      && aggregate !== null
+      && typeof aggregate === "object"
+      && "encodedBytes" in aggregate
+      && typeof aggregate.encodedBytes === "number"
+      && aggregate.encodedBytes > 0
       && validProvisionDestroy(row.repeatedProvisionDestroy, 2)
       && cleanup !== null
       && typeof cleanup === "object"
@@ -316,7 +472,7 @@ export function requireApprovedDefaultRow(
     throw new Error("release gate default-capacity row does not match the approved measurement profile");
   }
   if (!validBrowserFrames(row.frames, configuredDefault, approval.targetFps)) {
-    throw new Error("release gate requires production encoded and browser-displayed FPS, sequence/drop accounting, and no unexplained drops");
+    throw new Error("release gate requires production all-stage FPS, browser paint/readback, drop accounting, and no unexplained drops");
   }
   if (!validProvisionDestroy(row.repeatedProvisionDestroy, approval.lifecycleProof.cyclesPerRow)) {
     throw new Error("release gate requires repeated permanent deletion and fresh Bot/Surface provisioning");
@@ -324,8 +480,23 @@ export function requireApprovedDefaultRow(
   if (!validPaintLatency(row.inputToVisibleMs, approval.inputToVisibleP50LimitMs)) {
     throw new Error("release gate requires browser-painted input-to-visible latency samples");
   }
-  if (!validPaintLatency(row.captureToBrowserMs, Number.POSITIVE_INFINITY)) {
-    throw new Error("release gate requires capture-to-browser paint latency samples");
+  if (row.inputToVisibleMs.p95 > approval.observedInputToVisibleP95Ms) {
+    throw new Error("release gate input-to-visible p95 regressed beyond the approved envelope");
+  }
+  const admission = row.admission;
+  if (
+    admission === null
+    || typeof admission !== "object"
+    || !("capacity" in admission)
+    || admission.capacity !== configuredDefault
+    || !("noPartialRuntime" in admission)
+    || admission.noPartialRuntime !== true
+    || !("activeUnaffected" in admission)
+    || admission.activeUnaffected !== true
+    || !("activeEnvelopeMaintained" in admission)
+    || admission.activeEnvelopeMaintained !== true
+  ) {
+    throw new Error("release gate requires deterministic pre-provision capacity rejection with admitted Screens in envelope");
   }
   return row;
 }

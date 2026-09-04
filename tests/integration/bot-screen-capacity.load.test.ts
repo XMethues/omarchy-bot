@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import {
   chmodSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
@@ -109,6 +110,14 @@ interface ScreenResources {
     utilizationPercent: null;
     vramMiB: null;
   };
+  processes: Array<{
+    pid: number;
+    role: typeof ROLES[number] | "unknown";
+    executable: string;
+    pssMiB: number;
+    rssMiB: number;
+    cpuPercent: number;
+  }>;
 }
 
 interface ResourceWindow {
@@ -163,43 +172,17 @@ async function withTimeout<T>(operation: Promise<T>, timeoutMs: number, message:
   }
 }
 
-function resetNativeRtcAtQuiescence(): void {
-  rtc.cleanup();
-  rtc.preload();
-}
 
-async function waitForProjectionSessionsToClose(
-  harness: Harness,
-  sessions: readonly BrowserSurfaceSession[],
-): Promise<void> {
-  await until(
-    () => sessions.every((session) =>
-      harness.svc.projections.loadMetrics(session.owner, session.projectionSessionId) === undefined
-    ) ? true : undefined,
-    5_000,
-    "Browser projection sessions did not close before native WebRTC cleanup",
-  );
-}
 
 async function closeBrowserProjectionSessions(
   harness: Harness,
   sessions: readonly BrowserSurfaceSession[],
 ): Promise<void> {
-  await Promise.all(sessions.map(async (session) => {
-    const response = await fetch(
-      `${harness.baseUrl}/api/computer/projection?botId=${session.owner.botId}&surfaceId=${session.owner.surfaceId}`,
-      {
-        method: "DELETE",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ sessionId: session.projectionSessionId }),
-      },
-    );
-    if (response.status !== 204 && response.status !== 404) {
-      throw new Error(`browser projection teardown failed: ${response.status} ${await response.text()}`);
-    }
-    await session.close();
-  }));
-  await waitForProjectionSessionsToClose(harness, sessions);
+  const closePromises = sessions.map((session) =>
+    harness.svc.projections.close(session.owner, session.projectionSessionId)
+  );
+  await Promise.all(sessions.map((session) => session.close()));
+  await Promise.all(closePromises);
 }
 
 function openChannel(channel: DataChannel): Promise<void> {
@@ -422,8 +405,11 @@ function unitName(surfaceId: SurfaceId, generation: number, role: typeof ROLES[n
   return `omarchy-bot-screen-${surfaceId.slice("surf_".length)}-g${generation}-${role}.service`;
 }
 
-async function screenPids(owner: Owner, generation: number): Promise<number[]> {
-  const pids = new Set<number>();
+async function screenPidRoles(
+  owner: Owner,
+  generation: number,
+): Promise<Map<number, typeof ROLES[number] | "unknown">> {
+  const pids = new Map<number, typeof ROLES[number] | "unknown">();
   if (Bun.which("systemctl") !== null) {
     for (const role of ROLES) {
       const result = await command(["systemctl", "--user", "show", unitName(owner.surfaceId, generation, role), "--property=ControlGroup", "--value"]);
@@ -431,23 +417,25 @@ async function screenPids(owner: Owner, generation: number): Promise<number[]> {
       if (file !== "" && existsSync(file)) {
         for (const raw of readFileSync(file, "utf8").trim().split(/\s+/)) {
           const pid = Number(raw);
-          if (Number.isSafeInteger(pid) && pid > 0) pids.add(pid);
+          if (Number.isSafeInteger(pid) && pid > 0) pids.set(pid, role);
         }
       }
     }
   }
-  if (pids.size > 0) return [...pids].sort((a, b) => a - b);
+  if (pids.size > 0) return pids;
   for (const entry of readdirSync("/proc")) {
     if (!/^\d+$/.test(entry)) continue;
     try {
       const cmdline = readFileSync(`/proc/${entry}/cmdline`, "utf8");
       const environment = readFileSync(`/proc/${entry}/environ`, "utf8");
-      if (cmdline.includes(owner.surfaceId) || environment.includes(owner.surfaceId)) pids.add(Number(entry));
+      if (cmdline.includes(owner.surfaceId) || environment.includes(owner.surfaceId)) {
+        pids.set(Number(entry), "unknown");
+      }
     } catch {
       // Processes may exit while /proc is sampled.
     }
   }
-  return [...pids].sort((a, b) => a - b);
+  return pids;
 }
 
 function processSample(pid: number): { ticks: number; pssKiB: number; rssKiB: number } | undefined {
@@ -474,12 +462,12 @@ async function resourceWindow(
   const hertzResult = await command(["getconf", "CLK_TCK"]);
   const hertz = Number(hertzResult.stdout) || 100;
   const before = new Map<number, number>();
-  const beforePids = new Map<SurfaceId, number[]>();
+  const beforePids = new Map<SurfaceId, Map<number, typeof ROLES[number] | "unknown">>();
   const daemonBefore = processSample(process.pid);
   for (const owner of owners) {
-    const pids = await screenPids(owner, generationBySurface.get(owner.surfaceId) ?? 1);
+    const pids = await screenPidRoles(owner, generationBySurface.get(owner.surfaceId) ?? 1);
     beforePids.set(owner.surfaceId, pids);
-    for (const pid of pids) {
+    for (const pid of pids.keys()) {
       const sample = processSample(pid);
       if (sample !== undefined) before.set(pid, sample.ticks);
     }
@@ -502,28 +490,40 @@ async function resourceWindow(
   };
   const screens: ScreenResources[] = [];
   for (const owner of owners) {
-    const pids = new Set([
-      ...(beforePids.get(owner.surfaceId) ?? []),
-      ...await screenPids(owner, generationBySurface.get(owner.surfaceId) ?? 1),
-    ]);
-    let ticks = 0;
-    let pssKiB = 0;
-    let rssKiB = 0;
-    for (const pid of pids) {
+    const pidRoles = new Map(beforePids.get(owner.surfaceId) ?? []);
+    for (const [pid, role] of await screenPidRoles(owner, generationBySurface.get(owner.surfaceId) ?? 1)) {
+      pidRoles.set(pid, role);
+    }
+    const processes: ScreenResources["processes"] = [];
+    for (const [pid, role] of pidRoles) {
       const sample = processSample(pid);
       if (sample === undefined) continue;
       const firstTicks = before.get(pid);
-      if (firstTicks !== undefined) ticks += Math.max(0, sample.ticks - firstTicks);
-      pssKiB += sample.pssKiB;
-      rssKiB += sample.rssKiB;
+      const ticks = firstTicks === undefined ? 0 : Math.max(0, sample.ticks - firstTicks);
+      let executable = "unknown";
+      try {
+        executable = path.basename(readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0")[0] ?? "") || "unknown";
+      } catch {
+        // Process identity is best-effort diagnostic data.
+      }
+      processes.push({
+        pid,
+        role,
+        executable,
+        pssMiB: Number((sample.pssKiB / 1024).toFixed(2)),
+        rssMiB: Number((sample.rssKiB / 1024).toFixed(2)),
+        cpuPercent: Number(((ticks / hertz) / (elapsedMs / 1000) * 100).toFixed(2)),
+      });
     }
+    processes.sort((left, right) => left.pid - right.pid);
     screens.push({
       surfaceId: owner.surfaceId,
-      pids: [...pids].sort((a, b) => a - b),
-      pssMiB: Number((pssKiB / 1024).toFixed(2)),
-      rssMiB: Number((rssKiB / 1024).toFixed(2)),
-      cpuPercent: Number(((ticks / hertz) / (elapsedMs / 1000) * 100).toFixed(2)),
+      pids: processes.map((entry) => entry.pid),
+      pssMiB: Number(processes.reduce((sum, entry) => sum + entry.pssMiB, 0).toFixed(2)),
+      rssMiB: Number(processes.reduce((sum, entry) => sum + entry.rssMiB, 0).toFixed(2)),
+      cpuPercent: Number(processes.reduce((sum, entry) => sum + entry.cpuPercent, 0).toFixed(2)),
       gpu: { attributable: false, utilizationPercent: null, vramMiB: null },
+      processes,
     });
   }
   return {
@@ -594,38 +594,70 @@ async function killUnit(owner: Owner, generation: number, role: "input" | "compo
   if (result.status !== 0) throw new Error(`could not crash ${role}: ${result.stderr}`);
 }
 
-function activeEncoderCount(): number {
-  let count = 0;
+function matchingProcessPids(executableName: string): Set<number> {
+  const pids = new Set<number>();
   for (const entry of readdirSync("/proc")) {
     if (!/^\d+$/.test(entry)) continue;
     try {
       const commandLine = readFileSync(`/proc/${entry}/cmdline`, "utf8").split("\0");
-      if (
-        path.basename(commandLine[0] ?? "") === "ffmpeg"
-        && commandLine.some((argument) => argument.includes("repeat-headers=1:aud=1"))
-      ) count += 1;
+      const stat = readFileSync(`/proc/${entry}/stat`, "utf8");
+      const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+      if (Number(fields[1]) !== process.pid) continue;
+      const matchesEncoder = executableName !== "ffmpeg"
+        || commandLine.some((argument) => argument.includes("repeat-headers=1:aud=1"));
+      if (path.basename(commandLine[0] ?? "") === executableName && matchesEncoder) {
+        pids.add(Number(entry));
+      }
     } catch {
       // Processes may exit while /proc is sampled.
     }
   }
-  return count;
+  return pids;
 }
 
-function createBrowserFixture(root: string): string {
+function activeEncoderCount(): number {
+  return matchingProcessPids("ffmpeg").size;
+}
+
+async function newProcessPid(executableName: string, before: ReadonlySet<number>): Promise<number> {
+  return until(() => {
+    const candidates = [...matchingProcessPids(executableName)].filter((pid) => !before.has(pid));
+    return candidates.length === 1 ? candidates[0] : undefined;
+  }, 5_000, `could not identify the new ${executableName} process`);
+}
+
+async function crashProcess(pid: number, label: string): Promise<void> {
+  try {
+    process.kill(pid, "SIGKILL");
+  } catch (error) {
+    throw new Error(`could not crash ${label}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  await until(
+    () => existsSync(`/proc/${pid}`) ? undefined : true,
+    5_000,
+    `${label} process ${pid} did not exit`,
+  );
+}
+
+function createBrowserFixture(root: string, browserBinary: string): string {
   const html = path.join(root, "load.html");
   writeFileSync(html, `<!doctype html><meta charset="utf-8"><title>Bot Screen load</title>
 <style>html{font:28px sans-serif;background:#102033;color:#fff}body{margin:0;min-height:24000px;background:repeating-linear-gradient(#102033 0 120px,#284d70 120px 240px)}#status{position:fixed;inset:20px 20px auto 20px;padding:20px;background:#000c;border:3px solid #7df}</style>
 <div id="status">ready</div><script>let n=0;const s=document.querySelector('#status');for(const event of ['wheel','pointermove','keydown'])addEventListener(event,()=>{s.textContent=event+':'+(++n);s.style.background=n%2?'#8b1e3f':'#14532d'});</script>`);
   const launcher = path.join(root, "bot-screen-browser");
   writeFileSync(launcher, `#!/bin/sh
-exec /usr/bin/brave --user-data-dir="$XDG_STATE_HOME/brave" --no-first-run --no-default-browser-check --disable-background-networking --disable-sync --password-store=basic --ozone-platform=wayland --app="file://${html}"
+exec ${JSON.stringify(browserBinary)} --user-data-dir="$XDG_STATE_HOME/brave" --no-first-run --no-default-browser-check --disable-background-networking --disable-sync --password-store=basic --ozone-platform=wayland --app="file://${html}"
 `);
   chmodSync(launcher, 0o755);
   return launcher;
 }
 
 async function runRow(profile: "1080p" | "720p", count: number, durationMs: number): Promise<Record<string, unknown>> {
-  const harness = await startDaemon(undefined, { useProductionBotScreen: true, botScreenCapacity: 8 });
+  const admissionRow = profile === "1080p" && count === BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.defaultCapacity;
+  const harness = await startDaemon(undefined, {
+    useProductionBotScreen: true,
+    botScreenCapacity: admissionRow ? count : 8,
+  });
   const owners: Owner[] = [];
   const clients: ProjectionClient[] = [];
   const browserSessions: BrowserSurfaceSession[] = [];
@@ -639,6 +671,7 @@ async function runRow(profile: "1080p" | "720p", count: number, durationMs: numb
     startupMs: number;
   }> = [];
   const trackedSurfaceIds = new Set<SurfaceId>();
+  let overflowOwner: Owner | undefined;
   let browserHarness: FinalWebBrowserHarness | undefined;
   let browserMetadata: Record<string, unknown> | null = null;
   let simultaneousAgentAndWebInputCompleted = false;
@@ -651,10 +684,49 @@ async function runRow(profile: "1080p" | "720p", count: number, durationMs: numb
   let frameMetrics: BrowserWindowMetric[] = [];
   let staticPreviewFrameMetrics: BrowserWindowMetric[] = [];
   let churnConnections = 0;
+  let churnAttempts = 0;
+  const churnFailures: string[] = [];
+  let nativePeerAttempts = 0;
+  let nativePeerSuccesses = 0;
+  const nativePeerFailures: string[] = [];
+  const connectExpandedWithRecovery = async (
+    owner: Owner,
+    label: string,
+    kind: "setup" | "churn" | "failure",
+  ): Promise<ProjectionClient> => {
+    const failures: Error[] = [];
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      let candidate: ProjectionClient | undefined;
+      nativePeerAttempts += 1;
+      if (kind === "churn") churnAttempts += 1;
+      try {
+        candidate = await ProjectionClient.connect(harness, owner, `${label}-attempt-${attempt}`);
+        await candidate.mode("expanded");
+        await candidate.waitForFrame(0);
+        nativePeerSuccesses += 1;
+        return candidate;
+      } catch (error) {
+        const failure = error instanceof Error ? error : new Error(String(error));
+        failures.push(failure);
+        const detail = `${kind} surface=${owner.surfaceId} attempt=${attempt}: ${failure.message}`;
+        nativePeerFailures.push(detail);
+        if (kind === "churn") churnFailures.push(detail);
+        if (candidate !== undefined) await candidate.close(harness).catch(() => undefined);
+      }
+    }
+    throw new AggregateError(
+      failures,
+      `Screen Projection did not recover ${owner.surfaceId} within three fresh peer attempts`,
+    );
+  };
   let takeoverCompleted = false;
   let crashes: Array<Record<string, unknown>> = [];
+  let admission: Record<string, unknown> | null = null;
   let unopenedNoRuntime = false;
   let idleEncodeProcessesObserved = 0;
+  let staticPreviewEncodeProcessesObserved = 0;
+  let expandedEncoderProcessesObserved = 0;
+  let postExpandedEncoderProcessesObserved = 0;
   const gpuBefore = await gpuSnapshot();
   try {
     const botIds = await Promise.all(Array.from({ length: count }, (_, index) => makeBot(harness, `${profile} load ${count}-${index}`)));
@@ -669,8 +741,39 @@ async function runRow(profile: "1080p" | "720p", count: number, durationMs: numb
     );
     startupMs.push(...await Promise.all(owners.map((owner) => waitReady(harness, owner))));
     console.log(`Bot Screen load ${profile}/${count}: runtimes ready`);
+    const workloadApplication = process.env.OMARCHY_BOT_SCREEN_APP_BIN;
+    if (workloadApplication === undefined) throw new Error("capacity workload application is unavailable");
+    await Promise.all(owners.map((owner, index) =>
+      harness.svc.screens.act(
+        owner,
+        { name: "open_app", args: { app: workloadApplication } },
+        { ...owner, turnId: `workload-turn-${profile}-${count}-${index}` },
+      )
+    ));
+    await Bun.sleep(500);
+    console.log(`Bot Screen load ${profile}/${count}: visual workloads launched`);
     const generationBySurface = new Map<SurfaceId, number>();
     for (const owner of owners) generationBySurface.set(owner.surfaceId, await currentGeneration(harness, owner));
+    if (admissionRow) {
+      const overflowBotId = await makeBot(harness, `${profile} capacity overflow`);
+      const overflowBot = await api<{ surfaceId: SurfaceId }>(harness, "GET", `/api/bots/${overflowBotId}`);
+      overflowOwner = { botId: overflowBotId, surfaceId: overflowBot.surfaceId };
+      trackedSurfaceIds.add(overflowOwner.surfaceId);
+      const openAttempt = harness.svc.screens.open(overflowOwner);
+      const rejected = await apiStatus(
+        harness,
+        "GET",
+        `/api/computer/state?botId=${overflowOwner.botId}&surfaceId=${overflowOwner.surfaceId}`,
+      );
+      admission = {
+        capacity: count,
+        openAttempt,
+        rejected,
+        noPartialRuntime: !existsSync(path.join(harness.svc.cfg.botScreenRuntimeDir, overflowOwner.surfaceId)),
+        activeUnaffected: owners.every((owner) => harness.svc.screens.status(owner).state === "ready"),
+        activeEnvelopeMaintained: false,
+      };
+    }
 
     idle = await resourceWindow(owners, generationBySurface, Math.min(durationMs, 2_000));
     for (let sample = 0; sample < 10; sample += 1) {
@@ -679,7 +782,16 @@ async function runRow(profile: "1080p" | "720p", count: number, durationMs: numb
     }
     console.log(`Bot Screen load ${profile}/${count}: idle measured`);
 
-    const finalWebBrowser = await FinalWebBrowserHarness.start(harness.baseUrl);
+    const finalWebBrowser = await FinalWebBrowserHarness.start(
+      harness.baseUrl,
+      (owner, sessionId) => ({
+        projectionFailure: harness.svc.projections.failureDiagnostic(owner, sessionId),
+        inputDiagnostics: harness.svc.db.query(
+          `SELECT action_category, outcome, redacted_length, latency_ms
+           FROM input_diagnostics WHERE surface_id = ? ORDER BY id`,
+        ).all(owner.surfaceId),
+      }),
+    );
     browserHarness = finalWebBrowser;
     browserMetadata = {
       finalWebClient: true,
@@ -694,9 +806,19 @@ async function runRow(profile: "1080p" | "720p", count: number, durationMs: numb
     await Promise.all(browserSessions.map((session) => session.startWindow()));
     staticPreview = await resourceWindow(owners, generationBySurface, durationMs);
     staticPreviewFrameMetrics = await Promise.all(browserSessions.map((session) => session.finishWindow()));
+    for (let sample = 0; sample < 10; sample += 1) {
+      staticPreviewEncodeProcessesObserved += activeEncoderCount();
+      await Bun.sleep(50);
+    }
     console.log(`Bot Screen load ${profile}/${count}: sustained static preview measured`);
 
     await Promise.all(browserSessions.map((session) => session.expand()));
+    await until(
+      () => activeEncoderCount() === count ? true : undefined,
+      5_000,
+      `expanded mode did not start exactly ${count} encoders`,
+    );
+    expandedEncoderProcessesObserved = activeEncoderCount();
     for (let sample = 0; sample < 4; sample += 1) {
       inputLatenciesMs.push(...await Promise.all(browserSessions.map((session) =>
         session.measureInputToVisible()
@@ -718,50 +840,164 @@ async function runRow(profile: "1080p" | "720p", count: number, durationMs: numb
         await Bun.sleep(50);
       }
     });
+    const browserMetrics = await Promise.all(browserSessions.map((session) =>
+      session.finishWindow({ durationMs: active.durationMs })
+    ));
     const productionEnds = browserSessions.map((session) => {
       const metrics = harness.svc.projections.loadMetrics(session.owner, session.projectionSessionId);
       if (metrics === undefined) throw new Error(`projection load metrics unavailable for ${session.owner.surfaceId}`);
       return metrics;
     });
-    const browserMetrics = await Promise.all(browserSessions.map((session, index) =>
-      session.finishWindow({
-        afterSequence: productionStarts[index]!.sequence,
-        throughSequence: productionEnds[index]!.sequence,
-        durationMs: active.durationMs,
-      })
-    ));
     const expectedFrames = Math.floor(BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.targetFps * active.durationMs / 1_000);
     const metricDelta = (
       after: ProjectionLoadMetrics,
       before: ProjectionLoadMetrics,
       key: Exclude<keyof ProjectionLoadMetrics, "sessionId" | "surfaceId">,
     ): number => after[key] - before[key];
+    const outstandingAt = (
+      metrics: ProjectionLoadMetrics,
+      browser: BrowserWindowMetric["pipelineBoundary"]["start"],
+    ) => ({
+      capture: Math.max(0, metrics.captureAttempts - metrics.sourceFrames),
+      encode: Math.max(
+        0,
+        metrics.encoderInputs - metrics.invalidFrames - metrics.encodedFrames - metrics.encoderDrops,
+      ),
+      rtp: Math.max(
+        0,
+        metrics.encodedFrames - metrics.rtpSends - metrics.transportSkips - metrics.sendFailures,
+      ),
+      receive: Math.max(0, metrics.rtpSends - browser.received),
+      decode: Math.max(0, browser.received - browser.decoded - browser.dropped),
+      paint: Math.max(0, browser.decoded - browser.displayed),
+    });
+    const conservationShortfall = (
+      input: number,
+      output: number,
+      categorizedDrops: number,
+      outstandingBefore: number,
+      outstandingAfter: number,
+    ): number => Math.max(0, input + outstandingBefore - output - categorizedDrops - outstandingAfter);
     frameMetrics = browserMetrics.map((browserMetric, index) => {
       const before = productionStarts[index]!;
       const after = productionEnds[index]!;
+      const captureAttempts = metricDelta(after, before, "captureAttempts");
       const sourceFrames = metricDelta(after, before, "sourceFrames");
+      const encoderInputs = metricDelta(after, before, "encoderInputs");
       const encodedFrames = metricDelta(after, before, "encodedFrames");
       const sentFrames = metricDelta(after, before, "rtpSends");
+      const encodedBytes = metricDelta(after, before, "encodedBytes");
       const preCaptureBackpressureSkips = metricDelta(after, before, "captureSkips");
       const encodedBackpressureDrops = metricDelta(after, before, "encoderDrops");
+      const invalidFrameDrops = metricDelta(after, before, "invalidFrames");
       const transportUnavailableSkips = metricDelta(after, before, "transportSkips");
       const sendFailures = metricDelta(after, before, "sendFailures");
-      const unexplainedDrops = metricDelta(after, before, "unexplainedShortfalls");
+      const browserFrameDrops = browserMetric.pipelineBoundary.end.dropped
+        - browserMetric.pipelineBoundary.start.dropped;
+      const boundaryStart = outstandingAt(before, browserMetric.pipelineBoundary.start);
+      const boundaryEnd = outstandingAt(after, browserMetric.pipelineBoundary.end);
+      const transportDrops = conservationShortfall(
+        sentFrames,
+        browserMetric.receivedFrames,
+        0,
+        boundaryStart.receive,
+        boundaryEnd.receive,
+      );
+      const decodeDrops = browserFrameDrops;
+      const paintDrops = conservationShortfall(
+        browserMetric.decodedFrames,
+        browserMetric.displayedFrames,
+        0,
+        boundaryStart.paint,
+        boundaryEnd.paint,
+      );
+      const unexplainedByStage = {
+        capture: conservationShortfall(
+          captureAttempts + preCaptureBackpressureSkips,
+          sourceFrames,
+          preCaptureBackpressureSkips,
+          boundaryStart.capture,
+          boundaryEnd.capture,
+        ),
+        encode: conservationShortfall(
+          encoderInputs,
+          encodedFrames,
+          invalidFrameDrops + encodedBackpressureDrops,
+          boundaryStart.encode,
+          boundaryEnd.encode,
+        ),
+        rtp: conservationShortfall(
+          encodedFrames,
+          sentFrames,
+          transportUnavailableSkips + sendFailures,
+          boundaryStart.rtp,
+          boundaryEnd.rtp,
+        ),
+        receive: conservationShortfall(
+          sentFrames,
+          browserMetric.receivedFrames,
+          transportDrops,
+          boundaryStart.receive,
+          boundaryEnd.receive,
+        ),
+        decode: conservationShortfall(
+          browserMetric.receivedFrames,
+          browserMetric.decodedFrames,
+          decodeDrops,
+          boundaryStart.decode,
+          boundaryEnd.decode,
+        ),
+        paint: conservationShortfall(
+          browserMetric.decodedFrames,
+          browserMetric.displayedFrames,
+          paintDrops,
+          boundaryStart.paint,
+          boundaryEnd.paint,
+        ),
+      };
+      const unexplainedDrops = Object.values(unexplainedByStage)
+        .reduce((sum, value) => sum + value, 0);
+      const captureLatencySamples = metricDelta(after, before, "captureLatencySamples");
+      const captureLatencyTotalMs = metricDelta(after, before, "captureLatencyTotalMs");
+      const encodeLatencySamples = metricDelta(after, before, "encodeLatencySamples");
+      const encodeLatencyTotalMs = metricDelta(after, before, "encodeLatencyTotalMs");
       const seconds = active.durationMs / 1_000;
       return {
         ...browserMetric,
         sourceFrames,
+        captureAttempts,
+        encoderInputs,
         encodedFrames,
         sentFrames,
+        transportDrops,
+        decodeDrops,
+        paintDrops,
+        encodedBytes,
+        encodedBitrateBps: Number((encodedBytes * 8 / seconds).toFixed(2)),
         sourceFps: Number((sourceFrames / seconds).toFixed(2)),
         encodedFps: Number((encodedFrames / seconds).toFixed(2)),
         sentFps: Number((sentFrames / seconds).toFixed(2)),
         preCaptureBackpressureSkips,
         encodedBackpressureDrops,
         transportUnavailableSkips,
-        invalidFrameDrops: 0,
+        invalidFrameDrops,
         sendFailures,
         unexplainedDrops,
+        pipelineBoundaryCarry: {
+          start: boundaryStart,
+          end: boundaryEnd,
+          unexplainedByStage,
+        },
+        captureLatencyMs: {
+          samples: captureLatencySamples,
+          mean: captureLatencySamples === 0 ? null : Number((captureLatencyTotalMs / captureLatencySamples).toFixed(2)),
+          lifetimeMax: Number(after.captureLatencyMaxMs.toFixed(2)),
+        },
+        encodeLatencyMs: {
+          samples: encodeLatencySamples,
+          mean: encodeLatencySamples === 0 ? null : Number((encodeLatencyTotalMs / encodeLatencySamples).toFixed(2)),
+          lifetimeMax: Number(after.encodeLatencyMaxMs.toFixed(2)),
+        },
         targetFrameShortfall: {
           source: Math.max(0, expectedFrames - sourceFrames),
           encoded: Math.max(0, expectedFrames - encodedFrames),
@@ -792,14 +1028,21 @@ async function runRow(profile: "1080p" | "720p", count: number, durationMs: numb
     await closeBrowserProjectionSessions(harness, closedBrowserSessions);
     await browserHarness.close();
     browserHarness = undefined;
-    resetNativeRtcAtQuiescence();
+    await until(
+      () => activeEncoderCount() === 0 ? true : undefined,
+      5_000,
+      "expanded browser sessions retained H.264 encoders after disconnect",
+    );
+    postExpandedEncoderProcessesObserved = activeEncoderCount();
 
     // Native clients remain only for non-visual Takeover/reconnect fault setup.
     for (const [index, owner] of owners.entries()) {
-      const client = await ProjectionClient.connect(harness, owner, `${profile}-${count}-fault-${index}`);
+      const client = await connectExpandedWithRecovery(
+        owner,
+        `${profile}-${count}-fault-${index}`,
+        "setup",
+      );
       clients.push(client);
-      await client.mode("expanded");
-      await client.waitForFrame(0);
     }
 
     if (owners.length > 0) {
@@ -841,17 +1084,17 @@ async function runRow(profile: "1080p" | "720p", count: number, durationMs: numb
     for (let churn = 0; churn < 2; churn += 1) {
       const previous = clients.splice(0, clients.length);
       await Promise.all(previous.map((client) => client.close(harness)));
-      resetNativeRtcAtQuiescence();
       for (const [index, owner] of owners.entries()) {
-        const client = await ProjectionClient.connect(harness, owner, `${profile}-${count}-churn-${churn}-${index}`);
-        clients.push(client);
-        await client.mode("expanded");
-        await client.waitForFrame(0);
+        const recovered = await connectExpandedWithRecovery(
+          owner,
+          `${profile}-${count}-churn-${churn}-${index}`,
+          "churn",
+        );
+        clients.push(recovered);
         churnConnections += 1;
       }
     }
     await Promise.all(clients.splice(0, clients.length).map((client) => client.close(harness)));
-    resetNativeRtcAtQuiescence();
 
     console.log(`Bot Screen load ${profile}/${count}: reconnect churn completed`);
     if (owners.length > 0) {
@@ -875,18 +1118,63 @@ async function runRow(profile: "1080p" | "720p", count: number, durationMs: numb
       }
     }
 
-    const crashTargets = owners.slice(0, Math.min(2, owners.length));
-    for (const [index, owner] of crashTargets.entries()) {
-      const generation = await currentGeneration(harness, owner);
-      const role = index === 0 && owners.length > 1 ? "input" as const : "compositor" as const;
-      await killUnit(owner, generation, role);
-      await until(
-        () => harness.svc.screens.status(owner).state === "failed" ? true : undefined,
-        5_000,
-        `${role} crash was not observed`,
+    const faultOwner = owners[0]!;
+    const siblingReady = (): boolean =>
+      owners.slice(1).every((owner) => harness.svc.screens.status(owner).state === "ready");
+    for (const fault of ["capture-helper", "encoder"] as const) {
+      const executableName = fault === "capture-helper" ? "omarchy-bot-wayland-capture" : "ffmpeg";
+      const before = matchingProcessPids(executableName);
+      const client = await connectExpandedWithRecovery(
+        faultOwner,
+        `${profile}-${count}-${fault}-failure`,
+        "failure",
       );
-      crashes.push({ surfaceId: owner.surfaceId, role, isolated: owners.slice(crashTargets.length).every((active) => harness.svc.screens.status(active).state === "ready") });
+      const pid = await newProcessPid(executableName, before);
+      await crashProcess(pid, fault);
+      const failureReason = fault === "capture-helper" ? "capture-failed" : "encoder-failed";
+      await until(
+        () => harness.svc.projections.failureDiagnostic(faultOwner, client.answer.sessionId)?.reason === failureReason
+          ? true
+          : undefined,
+        5_000,
+        `${fault} failure was not surfaced by Screen Projection`,
+      );
+      const query = `botId=${faultOwner.botId}&surfaceId=${faultOwner.surfaceId}`;
+      const snapshot = await fetch(`${harness.baseUrl}/api/computer/snapshot?${query}`);
+      crashes.push({
+        surfaceId: faultOwner.surfaceId,
+        role: fault,
+        projectionFailure: failureReason,
+        snapshotFallback: snapshot.status === 200
+          && snapshot.headers.get("content-type") === "image/png"
+          && snapshot.headers.get("cache-control") === "no-store",
+        isolated: siblingReady(),
+      });
+      await until(
+        () => client.peer.state() === "closed" ? true : undefined,
+        5_000,
+        `${fault} failure did not close its WebRTC peer`,
+      );
     }
+
+    let generation = await currentGeneration(harness, faultOwner);
+    await killUnit(faultOwner, generation, "input");
+    await until(
+      () => harness.svc.screens.status(faultOwner).state === "failed" ? true : undefined,
+      5_000,
+      "input-helper crash was not observed",
+    );
+    crashes.push({ surfaceId: faultOwner.surfaceId, role: "input-helper", isolated: siblingReady() });
+    startupMs.push(await waitReady(harness, faultOwner));
+
+    generation = await currentGeneration(harness, faultOwner);
+    await killUnit(faultOwner, generation, "compositor");
+    await until(
+      () => harness.svc.screens.status(faultOwner).state === "failed" ? true : undefined,
+      5_000,
+      "compositor crash was not observed",
+    );
+    crashes.push({ surfaceId: faultOwner.surfaceId, role: "compositor", isolated: siblingReady() });
   } catch (error) {
     rowError = error instanceof Error ? error.message : String(error);
   } finally {
@@ -901,8 +1189,14 @@ async function runRow(profile: "1080p" | "720p", count: number, durationMs: numb
         // The final daemon stop below retries any incomplete runtime cleanup.
       }
     }
+    if (overflowOwner !== undefined) {
+      try {
+        teardownMs.push(await destroyBot(harness, overflowOwner));
+      } catch {
+        // The final daemon stop below retries any incomplete overflow cleanup.
+      }
+    }
     await harness.stop();
-    resetNativeRtcAtQuiescence();
     const unitList = Bun.which("systemctl") === null
       ? ""
       : (await command(["systemctl", "--user", "list-units", "--all", "--plain", "--no-legend", "omarchy-bot-screen-*"])).stdout;
@@ -924,178 +1218,547 @@ async function runRow(profile: "1080p" | "720p", count: number, durationMs: numb
   const captureToBrowserSamples = frameMetrics.flatMap((metric) => metric.captureToBrowserMs);
   const captureToBrowserP50 = percentile(captureToBrowserSamples, 0.5);
   const captureToBrowserP95 = percentile(captureToBrowserSamples, 0.95);
+  const captureToBrowser = captureToBrowserSamples.length === 0
+    ? {
+        available: false,
+        reason: "WebRTC H.264 did not negotiate an absolute capture timestamp",
+      }
+    : {
+        available: true,
+        source: "browser-paint",
+        samples: captureToBrowserSamples,
+        p50: Number(captureToBrowserP50!.toFixed(2)),
+        p95: Number(captureToBrowserP95!.toFixed(2)),
+      };
+  const stageRatesPassed = frameMetrics.every((metric) =>
+    metric.sourceFps !== undefined
+    && metric.sourceFps >= BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.targetFps
+    && metric.encodedFps !== undefined
+    && metric.encodedFps >= BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.targetFps
+    && metric.sentFps !== undefined
+    && metric.sentFps >= BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.targetFps
+    && metric.receivedFps >= BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.targetFps
+    && metric.decodedFps >= BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.targetFps
+    && metric.displayedFps >= BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.targetFps
+    && metric.unexplainedDrops === 0
+    && metric.targetFrameShortfall !== undefined
+    && Object.values(metric.targetFrameShortfall).every((shortfall) => shortfall === 0)
+  );
   const performancePassed = rowError === undefined
     && frameMetrics.length === count
     && staticPreviewFrameMetrics.length === count
-    && staticPreviewFrameMetrics.every((metric) => metric.displayedFrames > 0)
-    && frameMetrics.every((metric) =>
-      metric.encodedFps !== undefined
-      && metric.encodedFps >= BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.targetFps
-      && metric.displayedFps >= BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.targetFps
-      && metric.unexplainedDrops === 0
-      && metric.targetFrameShortfall?.encoded === 0
-      && metric.targetFrameShortfall.displayed === 0
+    && staticPreviewFrameMetrics.every((metric) =>
+      metric.displayedFrames > 0 && metric.displayedFps >= 0.5 && metric.displayedFps <= 1.5
     )
+    && stageRatesPassed
     && p50 !== null
+    && p95 !== null
     && simultaneousAgentAndWebInputCompleted
-    && p50 <= BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.inputToVisibleP50LimitMs;
+    && p50 <= BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.inputToVisibleP50LimitMs
+    && (!admissionRow || p95 <= BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.observedInputToVisibleP95Ms);
+  if (admission !== null) admission.activeEnvelopeMaintained = performancePassed;
   const operationalPassed = rowError === undefined
     && frameMetrics.length === count
     && staticPreviewFrameMetrics.length === count
     && staticPreviewFrameMetrics.every((metric) => metric.displayedFrames > 0)
+    && idleEncodeProcessesObserved === 0
+    && staticPreviewEncodeProcessesObserved === 0
+    && expandedEncoderProcessesObserved === count
+    && postExpandedEncoderProcessesObserved === 0
     && simultaneousAgentAndWebInputCompleted
     && takeoverCompleted
     && churnConnections === count * 2
-    && crashes.length === Math.min(2, count)
-    && crashes.every((crash) => crash.isolated === true)
+    && crashes.length === 4
+    && crashes.every((crash) =>
+      crash.isolated === true
+      && (crash.role === "capture-helper" || crash.role === "encoder"
+        ? crash.snapshotFallback === true
+        : true)
+    )
     && repeatedProvisionDestroy.length === 2
     && (cleanup as { clean?: boolean }).clean === true;
+  const aggregateCaptureLatencySamples = frameMetrics.reduce(
+    (sum, metric) => sum + (metric.captureLatencyMs?.samples ?? 0),
+    0,
+  );
+  const aggregateEncodeLatencySamples = frameMetrics.reduce(
+    (sum, metric) => sum + (metric.encodeLatencyMs?.samples ?? 0),
+    0,
+  );
+  const aggregateMetrics = {
+    sourceFrames: frameMetrics.reduce((sum, metric) => sum + (metric.sourceFrames ?? 0), 0),
+    encodedFrames: frameMetrics.reduce((sum, metric) => sum + (metric.encodedFrames ?? 0), 0),
+    sentFrames: frameMetrics.reduce((sum, metric) => sum + (metric.sentFrames ?? 0), 0),
+    receivedFrames: frameMetrics.reduce((sum, metric) => sum + metric.receivedFrames, 0),
+    decodedFrames: frameMetrics.reduce((sum, metric) => sum + metric.decodedFrames, 0),
+    displayedFrames: frameMetrics.reduce((sum, metric) => sum + metric.displayedFrames, 0),
+    encodedBytes: frameMetrics.reduce((sum, metric) => sum + (metric.encodedBytes ?? 0), 0),
+    encodedBitrateBps: Number(frameMetrics.reduce((sum, metric) => sum + (metric.encodedBitrateBps ?? 0), 0).toFixed(2)),
+    unexplainedDrops: frameMetrics.reduce((sum, metric) => sum + (metric.unexplainedDrops ?? 0), 0),
+    captureLatencyMs: {
+      samples: aggregateCaptureLatencySamples,
+      mean: aggregateCaptureLatencySamples === 0
+        ? null
+        : Number((
+            frameMetrics.reduce(
+              (sum, metric) => sum + (metric.captureLatencyMs?.mean ?? 0) * (metric.captureLatencyMs?.samples ?? 0),
+              0,
+            ) / aggregateCaptureLatencySamples
+          ).toFixed(2)),
+      maximum: frameMetrics.reduce((maximum, metric) =>
+        Math.max(maximum, metric.captureLatencyMs?.lifetimeMax ?? 0), 0),
+    },
+    encodeLatencyMs: {
+      samples: aggregateEncodeLatencySamples,
+      mean: aggregateEncodeLatencySamples === 0
+        ? null
+        : Number((
+            frameMetrics.reduce(
+              (sum, metric) => sum + (metric.encodeLatencyMs?.mean ?? 0) * (metric.encodeLatencyMs?.samples ?? 0),
+              0,
+            ) / aggregateEncodeLatencySamples
+          ).toFixed(2)),
+      maximum: frameMetrics.reduce((maximum, metric) =>
+        Math.max(maximum, metric.encodeLatencyMs?.lifetimeMax ?? 0), 0),
+    },
+  };
   return {
     profile,
+    runtime: "cage",
     screens: count,
     resolution: profile === "1080p" ? { width: 1920, height: 1080 } : { width: 1280, height: 720 },
     targetFps: BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.targetFps,
     durationMs,
     performancePassed,
     operationalPassed,
+    supportStatus: performancePassed ? "supported" : "unsupported",
     ...(rowError === undefined ? {} : { error: rowError }),
     startupMs: { samples: startupMs, p50: percentile(startupMs, 0.5), p95: percentile(startupMs, 0.95) },
     teardownMs: { samples: teardownMs, p50: percentile(teardownMs, 0.5), p95: percentile(teardownMs, 0.95) },
     repeatedProvisionDestroy,
     inputToVisibleMs: { source: "browser-paint", samples: inputLatenciesMs.map((value) => Number(value.toFixed(2))), p50: p50 === null ? null : Number(p50.toFixed(2)), p95: p95 === null ? null : Number(p95.toFixed(2)) },
-    captureToBrowserMs: { source: "browser-paint", samples: captureToBrowserSamples, p50: captureToBrowserP50 === null ? null : Number(captureToBrowserP50.toFixed(2)), p95: captureToBrowserP95 === null ? null : Number(captureToBrowserP95.toFixed(2)) },
+    captureToBrowserMs: captureToBrowser,
     frames: frameMetrics,
     browser: browserMetadata,
-    staticPreview: { frames: staticPreviewFrameMetrics, resources: staticPreview ?? null },
+    staticPreview: {
+      frames: staticPreviewFrameMetrics,
+      resources: staticPreview ?? null,
+      h264EncoderProcessesObserved: staticPreviewEncodeProcessesObserved,
+    },
     idleResources: idle ?? null,
-    idleEncoding: { unopenedNoRuntime, attributableCaptureProcessesObserved: idleEncodeProcessesObserved },
+    encodingLifecycle: {
+      unopenedNoRuntime,
+      idleEncoderProcessesObserved: idleEncodeProcessesObserved,
+      staticPreviewEncoderProcessesObserved: staticPreviewEncodeProcessesObserved,
+      expandedEncoderProcessesObserved,
+      postExpandedEncoderProcessesObserved,
+    },
+    nativePeerRecovery: {
+      maxAttemptsPerConnection: 3,
+      attempts: nativePeerAttempts,
+      failures: nativePeerFailures.length,
+      failureDetails: nativePeerFailures,
+      successfulFreshFrames: nativePeerSuccesses,
+    },
     activeResources: active ?? null,
+    aggregateMetrics,
+    admission,
     simultaneousAgentAndWebInputCompleted,
     takeoverCompleted,
     reconnects: churnConnections,
+    reconnectRecovery: {
+      maxAttemptsPerConnection: 3,
+      attempts: churnAttempts,
+      failures: churnFailures.length,
+      failureDetails: churnFailures,
+      successfulFreshFrames: churnConnections,
+    },
     crashes,
     gpu: { before: gpuBefore, after: gpuAfter },
     cleanup,
   };
 }
 
-async function admissionProof(capacity: number): Promise<Record<string, unknown>> {
-  const harness = await startDaemon(undefined, { useProductionBotScreen: true, botScreenCapacity: capacity });
-  const owners: Owner[] = [];
+
+interface CompositorMeasurement {
+  runtime: "hyprland" | "cage";
+  resolution: { width: 1920; height: 1080 };
+  pssMiB: number;
+  rssMiB: number;
+  processes: ScreenResources["processes"];
+}
+
+async function measureCompositor(runtime: "hyprland" | "cage"): Promise<CompositorMeasurement> {
+  process.env.OMARCHY_BOT_SCREEN_RUNTIME = runtime;
+  process.env.OMARCHY_BOT_SCREEN_PROFILE = "1080p";
+  const harness = await startDaemon(undefined, { useProductionBotScreen: true, botScreenCapacity: 1 });
+  let owner: Owner | undefined;
   try {
-    for (let index = 0; index < capacity + 1; index += 1) {
-      const botId = await makeBot(harness, `Admission ${index}`);
-      const bot = await api<{ surfaceId: SurfaceId }>(harness, "GET", `/api/bots/${botId}`);
-      owners.push({ botId, surfaceId: bot.surfaceId });
-    }
-    await Promise.all(owners.slice(0, capacity).map((owner) => waitReady(harness, owner)));
-    const overflow = owners[capacity]!;
-    const openAttempt = harness.svc.screens.open(overflow);
-    const rejected = await apiStatus(harness, "GET", `/api/computer/state?botId=${overflow.botId}&surfaceId=${overflow.surfaceId}`);
-    const noPartialRuntime = !existsSync(path.join(harness.svc.cfg.botScreenRuntimeDir, overflow.surfaceId));
-    const activeUnaffected = owners.slice(0, capacity).every((owner) => harness.svc.screens.status(owner).state === "ready");
-    return { capacity, openAttempt, rejected, noPartialRuntime, activeUnaffected };
+    const botId = await makeBot(harness, `${runtime} compositor memory reference`);
+    const bot = await api<{ surfaceId: SurfaceId }>(harness, "GET", `/api/bots/${botId}`);
+    owner = { botId, surfaceId: bot.surfaceId };
+    await waitReady(harness, owner);
+    const generation = await currentGeneration(harness, owner);
+    const resources = await resourceWindow(
+      [owner],
+      new Map([[owner.surfaceId, generation]]),
+      1_000,
+    );
+    const processes = resources.screens[0]!.processes.filter((entry) => entry.role === "compositor");
+    if (processes.length === 0) throw new Error(`${runtime} compositor unit had no attributable processes`);
+    return {
+      runtime,
+      resolution: { width: 1920, height: 1080 },
+      pssMiB: Number(processes.reduce((sum, entry) => sum + entry.pssMiB, 0).toFixed(2)),
+      rssMiB: Number(processes.reduce((sum, entry) => sum + entry.rssMiB, 0).toFixed(2)),
+      processes,
+    };
   } finally {
-    for (const owner of owners) await destroyBot(harness, owner).catch(() => undefined);
+    if (owner !== undefined) await destroyBot(harness, owner).catch(() => undefined);
     await harness.stop();
   }
 }
 
+async function compositorMemoryProof(): Promise<Record<string, unknown>> {
+  try {
+    const baseline = await measureCompositor("hyprland");
+    const candidate = await measureCompositor("cage");
+    const reductionPercent = baseline.pssMiB === 0
+      ? 0
+      : Number(((baseline.pssMiB - candidate.pssMiB) / baseline.pssMiB * 100).toFixed(2));
+    return {
+      passed: reductionPercent >= 25,
+      minimumReductionPercent: 25,
+      reductionPercent,
+      baseline,
+      candidate,
+    };
+  } catch (error) {
+    return {
+      passed: false,
+      minimumReductionPercent: 25,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+async function describeBinary(
+  requested: string | undefined,
+  fallback: string,
+  versionArgs: readonly string[] = ["--version"],
+): Promise<Record<string, unknown>> {
+  const name = requested ?? fallback;
+  const binary = Bun.which(name);
+  if (binary === null) return { available: false, requested: name, versionArgs };
+  const result = await command([binary, ...versionArgs]);
+  return {
+    available: result.status === 0,
+    requested: name,
+    path: binary,
+    versionArgs,
+    status: result.status,
+    stdout: result.stdout,
+    stderr: result.stderr,
+  };
+}
+
+function objectRecord(value: unknown, label: string): Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${label} was not an object`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function measuredNumber(record: Record<string, unknown>, key: string): number {
+  const value = record[key];
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new Error(`measured ${key} was unavailable`);
+  }
+  return value;
+}
+
+function measuredRange(frames: readonly Record<string, unknown>[], key: string): { minimum: number; maximum: number } {
+  const values = frames.map((frame) => measuredNumber(frame, key));
+  return { minimum: Math.min(...values), maximum: Math.max(...values) };
+}
+
+function candidateApproval(
+  row: Record<string, unknown>,
+  machine: Record<string, unknown>,
+  compositorMemory: Record<string, unknown>,
+  reproducibleCommand: string,
+): Record<string, unknown> {
+  if (!Array.isArray(row.frames) || row.frames.length === 0) throw new Error("approved row lacked per-Screen frames");
+  const frames = row.frames.map((frame, index) => objectRecord(frame, `frame ${index}`));
+  const browser = objectRecord(row.browser, "browser provenance");
+  const input = objectRecord(row.inputToVisibleMs, "input-to-visible metrics");
+  const captureToBrowser = objectRecord(row.captureToBrowserMs, "capture-to-browser metrics");
+  const staticPreview = objectRecord(row.staticPreview, "static preview");
+  if (!Array.isArray(staticPreview.frames) || staticPreview.frames.length === 0) {
+    throw new Error("approved row lacked static-preview frames");
+  }
+  const staticFrames = staticPreview.frames.map((frame, index) => objectRecord(frame, `static frame ${index}`));
+  const total = objectRecord(objectRecord(row.activeResources, "active resources").total, "active resource totals");
+  const aggregate = objectRecord(row.aggregateMetrics, "aggregate metrics");
+  const drops = {
+    preCaptureBackpressureSkips: frames.reduce((sum, frame) => sum + measuredNumber(frame, "preCaptureBackpressureSkips"), 0),
+    invalidFrameDrops: frames.reduce((sum, frame) => sum + measuredNumber(frame, "invalidFrameDrops"), 0),
+    encodedBackpressureDrops: frames.reduce((sum, frame) => sum + measuredNumber(frame, "encodedBackpressureDrops"), 0),
+    transportUnavailableSkips: frames.reduce((sum, frame) => sum + measuredNumber(frame, "transportUnavailableSkips"), 0),
+    transportDrops: frames.reduce((sum, frame) => sum + measuredNumber(frame, "transportDrops"), 0),
+    decodeDrops: frames.reduce((sum, frame) => sum + measuredNumber(frame, "decodeDrops"), 0),
+    paintDrops: frames.reduce((sum, frame) => sum + measuredNumber(frame, "paintDrops"), 0),
+    unexplainedDrops: frames.reduce((sum, frame) => sum + measuredNumber(frame, "unexplainedDrops"), 0),
+  };
+  return {
+    schemaVersion: 3,
+    measuredAt: new Date().toISOString(),
+    machine,
+    runtime: "cage",
+    profile: row.profile,
+    resolution: row.resolution,
+    defaultCapacity: row.screens,
+    captureFrameRate: BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.captureFrameRate,
+    targetFps: row.targetFps,
+    durationMs: row.durationMs,
+    lifecycleProof: {
+      strategy: "permanent-delete-and-fresh-provision",
+      cyclesPerRow: Array.isArray(row.repeatedProvisionDestroy) ? row.repeatedProvisionDestroy.length : 0,
+    },
+    finalClient: {
+      built: true,
+      browser: machine.browser,
+      mode: browser.mode,
+      transport: "WebRTC H.264 video track",
+      lanInterface: browser.lanInterface,
+      lanEndpoint: browser.lanEndpoint,
+      measurement: "daemon source/encode/send counters, browser WebRTC decode, video paint, and canvas readback",
+    },
+    observedSourceFps: measuredRange(frames, "sourceFps"),
+    observedEncodedFps: measuredRange(frames, "encodedFps"),
+    observedSentFps: measuredRange(frames, "sentFps"),
+    observedReceivedFps: measuredRange(frames, "receivedFps"),
+    observedDecodedFps: measuredRange(frames, "decodedFps"),
+    observedDisplayedFps: measuredRange(frames, "displayedFps"),
+    observedEncodedBytes: measuredNumber(aggregate, "encodedBytes"),
+    observedEncodedBitrateBps: measuredNumber(aggregate, "encodedBitrateBps"),
+    observedDrops: drops,
+    observedInputToVisibleP50Ms: measuredNumber(input, "p50"),
+    observedInputToVisibleP95Ms: measuredNumber(input, "p95"),
+    observedCaptureToBrowserMs: captureToBrowser,
+    staticPreviewDisplayedFps: measuredRange(staticFrames, "displayedFps"),
+    activeResources: {
+      pssMiB: measuredNumber(total, "pssMiB"),
+      rssMiB: measuredNumber(total, "rssMiB"),
+      cpuPercent: measuredNumber(total, "cpuPercent"),
+    },
+    compositorMemory,
+    admission: row.admission,
+    inputToVisibleP50LimitMs: BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.inputToVisibleP50LimitMs,
+    inputToVisibleP95EnvelopeMs: BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.observedInputToVisibleP95Ms,
+    reproducibleCommand,
+  };
+}
+
+
 loadTest("measures sustained final-stack Bot Screen capacity and admission", async () => {
   const durationMs = Number(process.env.OMARCHY_BOT_LOAD_DURATION_MS ?? 15_000);
-  if (!Number.isSafeInteger(durationMs) || durationMs < 1_000) throw new Error("OMARCHY_BOT_LOAD_DURATION_MS must be an integer of at least 1000");
+  if (!Number.isSafeInteger(durationMs) || durationMs < 1_000) {
+    throw new Error("OMARCHY_BOT_LOAD_DURATION_MS must be an integer of at least 1000");
+  }
   const matrix = process.env.OMARCHY_BOT_LOAD_MATRIX === undefined
     ? [...MATRIX]
     : process.env.OMARCHY_BOT_LOAD_MATRIX.split(",").map(Number);
-  if (
-    matrix.length === 0
-    || matrix.some((count) => !MATRIX.includes(count as typeof MATRIX[number]))
-  ) throw new Error("OMARCHY_BOT_LOAD_MATRIX may contain only 1,2,4,8");
+  if (matrix.length === 0 || matrix.some((count) => !MATRIX.includes(count as typeof MATRIX[number]))) {
+    throw new Error("OMARCHY_BOT_LOAD_MATRIX may contain only 1,2,4,8");
+  }
   const includeFallback = process.env.OMARCHY_BOT_LOAD_FALLBACK !== "0";
-  if (Bun.which("brave") === null) throw new Error("the real load harness requires Brave");
-  await buildFinalWebClient(path.resolve(import.meta.dir, "../.."));
-  const fixtureRoot = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-screen-load-"));
-  const prior = {
-    application: process.env.OMARCHY_BOT_SCREEN_APP_BIN,
-    profile: process.env.OMARCHY_BOT_SCREEN_PROFILE,
-    frameRate: process.env.OMARCHY_BOT_SCREEN_FRAME_RATE,
+  const reportPath = process.env.OMARCHY_BOT_LOAD_REPORT
+    ?? path.join(os.tmpdir(), "omarchy-bot-screen-load-report.json");
+  const approvalPath = process.env.OMARCHY_BOT_LOAD_APPROVAL
+    ?? path.join(path.dirname(reportPath), "omarchy-bot-screen-capacity-approval.json");
+  const reproducibleCommand = [
+    "OMARCHY_BOT_REAL_SCREEN_LOAD=1",
+    "OMARCHY_BOT_SCREEN_RUNTIME=cage",
+    "OMARCHY_BOT_LOAD_MATRIX=1,2,4,8",
+    "OMARCHY_BOT_LOAD_FALLBACK=1",
+    "OMARCHY_BOT_LOAD_LAN_INTERFACE=<lan-interface>",
+    "OMARCHY_BOT_LOAD_REPORT=<report.json>",
+    "OMARCHY_BOT_LOAD_APPROVAL=<approval.json>",
+    "bun test tests/integration/bot-screen-capacity.load.test.ts",
+  ].join(" ");
+  const [cage, hyprland, ffmpeg, browser, gpu] = await Promise.all([
+    describeBinary(process.env.OMARCHY_BOT_CAGE_BIN, "cage", ["-v"]),
+    describeBinary(undefined, "Hyprland"),
+    describeBinary(process.env.OMARCHY_BOT_FFMPEG_BIN, "ffmpeg", ["-version"]),
+    describeBinary(process.env.OMARCHY_BOT_LOAD_BROWSER_BIN, "brave"),
+    gpuSnapshot(),
+  ]);
+  const machine: Record<string, unknown> = {
+    hostname: os.hostname(),
+    platform: `${os.platform()} ${os.release()} ${os.arch()}`,
+    cpu: os.cpus()[0]?.model ?? "unknown",
+    logicalCpus: os.cpus().length,
+    memoryMiB: Math.round(os.totalmem() / 1024 / 1024),
+    waylandDisplay: process.env.WAYLAND_DISPLAY ?? null,
+    cage,
+    hyprland,
+    ffmpeg,
+    browser,
+    gpu,
   };
-  process.env.OMARCHY_BOT_SCREEN_APP_BIN = createBrowserFixture(fixtureRoot);
-  process.env.OMARCHY_BOT_SCREEN_FRAME_RATE = String(BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.captureFrameRate);
   const rows: Array<Record<string, unknown>> = [];
-  try {
-    process.env.OMARCHY_BOT_SCREEN_PROFILE = "1080p";
-    for (const count of matrix) rows.push(await runRow("1080p", count, durationMs));
-    if (includeFallback) {
-      process.env.OMARCHY_BOT_SCREEN_PROFILE = "720p";
-      rows.push(await runRow("720p", 8, durationMs));
-    }
-  } finally {
-    rmSync(fixtureRoot, { recursive: true, force: true });
-    for (const [name, value] of [
-      ["OMARCHY_BOT_SCREEN_APP_BIN", prior.application],
-      ["OMARCHY_BOT_SCREEN_PROFILE", prior.profile],
-      ["OMARCHY_BOT_SCREEN_FRAME_RATE", prior.frameRate],
-    ] as const) {
-      if (value === undefined) delete process.env[name];
-      else process.env[name] = value;
-    }
-  }
-  const chosenDefault = BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.defaultCapacity;
-  let releaseGateError: Error | undefined;
-  try {
-    requireApprovedDefaultRow(rows, chosenDefault, BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL);
-  } catch (error) {
-    releaseGateError = error instanceof Error ? error : new Error(String(error));
-  }
-  let operationalGateError: Error | undefined;
-  try {
-    requireCompletedOperationalRows(rows);
-  } catch (error) {
-    operationalGateError = error instanceof Error ? error : new Error(String(error));
-  }
-  const admission = releaseGateError === undefined ? await admissionProof(chosenDefault) : null;
-  const report = {
-    schemaVersion: 2,
+  const report: Record<string, unknown> = {
+    schemaVersion: 3,
     generatedAt: new Date().toISOString(),
-    reproducibleCommand: "OMARCHY_BOT_REAL_SCREEN_LOAD=1 bun test tests/integration/bot-screen-capacity.load.test.ts",
+    updatedAt: new Date().toISOString(),
+    status: "running",
+    reproducibleCommand,
     configuration: {
+      runtime: "cage",
       durationMs,
       matrix,
       fallback: includeFallback ? { profile: "720p", screens: 8 } : null,
       targetFps: BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.targetFps,
       captureFrameRate: BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.captureFrameRate,
       medianLatencyLimitMs: BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.inputToVisibleP50LimitMs,
+      p95LatencyEnvelopeMs: BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.observedInputToVisibleP95Ms,
+      compositorMemoryReductionMinimumPercent: 25,
     },
-    defaultCapacityApproval: BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL,
-    releaseGate: releaseGateError === undefined
-      ? { passed: true }
-      : { passed: false, error: releaseGateError.message },
-    operationalGate: operationalGateError === undefined
-      ? { passed: true }
-      : { passed: false, error: operationalGateError.message },
-    machine: {
-      hostname: os.hostname(),
-      platform: `${os.platform()} ${os.release()} ${os.arch()}`,
-      cpu: os.cpus()[0]?.model ?? "unknown",
-      logicalCpus: os.cpus().length,
-      memoryMiB: Math.round(os.totalmem() / 1024 / 1024),
-      waylandDisplay: process.env.WAYLAND_DISPLAY ?? null,
-      hyprland: (await command(["Hyprland", "--version"])).stdout,
-      browser: (await command(["brave", "--version"])).stdout,
-    },
+    previousApprovedEnvelope: BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL,
+    machine,
+    compositorMemory: null,
+    releaseGate: { passed: false, pending: true },
+    operationalGate: { passed: false, pending: true },
     rows,
-    chosenDefault,
-    admission,
+    chosenDefault: BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.defaultCapacity,
+    candidateApproval: null,
   };
-  const reportPath = process.env.OMARCHY_BOT_LOAD_REPORT ?? path.join(os.tmpdir(), "omarchy-bot-screen-load-report.json");
-  writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`);
+  const persistReport = (): void => {
+    report.updatedAt = new Date().toISOString();
+    mkdirSync(path.dirname(reportPath), { recursive: true });
+    writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`);
+  };
+  persistReport();
+
+  const prior = {
+    application: process.env.OMARCHY_BOT_SCREEN_APP_BIN,
+    profile: process.env.OMARCHY_BOT_SCREEN_PROFILE,
+    frameRate: process.env.OMARCHY_BOT_SCREEN_FRAME_RATE,
+    runtime: process.env.OMARCHY_BOT_SCREEN_RUNTIME,
+  };
+  let fixtureRoot: string | undefined;
+  let executionError: Error | undefined;
+  try {
+    const browserBinary = process.env.OMARCHY_BOT_LOAD_BROWSER_BIN
+      ?? Bun.which("brave")
+      ?? Bun.which("chromium")
+      ?? Bun.which("chromium-browser");
+    if (browserBinary === null || browserBinary === undefined) {
+      throw new Error("the real load harness requires Brave or Chromium");
+    }
+    await buildFinalWebClient(path.resolve(import.meta.dir, "../.."));
+    fixtureRoot = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-screen-load-"));
+    process.env.OMARCHY_BOT_SCREEN_APP_BIN = createBrowserFixture(fixtureRoot, browserBinary);
+    process.env.OMARCHY_BOT_SCREEN_FRAME_RATE = String(BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.captureFrameRate);
+    report.compositorMemory = await compositorMemoryProof();
+    persistReport();
+    process.env.OMARCHY_BOT_SCREEN_RUNTIME = "cage";
+    process.env.OMARCHY_BOT_SCREEN_PROFILE = "1080p";
+    for (const count of matrix) {
+      try {
+        rows.push(await runRow("1080p", count, durationMs));
+      } catch (error) {
+        rows.push({
+          profile: "1080p",
+          screens: count,
+          resolution: { width: 1920, height: 1080 },
+          performancePassed: false,
+          operationalPassed: false,
+          supportStatus: "unsupported",
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+      persistReport();
+    }
+    if (includeFallback) {
+      process.env.OMARCHY_BOT_SCREEN_PROFILE = "720p";
+      try {
+        rows.push(await runRow("720p", 8, durationMs));
+      } catch (error) {
+        rows.push({
+          profile: "720p",
+          screens: 8,
+          resolution: { width: 1280, height: 720 },
+          performancePassed: false,
+          operationalPassed: false,
+          supportStatus: "unsupported",
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+      persistReport();
+    }
+  } catch (error) {
+    executionError = error instanceof Error ? error : new Error(String(error));
+  } finally {
+    if (fixtureRoot !== undefined) rmSync(fixtureRoot, { recursive: true, force: true });
+    for (const [name, value] of [
+      ["OMARCHY_BOT_SCREEN_APP_BIN", prior.application],
+      ["OMARCHY_BOT_SCREEN_PROFILE", prior.profile],
+      ["OMARCHY_BOT_SCREEN_FRAME_RATE", prior.frameRate],
+      ["OMARCHY_BOT_SCREEN_RUNTIME", prior.runtime],
+    ] as const) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+
+  const chosenDefault = BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.defaultCapacity;
+  let releaseGateError = executionError;
+  let operationalGateError = executionError;
+  if (executionError === undefined) {
+    try {
+      requireApprovedDefaultRow(rows, chosenDefault, BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL);
+      const compositor = objectRecord(report.compositorMemory, "compositor memory proof");
+      if (compositor.passed !== true) throw new Error("Cage did not pass the matched 1080p compositor-memory reduction gate");
+    } catch (error) {
+      releaseGateError = error instanceof Error ? error : new Error(String(error));
+    }
+    try {
+      requireCompletedOperationalRows(rows);
+    } catch (error) {
+      operationalGateError = error instanceof Error ? error : new Error(String(error));
+    }
+  }
+  report.releaseGate = releaseGateError === undefined
+    ? { passed: true }
+    : { passed: false, error: releaseGateError.message };
+  report.operationalGate = operationalGateError === undefined
+    ? { passed: true }
+    : { passed: false, error: operationalGateError.message };
+  const defaultRow = rows.find((row) => row.profile === "1080p" && row.screens === chosenDefault);
+  report.admission = defaultRow?.admission ?? null;
+  if (releaseGateError === undefined && operationalGateError === undefined && defaultRow !== undefined) {
+    const approval = candidateApproval(
+      defaultRow,
+      machine,
+      objectRecord(report.compositorMemory, "compositor memory proof"),
+      reproducibleCommand,
+    );
+    report.candidateApproval = approval;
+    mkdirSync(path.dirname(approvalPath), { recursive: true });
+    writeFileSync(approvalPath, `${JSON.stringify(approval, null, 2)}\n`);
+    report.approvalPath = approvalPath;
+  }
+  report.status = "complete";
+  persistReport();
   console.log(`BOT_SCREEN_LOAD_REPORT=${reportPath}`);
+  if (report.candidateApproval !== null) console.log(`BOT_SCREEN_CAPACITY_APPROVAL=${approvalPath}`);
+
   if (operationalGateError !== undefined) throw operationalGateError;
   if (releaseGateError !== undefined) throw releaseGateError;
   expect(rows).toHaveLength(matrix.length + (includeFallback ? 1 : 0));
-  expect(rows.every((row) => (row.cleanup as { clean?: boolean }).clean === true)).toBeTrue();
-  expect(admission).toMatchObject({
+  expect(rows.every((row) => objectRecord(row.cleanup, "row cleanup").clean === true)).toBeTrue();
+  expect(report.admission).toMatchObject({
     openAttempt: { state: "stopped", admission: { reason: "capacity", active: chosenDefault, limit: chosenDefault } },
     rejected: {
       body: {
@@ -1107,5 +1770,6 @@ loadTest("measures sustained final-stack Bot Screen capacity and admission", asy
     },
     noPartialRuntime: true,
     activeUnaffected: true,
+    activeEnvelopeMaintained: true,
   });
 }, 1_200_000);

@@ -64,13 +64,16 @@ export interface ProjectionLoadMetrics {
   readonly sequence: number;
   readonly captureAttempts: number;
   readonly sourceFrames: number;
+  readonly encoderInputs: number;
   readonly encodedFrames: number;
+  readonly encodedBytes: number;
   readonly rtpSends: number;
   readonly browserReceives: number;
   readonly browserDecodes: number;
   readonly browserPaints: number;
   readonly captureSkips: number;
   readonly encoderDrops: number;
+  readonly invalidFrames: number;
   readonly transportSkips: number;
   readonly sendFailures: number;
   readonly decodeDrops: number;
@@ -130,7 +133,9 @@ interface ProjectionSession {
   nextFrameAt?: number | undefined;
   captureAttempts: number;
   sourceFrames: number;
+  encoderInputs: number;
   encodedFrames: number;
+  encodedBytes: number;
   rtpSends: number;
   framesSent: number;
   preCaptureBackpressureSkips: number;
@@ -341,8 +346,10 @@ export class ScreenProjectionService {
       captureAttempts: 0,
       sourceFrames: 0,
       encodedFrames: 0,
+      encodedBytes: 0,
       framesSent: 0,
       preCaptureBackpressureSkips: 0,
+      encoderInputs: 0,
       encodedBackpressureDrops: 0,
       rtpSends: 0,
       transportUnavailableSkips: 0,
@@ -382,9 +389,12 @@ export class ScreenProjectionService {
     });
     peer.onDataChannel((channel) => this.#acceptChannel(session, channel));
     peer.onStateChange((state) => {
-      if (state === "closed") session.resolvePeerClosed();
       if (state === "failed") {
-        this.#fail(session, "transport-failed");
+        this.#fail(
+          session,
+          "transport-failed",
+          new Error(`WebRTC peer failed (ice=${peer.iceState()}, gathering=${peer.gatheringState()})`),
+        );
       } else if (state === "closed" || state === "disconnected") {
         this.#close(session, false);
       }
@@ -393,7 +403,13 @@ export class ScreenProjectionService {
       if (session.mode === "expanded") this.#startVideo(session);
     });
     videoTrack.onClosed(() => this.#close(session, false));
-    videoTrack.onError(() => this.#fail(session, "transport-failed"));
+    videoTrack.onError((error) => this.#fail(
+      session,
+      "transport-failed",
+      new Error(
+        `WebRTC H.264 track failed: ${error} (peer=${peer.state()}, ice=${peer.iceState()}, bufferedBytes=${videoTrack.bufferedAmount()})`,
+      ),
+    ));
 
     try {
       peer.setRemoteDescription(offer.sdp, "offer");
@@ -435,7 +451,7 @@ export class ScreenProjectionService {
         candidates,
       };
     } catch (error) {
-      this.#fail(session, "transport-failed");
+      this.#fail(session, "transport-failed", error);
       throw error;
     } finally {
       localDescription.cancel();
@@ -586,7 +602,13 @@ export class ScreenProjectionService {
       }
     });
     channel.onClosed(() => this.#close(session, false));
-    channel.onError(() => this.#fail(session, "transport-failed"));
+    channel.onError((error) => this.#fail(
+      session,
+      "transport-failed",
+      new Error(
+        `WebRTC data channel ${label} failed: ${error} (peer=${session.peer.state()}, ice=${session.peer.iceState()}, bufferedBytes=${channel.bufferedAmount()})`,
+      ),
+    ));
   }
 
   #control(session: ProjectionSession, raw: string | Buffer | ArrayBuffer): void {
@@ -702,6 +724,7 @@ export class ScreenProjectionService {
               session.encodeLatencyMaxMs = Math.max(session.encodeLatencyMaxMs, latency);
             }
             session.encodedFrames += 1;
+            session.encodedBytes += unit.bytes.byteLength;
             if (session.awaitingKeyframe && !unit.keyframe) {
               session.encodedBackpressureDrops += 1;
               return;
@@ -812,6 +835,7 @@ export class ScreenProjectionService {
       );
       if (session.captureStream !== captureStream || this.#captureStopped(session, mode)) return;
       session.sourceFrames += 1;
+      if (mode === "expanded") session.encoderInputs += 1;
       const expectedByteLength = session.source.videoWidth * session.source.videoHeight * 4;
       if (
         frame.pixelFormat !== "rgba"
@@ -1107,7 +1131,7 @@ export class ScreenProjectionService {
         if (queued === undefined) return;
         try {
           await controller.session.source.input(queued.event);
-        } catch {
+        } catch (error) {
           if (queued.category !== undefined) {
             this.#recordDiagnostic(
               controller.session.source.surfaceId,
@@ -1117,7 +1141,7 @@ export class ScreenProjectionService {
               queued.redactedLength,
             );
           }
-          this.#close(controller.session, true);
+          this.#fail(controller.session, "transport-failed", error);
           return;
         }
       }
@@ -1342,7 +1366,7 @@ export class ScreenProjectionService {
     const encoderShortfall = session.mode === "expanded" || session.encodedFrames > 0
       ? Math.max(
           0,
-          session.sourceFrames
+          session.encoderInputs
             - session.invalidFrameDrops
             - session.encodedFrames
             - session.encodedBackpressureDrops
@@ -1372,13 +1396,16 @@ export class ScreenProjectionService {
       sequence: session.sequence,
       captureAttempts: session.captureAttempts,
       sourceFrames: session.sourceFrames,
+      encoderInputs: session.encoderInputs,
       encodedFrames: session.encodedFrames,
+      encodedBytes: session.encodedBytes,
       rtpSends: session.rtpSends,
       browserReceives: browser.browserReceives,
       browserDecodes: browser.browserDecodes,
       browserPaints: browser.browserPaints,
       captureSkips: session.preCaptureBackpressureSkips,
-      encoderDrops: session.encodedBackpressureDrops + session.invalidFrameDrops,
+      encoderDrops: session.encodedBackpressureDrops,
+      invalidFrames: session.invalidFrameDrops,
       transportSkips: session.transportUnavailableSkips,
       sendFailures: session.sendFailures,
       decodeDrops: browser.decodeDrops,
