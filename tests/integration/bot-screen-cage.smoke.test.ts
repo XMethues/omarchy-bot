@@ -67,6 +67,22 @@ async function waitForPixels(
   }
 }
 
+async function waitForMatchingPixels(
+  source: BotScreenProjectionSource,
+  expected: Uint8Array,
+  description: string,
+): Promise<Uint8Array> {
+  const expectedDigest = digest(expected);
+  const deadline = Date.now() + 5_000;
+  for (;;) {
+    const current = (await source.capture()).bytes;
+    if (digest(current) === expectedDigest) return current;
+    if (Date.now() >= deadline) throw new Error(`${description} did not become visible`);
+    // A real external Wayland client commit cannot be driven by Bun's deterministic clock.
+    await Bun.sleep(20);
+  }
+}
+
 function inputFor(source: BotScreenProjectionSource, epoch: number): (action: BotScreenInputAction) => Promise<void> {
   let sequence = 0;
   return (action) => source.input({
@@ -152,7 +168,11 @@ platformTest("two real Cage Screens isolate pixels, focus, cursor, keyboard, pro
         "",
       ].join("\n"));
       chmodSync(application, 0o700);
-      await harness.svc.screens.act(owners[index]!, { name: "open_app", args: { app: application } });
+      await harness.svc.screens.act(
+        owners[index]!,
+        { name: "open_app", args: { app: application } },
+        { ...owners[index]!, turnId: `cage-smoke-${index}` },
+      );
     }
 
     const dialogs = await Promise.all([
@@ -186,7 +206,7 @@ platformTest("two real Cage Screens isolate pixels, focus, cursor, keyboard, pro
     await firstInput({ type: "key", keyCode: 42, state: "pressed" });
     await secondInput({ type: "key", keyCode: 28, state: "pressed" });
     await secondInput({ type: "key", keyCode: 28, state: "released" });
-    const secondClosed = await waitForPixels(second, dialogs[1]!, "second Cage keyboard input");
+    const secondClosed = await waitForMatchingPixels(second, neutral[1]!, "second Cage keyboard input");
     expect(digest(secondClosed)).toBe(digest(neutral[1]!));
     expect(await differingPixels(firstWithText, (await first.capture()).bytes, harness.home, "first-isolation"))
       .toBeLessThan(10_000);
@@ -196,7 +216,7 @@ platformTest("two real Cage Screens isolate pixels, focus, cursor, keyboard, pro
     const resumedFirstInput = inputFor(first, 2);
     await resumedFirstInput({ type: "key", keyCode: 28, state: "pressed" });
     await resumedFirstInput({ type: "key", keyCode: 28, state: "released" });
-    const firstClosed = await waitForPixels(first, firstWithText, "first Cage application exit");
+    const firstClosed = await waitForMatchingPixels(first, neutral[0]!, "first Cage application exit");
     expect(digest(firstClosed)).toBe(digest(neutral[0]!));
     await first.releaseInput(2);
     expect(owners.map((owner) => harness.svc.screens.status(owner).state)).toEqual(["ready", "ready"]);
@@ -217,6 +237,7 @@ platformTest("two real Cage Screens isolate pixels, focus, cursor, keyboard, pro
     const cycleBotId = await makeBot(harness, "Repeated Cage lifecycle");
     const cycleBot = await api<{ surfaceId: SurfaceId }>(harness, "GET", `/api/bots/${cycleBotId}`);
     expect(surfaceIds.has(cycleBot.surfaceId)).toBeFalse();
+    surfaceIds.add(cycleBot.surfaceId);
     const cycleOwner = { botId: cycleBotId, surfaceId: cycleBot.surfaceId };
     const cycleResponse = await fetch(
       `${harness.baseUrl}/api/computer/snapshot?botId=${encodeURIComponent(cycleBotId)}&surfaceId=${encodeURIComponent(cycleBot.surfaceId)}`,
@@ -248,6 +269,8 @@ platformTest("two real Cage Screens isolate pixels, focus, cursor, keyboard, pro
     && existsSync(path.join(process.env.XDG_RUNTIME_DIR, "systemd", "private"))
   ) {
     const units = await run(["systemctl", "--user", "list-units", "--all", "--plain", "--no-legend", "omarchy-bot-screen-*"]);
-    expect(units.trim()).toBe("");
+    for (const surfaceId of surfaceIds) {
+      expect(units).not.toContain(surfaceId.slice("surf_".length));
+    }
   }
 }, 90_000);

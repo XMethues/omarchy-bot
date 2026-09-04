@@ -162,10 +162,11 @@ describe("Bot Screen lifecycle", () => {
     const owner = await bot(h, await makeBot(h, "Application launch failure"));
     await activateScreen(h, owner);
 
-    await expect(h.svc.screens.act({ botId: owner.id, surfaceId: owner.surfaceId }, {
-      name: "open_app",
-      args: { app: "missing.desktop" },
-    })).rejects.toThrow("fake application launch failed");
+    await expect(h.svc.screens.act(
+      { botId: owner.id, surfaceId: owner.surfaceId },
+      { name: "open_app", args: { app: "missing.desktop" } },
+      { botId: owner.id, surfaceId: owner.surfaceId, turnId: "application-failure" },
+    )).rejects.toThrow("fake application launch failed");
     expect(h.svc.screens.status({ botId: owner.id, surfaceId: owner.surfaceId })).toEqual({ state: "ready" });
     expect((await fetch(
       `${h.baseUrl}/api/computer/snapshot?botId=${encodeURIComponent(owner.id)}&surfaceId=${encodeURIComponent(owner.surfaceId)}`,
