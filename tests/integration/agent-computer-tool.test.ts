@@ -81,6 +81,14 @@ class AgentToolRuntimeAdapter implements BotScreenRuntimeAdapter {
   async start(provision: BotScreenProvision): Promise<BotScreenRuntime> {
     return {
       capture: async () => ({ mediaType: "image/png", bytes: new Uint8Array([1]) }),
+      openCaptureStream: async () => ({
+        next: async () => ({
+          mediaType: "image/png",
+          bytes: new Uint8Array([1]),
+          capturedAt: new Date(),
+        }),
+        close: async () => {},
+      }),
       act: async (action) => {
         const count = (this.inFlight.get(provision.surfaceId) ?? 0) + 1;
         this.inFlight.set(provision.surfaceId, count);

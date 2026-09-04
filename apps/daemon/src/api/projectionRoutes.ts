@@ -45,7 +45,7 @@ export async function handleProjectionRequest(
   if (req.method === "DELETE") {
     const body = await req.json().catch(() => undefined) as { sessionId?: unknown } | undefined;
     if (typeof body?.sessionId !== "string") return json({ error: "sessionId is required" }, 400);
-    if (!projections.close(owner, body.sessionId)) return json({ error: "Screen Projection was not found" }, 404);
+    if (!await projections.close(owner, body.sessionId)) return json({ error: "Screen Projection was not found" }, 404);
     return new Response(null, { status: 204 });
   }
 

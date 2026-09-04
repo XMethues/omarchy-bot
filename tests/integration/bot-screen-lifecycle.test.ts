@@ -47,12 +47,16 @@ describe("Bot Screen lifecycle", () => {
     h = await startDaemon(undefined, { botScreenAdapter: adapter });
     const owner = await bot(h, await makeBot(h, "Delete Screen"));
     await activateScreen(h, owner);
+    const source = await h.svc.screens.projectionSource({ botId: owner.id, surfaceId: owner.surfaceId });
+    const captureStream = await source!.openCaptureStream();
+    await captureStream.next();
 
     const result = await api<DeleteBotResultDto>(h, "DELETE", `/api/bots/${owner.id}`, {});
 
     expect(result).toMatchObject({ status: "deleted", removed: { surface: true } });
     expect(adapter.destroyed.has(owner.surfaceId)).toBeTrue();
     expect(adapter.running(owner.surfaceId)).toBeUndefined();
+    expect(adapter.captureStreamsClosed).toBe(1);
     expect((await apiStatus(h, "GET", `/api/bots/${owner.id}`)).status).toBe(404);
     expect(h.svc.db.query(`SELECT 1 FROM bot_surfaces WHERE surface_id = ?`).get(owner.surfaceId)).toBeNull();
   });

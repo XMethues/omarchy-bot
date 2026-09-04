@@ -17,6 +17,7 @@ import type { ComputerSurfaceOwner } from "./broker.ts";
 import type {
   BotScreenManager,
   BotScreenInputEvent,
+  BotScreenCaptureStream,
   BotScreenProjectionSource,
 } from "./botScreenManager.ts";
 import { InputDiagnostics, type InputDiagnosticCategory } from "./inputDiagnostics.ts";
@@ -61,12 +62,17 @@ interface ProjectionSession {
   source: BotScreenProjectionSource;
   peer: PeerConnection;
   state: ProjectionLifecycleState;
+  peerClosed: Promise<void>;
+  resolvePeerClosed(): void;
   mode: ProjectionViewMode;
   frames?: DataChannel;
   control?: DataChannel;
   input?: DataChannel;
   sequence: number;
   timer?: Timer | undefined;
+  captureStream?: BotScreenCaptureStream | undefined;
+  captureTask?: Promise<void> | undefined;
+  captureCleanups: Set<Promise<void>>;
   nextFrameAt?: number | undefined;
   captureAttempts: number;
   sourceFrames: number;
@@ -206,15 +212,19 @@ export class ScreenProjectionService {
         ? {}
         : { portRangeBegin: this.webRtcPort, portRangeEnd: this.webRtcPort }),
     });
+    const peerClosed = Promise.withResolvers<void>();
     const session: ProjectionSession = {
       id,
       owner,
       source,
       peer,
       state: "connecting",
+      peerClosed: peerClosed.promise,
+      resolvePeerClosed: peerClosed.resolve,
       mode: "idle",
       sequence: 0,
       inputSuspended: false,
+      captureCleanups: new Set(),
       captureInFlight: false,
       captureAttempts: 0,
       sourceFrames: 0,
@@ -238,6 +248,7 @@ export class ScreenProjectionService {
     });
     peer.onDataChannel((channel) => this.#acceptChannel(session, channel));
     peer.onStateChange((state) => {
+      if (state === "closed") session.resolvePeerClosed();
       if (state === "closed" || state === "disconnected" || state === "failed") {
         this.#close(session, state === "failed");
       }
@@ -321,12 +332,17 @@ export class ScreenProjectionService {
     });
   }
 
-  close(owner: ComputerSurfaceOwner, sessionId: string): boolean {
+  async close(owner: ComputerSurfaceOwner, sessionId: string): Promise<boolean> {
     const session = this.#sessions.get(sessionId);
     if (session === undefined || session.owner.botId !== owner.botId || session.owner.surfaceId !== owner.surfaceId) {
       return false;
     }
     this.#close(session, false);
+    await Promise.allSettled([
+      ...(session.captureTask === undefined ? [] : [session.captureTask]),
+      ...session.captureCleanups,
+      session.peerClosed,
+    ]);
     return true;
   }
 
@@ -360,7 +376,13 @@ export class ScreenProjectionService {
 
   async shutdown(): Promise<void> {
     this.#unsubscribeScreens();
-    for (const session of [...this.#sessions.values()]) this.#close(session, false);
+    const sessions = [...this.#sessions.values()];
+    for (const session of sessions) this.#close(session, false);
+    await Promise.allSettled(sessions.flatMap((session) => [
+      ...(session.captureTask === undefined ? [] : [session.captureTask]),
+      ...session.captureCleanups,
+      session.peerClosed,
+    ]));
     await Promise.allSettled(this.#releaseBarriers.values());
     this.diagnostics.shutdown();
   }
@@ -413,6 +435,7 @@ export class ScreenProjectionService {
     session.timer = undefined;
     if (session.mode === "expanded" && mode !== "expanded") this.#revokeInputFor(session);
     const changed = session.mode !== mode;
+    if (changed) this.#stopCaptureStream(session);
     session.inputSuspended = false;
     session.mode = mode;
     session.nextFrameAt = mode === "idle" ? undefined : performance.now();
@@ -427,13 +450,17 @@ export class ScreenProjectionService {
     if (session.timer !== undefined || session.mode === "idle" || this.#sessions.get(session.id) !== session) return;
     session.timer = setTimeout(() => {
       session.timer = undefined;
-      void this.#projectFrame(session);
+      const captureTask = this.#projectFrame(session);
+      session.captureTask = captureTask;
+      void captureTask.finally(() => {
+        if (session.captureTask === captureTask) session.captureTask = undefined;
+      });
     }, delay);
     session.timer.unref?.();
   }
 
   async #projectFrame(session: ProjectionSession): Promise<void> {
-    if (session.captureInFlight || session.mode === "idle" || this.#sessions.get(session.id) !== session) return;
+    if (session.captureInFlight || this.#captureStopped(session)) return;
     const channel = session.frames;
     if (channel === undefined || !channel.isOpen()) {
       session.transportUnavailableSkips += 1;
@@ -449,15 +476,26 @@ export class ScreenProjectionService {
     session.captureInFlight = true;
     session.captureAttempts += 1;
     try {
-      const capture = await session.source.capture();
-      if (session.state === "idle" || this.#sessions.get(session.id) !== session) return;
+      let captureStream = session.captureStream;
+      if (captureStream === undefined) {
+        await Promise.allSettled(session.captureCleanups);
+        if (this.#captureStopped(session)) return;
+        captureStream = await session.source.openCaptureStream();
+      }
+      if (this.#captureStopped(session)) {
+        await captureStream.close().catch(() => {});
+        return;
+      }
+      session.captureStream = captureStream;
+      const frame = await captureStream.next();
+      if (session.captureStream !== captureStream || this.#captureStopped(session)) return;
       session.sourceFrames += 1;
-      if (capture.bytes.byteLength === 0 || capture.bytes.byteLength > MAX_FRAME_BYTES) {
+      if (frame.bytes.byteLength === 0 || frame.bytes.byteLength > MAX_FRAME_BYTES) {
         session.invalidFrameDrops += 1;
         return;
       }
       session.encodedFrames += 1;
-      const byteLength = capture.bytes.byteLength;
+      const byteLength = frame.bytes.byteLength;
       if (channel.bufferedAmount() + byteLength > MAX_BUFFERED_BYTES) {
         session.encodedBackpressureDrops += 1;
         return;
@@ -475,8 +513,8 @@ export class ScreenProjectionService {
         videoHeight: session.source.videoHeight,
         scale: session.source.scale,
         sequence: ++session.sequence,
-        mediaType: capture.mediaType,
-        capturedAt: new Date().toISOString(),
+        mediaType: frame.mediaType,
+        capturedAt: frame.capturedAt.toISOString(),
         mode: session.mode,
         byteLength,
         chunkCount,
@@ -486,7 +524,7 @@ export class ScreenProjectionService {
         return;
       }
       for (let offset = 0; offset < byteLength; offset += CHUNK_BYTES) {
-        if (!channel.sendMessageBinary(capture.bytes.subarray(offset, Math.min(offset + CHUNK_BYTES, byteLength)))) {
+        if (!channel.sendMessageBinary(frame.bytes.subarray(offset, Math.min(offset + CHUNK_BYTES, byteLength)))) {
           session.sendFailures += 1;
           return;
         }
@@ -893,12 +931,29 @@ export class ScreenProjectionService {
       // Revocation may race the native data channel closing.
     }
   }
+
+  #captureStopped(session: ProjectionSession): boolean {
+    return session.mode === "idle" || this.#sessions.get(session.id) !== session;
+  }
+
+  #stopCaptureStream(session: ProjectionSession): void {
+    const stream = session.captureStream;
+    session.captureStream = undefined;
+    if (stream === undefined) return;
+    const cleanup = stream.close();
+    session.captureCleanups.add(cleanup);
+    void cleanup.finally(() => {
+      session.captureCleanups.delete(cleanup);
+    }).catch(() => {});
+  }
+
   #close(session: ProjectionSession, failed: boolean): void {
     if (this.#sessions.get(session.id) !== session) return;
     void this.#revokeInputFor(session).catch(() => {});
     this.#sessions.delete(session.id);
     if (session.timer !== undefined) clearTimeout(session.timer);
     session.timer = undefined;
+    this.#stopCaptureStream(session);
     session.mode = "idle";
     session.state = failed ? "failed" : "closed";
     for (const channel of [session.frames, session.control, session.input]) {
@@ -913,5 +968,6 @@ export class ScreenProjectionService {
     } catch {
       // Native peer may already be closed.
     }
+    if (session.peer.state() === "closed") session.resolvePeerClosed();
   }
 }

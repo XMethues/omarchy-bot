@@ -155,6 +155,14 @@ class ControlledRuntimeAdapter implements BotScreenRuntimeAdapter {
           this.#capturesInFlight.set(provision.surfaceId, inFlight - 1);
         }
       },
+      openCaptureStream: async () => ({
+        next: async () => ({
+          mediaType: "image/png",
+          bytes: CONCURRENCY_TEST_PNG,
+          capturedAt: new Date(),
+        }),
+        close: async () => {},
+      }),
       act: async (action) => {
         if (stopped) throw new Error("test Screen is stopped");
         return { text: `test-${action.name}` };

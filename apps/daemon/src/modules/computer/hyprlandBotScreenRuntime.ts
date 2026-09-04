@@ -8,15 +8,19 @@ import {
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
+import sharp from "sharp";
 import type { ComputerAction, SurfaceId } from "@omarchy-bot/domain";
 import type { ComputerInputAuthority } from "@omarchy-bot/agent-contract";
 import type { SurfaceComputerWorker, Supervisor } from "../../supervision/supervisor.ts";
+import { ensureCaptureHelper } from "../../../native/capture-helper/build.ts";
 import { ensureInputHelper } from "../../../native/pointer-helper/build.ts";
 import { ApplicationUnits } from "../../supervision/applicationUnits.ts";
 import {
   BotScreenInputRejectedError,
   type BotScreenActionResult,
   type BotScreenCapture,
+  type BotScreenCaptureFrame,
+  type BotScreenCaptureStream,
   type BotScreenInputEvent,
   type BotScreenProvision,
   type BotScreenRuntime,
@@ -45,6 +49,8 @@ interface CommandResult {
 type ScreenProcess = Bun.Subprocess<"ignore", "ignore", "ignore">;
 const INPUT_RPC_TIMEOUT_MS = 1_000;
 type PointerProcess = Bun.Subprocess<"pipe", "pipe", "pipe">;
+const CAPTURE_RPC_TIMEOUT_MS = 5_000;
+type CaptureProcess = Bun.Subprocess<"pipe", "pipe", "pipe">;
 
 function executable(name: string | undefined, fallback: string): string | undefined {
   const candidate = name ?? fallback;
@@ -79,6 +85,18 @@ async function terminate(child: ScreenProcess): Promise<void> {
   ]);
   if (stopped) return;
   signalProcessTree(child, "SIGKILL");
+  await child.exited;
+}
+
+async function terminateCapture(child: CaptureProcess): Promise<void> {
+  if (child.exitCode !== null) return;
+  child.kill("SIGTERM");
+  const stopped = await Promise.race([
+    child.exited.then(() => true),
+    Bun.sleep(1_000).then(() => false),
+  ]);
+  if (stopped) return;
+  child.kill("SIGKILL");
   await child.exited;
 }
 
@@ -276,6 +294,199 @@ class WaylandVirtualInput {
   }
 }
 
+class CaptureProtocolReader {
+  #chunks: Uint8Array[] = [];
+  #decoder = new TextDecoder();
+  #offset = 0;
+
+  constructor(private readonly reader: ReadableStreamDefaultReader<Uint8Array>) {}
+
+  async readLine(): Promise<string> {
+    const bytes: number[] = [];
+    for (;;) {
+      const byte = await this.#readByte();
+      if (byte === 0x0a) return this.#decoder.decode(Uint8Array.from(bytes));
+      bytes.push(byte);
+      if (bytes.length > 128) throw new Error("Bot Screen capture helper returned an oversized frame header");
+    }
+  }
+
+  async readBytes(length: number): Promise<Uint8Array> {
+    const bytes = new Uint8Array(length);
+    let written = 0;
+    while (written < length) {
+      await this.#ensureChunk();
+      const chunk = this.#chunks[0]!;
+      const available = chunk.byteLength - this.#offset;
+      const count = Math.min(available, length - written);
+      bytes.set(chunk.subarray(this.#offset, this.#offset + count), written);
+      written += count;
+      this.#offset += count;
+      if (this.#offset === chunk.byteLength) {
+        this.#chunks.shift();
+        this.#offset = 0;
+      }
+    }
+    return bytes;
+  }
+
+  async #readByte(): Promise<number> {
+    await this.#ensureChunk();
+    const chunk = this.#chunks[0]!;
+    const byte = chunk[this.#offset]!;
+    this.#offset += 1;
+    if (this.#offset === chunk.byteLength) {
+      this.#chunks.shift();
+      this.#offset = 0;
+    }
+    return byte;
+  }
+
+  async #ensureChunk(): Promise<void> {
+    while (this.#chunks.length === 0) {
+      const chunk = await this.reader.read();
+      if (chunk.done) throw new Error("Bot Screen capture helper closed its protocol stream");
+      if (chunk.value.byteLength > 0) this.#chunks.push(chunk.value);
+    }
+  }
+}
+
+class WaylandCaptureStream implements BotScreenCaptureStream {
+  #captureInFlight = false;
+  #stopped = false;
+  #terminalError: Error | undefined;
+
+  private constructor(
+    private readonly process: CaptureProcess,
+    private readonly protocol: CaptureProtocolReader,
+    private readonly expectedWidth: number,
+    private readonly expectedHeight: number,
+  ) {}
+
+  static async start(
+    binary: string,
+    outputName: string,
+    environment: Record<string, string>,
+    expectedWidth: number,
+    expectedHeight: number,
+  ): Promise<WaylandCaptureStream> {
+    const process = Bun.spawn([binary, outputName], {
+      env: environment,
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const protocol = new CaptureProtocolReader(process.stdout.getReader());
+    let ready: string;
+    try {
+      ready = await Promise.race([
+        protocol.readLine(),
+        process.exited.then(async (status) => {
+          const stderr = await new Response(process.stderr).text();
+          throw new Error(
+            `Bot Screen capture helper exited with status ${status}${stderr.trim() === "" ? "" : `: ${stderr.trim()}`}`,
+          );
+        }),
+        Bun.sleep(5_000).then(() => {
+          throw new Error("Bot Screen capture helper did not become ready");
+        }),
+      ]);
+    } catch (error) {
+      await terminateCapture(process);
+      throw error;
+    }
+    if (ready !== "READY") {
+      await terminateCapture(process);
+      throw new Error("Bot Screen capture helper returned an invalid readiness response");
+    }
+    return new WaylandCaptureStream(process, protocol, expectedWidth, expectedHeight);
+  }
+
+  async next(): Promise<BotScreenCaptureFrame> {
+    if (this.#terminalError !== undefined) throw this.#terminalError;
+    if (this.#stopped || this.process.exitCode !== null) throw new Error("Bot Screen capture stream is closed");
+    if (this.#captureInFlight) throw new Error("Bot Screen capture stream already has a pending frame");
+    this.#captureInFlight = true;
+    let timeout: Timer | undefined;
+    try {
+      const capture = (async () => {
+        this.process.stdin.write("capture\n");
+        await this.process.stdin.flush();
+        const header = (await this.protocol.readLine()).split(" ");
+        if (header.length !== 4 || header[0] !== "FRAME") {
+          throw new Error("Bot Screen capture helper returned an invalid frame header");
+        }
+        const width = Number(header[1]);
+        const height = Number(header[2]);
+        const byteLength = Number(header[3]);
+        if (
+          width !== this.expectedWidth
+          || height !== this.expectedHeight
+          || !Number.isSafeInteger(byteLength)
+          || byteLength !== width * height * 4
+        ) {
+          throw new Error("Bot Screen capture helper returned unexpected frame geometry");
+        }
+        const capturedAt = new Date();
+        const raw = await this.protocol.readBytes(byteLength);
+        const png = await sharp(raw, {
+          raw: { width, height, channels: 4 },
+          failOn: "error",
+          limitInputPixels: width * height,
+        }).png().toBuffer();
+        return {
+          mediaType: "image/png" as const,
+          bytes: new Uint8Array(png.buffer, png.byteOffset, png.byteLength),
+          capturedAt,
+        };
+      })();
+      return await Promise.race([
+        capture,
+        new Promise<never>((_resolve, reject) => {
+          timeout = setTimeout(() => reject(new Error("Bot Screen capture helper RPC timed out")), CAPTURE_RPC_TIMEOUT_MS);
+          timeout.unref?.();
+        }),
+      ]);
+    } catch (cause) {
+      const error = cause instanceof Error ? cause : new Error(String(cause));
+      this.#terminalError = error;
+      this.process.kill("SIGTERM");
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+      this.#captureInFlight = false;
+    }
+  }
+
+  async close(): Promise<void> {
+    if (this.#stopped) return;
+    this.#stopped = true;
+    if (this.process.exitCode !== null) return;
+    if (this.#terminalError === undefined) {
+      try {
+        this.process.stdin.write("close\n");
+        await this.process.stdin.flush();
+      } catch {
+        // The capture helper may have exited while teardown was writing its final request.
+      }
+    }
+    this.process.stdin.end();
+    const exited = await Promise.race([
+      this.process.exited.then(() => true),
+      Bun.sleep(1_000).then(() => false),
+    ]);
+    if (exited) return;
+    this.process.kill("SIGTERM");
+    const terminated = await Promise.race([
+      this.process.exited.then(() => true),
+      Bun.sleep(1_000).then(() => false),
+    ]);
+    if (terminated) return;
+    this.process.kill("SIGKILL");
+    await this.process.exited;
+  }
+}
+
 function explicitEnvironment(input: {
   runtimeDir: string;
   waylandDisplay: string;
@@ -449,6 +660,7 @@ export class HyprlandBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter 
         ? await ensureInputHelper()
         : executable(this.options.inputHelperBin, this.options.inputHelperBin);
       if (inputHelper === undefined) throw new Error("the Bot Screen Wayland input helper is unavailable");
+      const captureHelper = await ensureCaptureHelper();
       const startedVirtualInput = await WaylandVirtualInput.start(
         inputHelper,
         outputName,
@@ -489,6 +701,8 @@ export class HyprlandBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter 
       let stopped = false;
       let cleanupComplete = false;
       let stopInFlight: Promise<void> | undefined;
+      const captureStreams = new Set<BotScreenCaptureStream>();
+      const captureStreamStarts = new Set<Promise<void>>();
       const capture = async (): Promise<BotScreenCapture> => {
         if (stopped || compositor.exitCode !== null) throw new Error("Bot Screen compositor is not running");
         const shot = Bun.spawn([grim, "-o", outputName, "-"], {
@@ -507,6 +721,48 @@ export class HyprlandBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter 
           throw new Error(`Bot Screen capture failed${stderr.trim() === "" ? "" : `: ${stderr.trim()}`}`);
         }
         return { mediaType: "image/png", bytes: image };
+      };
+      const openCaptureStream = async (): Promise<BotScreenCaptureStream> => {
+        if (stopped || compositor.exitCode !== null) throw new Error("Bot Screen compositor is not running");
+        const opening = Promise.withResolvers<void>();
+        captureStreamStarts.add(opening.promise);
+        try {
+          const stream = await WaylandCaptureStream.start(
+            captureHelper,
+            outputName,
+            childEnv,
+            videoWidth,
+            videoHeight,
+          );
+          if (stopped || compositor.exitCode !== null) {
+            await stream.close();
+            throw new Error("Bot Screen compositor is not running");
+          }
+          let closed = false;
+          let lease!: BotScreenCaptureStream;
+          const close = async (): Promise<void> => {
+            if (closed) return;
+            closed = true;
+            captureStreams.delete(lease);
+            await stream.close();
+          };
+          lease = {
+            next: async () => {
+              try {
+                return await stream.next();
+              } catch (error) {
+                await close().catch(() => {});
+                throw error;
+              }
+            },
+            close,
+          };
+          captureStreams.add(lease);
+          return lease;
+        } finally {
+          opening.resolve();
+          captureStreamStarts.delete(opening.promise);
+        }
       };
       const act = async (
         action: ComputerAction,
@@ -530,6 +786,7 @@ export class HyprlandBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter 
       };
       return {
         capture,
+        openCaptureStream,
         act,
         setInputAuthority: (controllerEpoch) => startedVirtualInput.setInputAuthority(controllerEpoch),
         input: (event) => startedVirtualInput.input(event),
@@ -541,6 +798,8 @@ export class HyprlandBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter 
           if (stopInFlight !== undefined) return stopInFlight;
           const cleanup = (async (): Promise<void> => {
             await startedVirtualInput.stop().catch(() => {});
+            await Promise.allSettled(captureStreamStarts);
+            await Promise.allSettled([...captureStreams].map((stream) => stream.close()));
             await Promise.allSettled([
               startedComputerWorker.stop(),
               ...(applicationProcess === undefined ? [] : [terminate(applicationProcess)]),

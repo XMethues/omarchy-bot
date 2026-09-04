@@ -147,6 +147,24 @@ function openChannel(channel: DataChannel): Promise<DataChannel> {
   );
 }
 
+async function closePeer(peer: PeerConnection): Promise<void> {
+  if (peer.state() === "closed") return;
+  let resolveClosed!: () => void;
+  const closed = waitFor<void>(
+    "WebRTC peer closing",
+    (resolve) => {
+      resolveClosed = resolve;
+      peer.onStateChange((state) => {
+        if (state === "closed") resolve();
+      });
+    },
+    DATA_CHANNEL_OPEN_TIMEOUT_MS,
+  );
+  peer.close();
+  if (peer.state() === "closed") resolveClosed();
+  await closed;
+}
+
 
 async function connectProjection(
   h: Harness,
@@ -254,13 +272,16 @@ function authorityCycle(input: DataChannel): {
 describe("WebRTC Screen Projection signaling", () => {
   let h: Harness;
   let peer: PeerConnection | undefined;
+  let adapter: FakeBotScreenRuntimeAdapter;
 
   beforeEach(async () => {
-    h = await startDaemon();
+    peer = undefined;
+    adapter = new FakeBotScreenRuntimeAdapter();
+    h = await startDaemon(undefined, { botScreenAdapter: adapter });
   });
 
   afterEach(async () => {
-    peer?.close();
+    if (peer !== undefined) await closePeer(peer);
     await h.stop();
   });
 
@@ -363,7 +384,8 @@ describe("WebRTC Screen Projection signaling", () => {
     }))).toBeTrue();
     await receivedFrame;
 
-    expect(JSON.parse(String(messages[0]))).toMatchObject({
+    const frameHeader = JSON.parse(String(messages[0])) as { capturedAt: string };
+    expect(frameHeader).toMatchObject({
       version: 1,
       type: "frame",
       surfaceId: owner.surfaceId,
@@ -378,6 +400,7 @@ describe("WebRTC Screen Projection signaling", () => {
       mediaType: "image/png",
       mode: "preview",
     });
+    expect(Number.isNaN(Date.parse(frameHeader.capturedAt))).toBeFalse();
     expect(Buffer.from(messages[1] as Buffer).toString("base64")).toBe(EXPECTED_PNG_BASE64);
     const activeStatus = await fetch(statusUrl);
     expect(activeStatus.status).toBe(200);
@@ -392,6 +415,19 @@ describe("WebRTC Screen Projection signaling", () => {
       invalidFrameDrops: 0,
       sendFailures: 0,
     });
+    expect(adapter.captureStreamsOpened).toBe(1);
+    expect(adapter.maximumCaptureRequestsInFlight).toBe(1);
+    const closed = await fetch(
+      `${h.baseUrl}/api/computer/projection?botId=${encodeURIComponent(owner.botId)}&surfaceId=${encodeURIComponent(owner.surfaceId)}`,
+      {
+        method: "DELETE",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ sessionId }),
+      },
+    );
+    expect(closed.status).toBe(204);
+    await adapter.waitForCaptureStreamsClosed(1);
+    expect(adapter.captureStreamsClosed).toBe(1);
   }, 15_000);
 
   test("expanded Screen Projection targets at least 15 delivered frames per second", async () => {
@@ -418,6 +454,33 @@ describe("WebRTC Screen Projection signaling", () => {
     }))).toBeTrue();
     await eighthFrame.promise;
     expect(performance.now() - startedAt).toBeLessThanOrEqual(550);
+  }, 15_000);
+
+
+  test("contains capture stream failure to its Screen Projection", async () => {
+    const owner = await ownerFor(h, await makeBot(h, "Failed capture stream"));
+    adapter.failNextCaptureStreamFrame(owner.surfaceId);
+    const connection = await connectProjection(h, owner, "failed-capture-stream-browser");
+    peer = connection.peer;
+    const streamClosed = waitFor<void>("failed capture stream closing", (resolve) => {
+      connection.frames.onClosed(resolve);
+    });
+
+    expect(connection.control.sendMessage(JSON.stringify({
+      version: 1,
+      type: "view",
+      surfaceId: owner.surfaceId,
+      runtimeGeneration: connection.answer.runtimeGeneration,
+      mode: "preview",
+    }))).toBeTrue();
+    await streamClosed;
+
+    const snapshot = await fetch(
+      `${h.baseUrl}/api/computer/snapshot?botId=${encodeURIComponent(owner.botId)}&surfaceId=${encodeURIComponent(owner.surfaceId)}`,
+    );
+    expect(snapshot.status).toBe(200);
+    expect(snapshot.headers.get("content-type")).toBe("image/png");
+    expect(snapshot.headers.get("cache-control")).toBe("no-store");
   }, 15_000);
 
   test("rejects a WebRTC offer when Bot and Surface do not own each other", async () => {
@@ -471,7 +534,7 @@ describe("expanded pointer Web Control", () => {
   const peers: PeerConnection[] = [];
 
   afterEach(async () => {
-    for (const connectedPeer of peers.splice(0)) connectedPeer.close();
+    await Promise.all(peers.splice(0).map(closePeer));
     await h.stop();
   });
   test("normal daemon shutdown clears the diagnostics sweep timer", async () => {
@@ -1312,7 +1375,8 @@ describe("expanded pointer Web Control", () => {
       input.sendMessage(JSON.stringify(message));
       releaseCount += 1;
       await runtime.waitForReleases(releaseCount);
-      peer.close();
+      await closePeer(peer);
+      peers.splice(peers.indexOf(peer), 1);
     };
 
     await reject("wrong-surface-pointer", (message) => {
@@ -1356,7 +1420,8 @@ describe("expanded pointer Web Control", () => {
       y: 70,
     }));
     await runtime.waitForReleases(++releaseCount);
-    duplicate.peer.close();
+    await closePeer(duplicate.peer);
+    peers.splice(peers.indexOf(duplicate.peer), 1);
     expect(runtime.pointerEvents.map(({ event }) => event)).toMatchObject([{ type: "motion", x: 40, y: 50 }]);
   }, 35_000);
   test("revokes held input on browser suspension and helper failure before issuing a new epoch", async () => {

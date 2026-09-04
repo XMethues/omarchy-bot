@@ -2,6 +2,7 @@ import type { SurfaceId } from "@omarchy-bot/domain";
 import { BotScreenInputRejectedError } from "./botScreenManager.ts";
 import type {
   BotScreenCapture,
+  BotScreenCaptureStream,
   BotScreenInputEvent,
   BotScreenProvision,
   BotScreenRuntime,
@@ -35,6 +36,10 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
   readonly starts: BotScreenProvision[] = [];
   readonly stops: Array<{ surfaceId: string; runtimeGeneration: number }> = [];
   readonly destroyed = new Set<string>();
+  captureStreamsOpened = 0;
+  captureStreamsClosed = 0;
+  captureRequestsInFlight = 0;
+  maximumCaptureRequestsInFlight = 0;
   #unreconciled = new Set<string>();
   #runtimes = new Map<string, FakeRuntimeRecord>();
   #pointerWaiters: Array<{ count: number; resolve: () => void }> = [];
@@ -45,6 +50,8 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
   }> = [];
   #inputAttempts = 0;
   #releaseWaiters: Array<{ count: number; resolve: () => void }> = [];
+  #captureStreamCloseWaiters: Array<{ count: number; resolve: () => void }> = [];
+  #captureStreamFailures = new Set<string>();
   #blockActions = false;
   #actionsStarted = 0;
   #actionWaiters: Array<{ count: number; resolve: () => void }> = [];
@@ -103,6 +110,17 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     return promise;
   }
 
+  waitForCaptureStreamsClosed(count: number): Promise<void> {
+    if (this.captureStreamsClosed >= count) return Promise.resolve();
+    const { promise, resolve } = Promise.withResolvers<void>();
+    this.#captureStreamCloseWaiters.push({ count, resolve });
+    return promise;
+  }
+
+  failNextCaptureStreamFrame(surfaceId: string): void {
+    this.#captureStreamFailures.add(surfaceId);
+  }
+
   running(surfaceId: string): { generation: number } | undefined {
     const record = this.#runtimes.get(surfaceId);
     return record === undefined ? undefined : { generation: record.provision.generation };
@@ -143,10 +161,51 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     let actionCount = 0;
     const failure = Promise.withResolvers<Error>();
     let record!: FakeRuntimeRecord;
+    const captureStreams = new Set<BotScreenCaptureStream>();
     const runtime: BotScreenRuntime = {
       capture: async (): Promise<BotScreenCapture> => {
         if (stopped) throw new Error("fake Bot Screen is stopped");
         return { mediaType: "image/png", bytes: FAKE_SCREEN_PNG };
+      },
+      openCaptureStream: async (): Promise<BotScreenCaptureStream> => {
+        if (stopped) throw new Error("fake Bot Screen is stopped");
+        this.captureStreamsOpened += 1;
+        let closed = false;
+        const stream: BotScreenCaptureStream = {
+          next: async () => {
+            if (closed || stopped) throw new Error("fake Bot Screen capture stream is closed");
+            this.captureRequestsInFlight += 1;
+            this.maximumCaptureRequestsInFlight = Math.max(
+              this.maximumCaptureRequestsInFlight,
+              this.captureRequestsInFlight,
+            );
+            try {
+              await Promise.resolve();
+              if (this.#captureStreamFailures.delete(provision.surfaceId)) {
+                throw new Error("fake Bot Screen capture stream failed");
+              }
+              return {
+                mediaType: "image/png",
+                bytes: FAKE_SCREEN_PNG,
+                capturedAt: new Date(),
+              };
+            } finally {
+              this.captureRequestsInFlight -= 1;
+            }
+          },
+          close: async () => {
+            if (closed) return;
+            closed = true;
+            captureStreams.delete(stream);
+            this.captureStreamsClosed += 1;
+            for (const waiter of this.#captureStreamCloseWaiters.splice(0)) {
+              if (this.captureStreamsClosed >= waiter.count) waiter.resolve();
+              else this.#captureStreamCloseWaiters.push(waiter);
+            }
+          },
+        };
+        captureStreams.add(stream);
+        return stream;
       },
       act: async (action) => {
         if (stopped) throw new Error("fake Bot Screen is stopped");
@@ -237,6 +296,7 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
         if (stopped) return;
         stopped = true;
         this.stops.push({ surfaceId: provision.surfaceId, runtimeGeneration: provision.generation });
+        await Promise.allSettled([...captureStreams].map((stream) => stream.close()));
         if (this.#runtimes.get(provision.surfaceId) === record) this.#runtimes.delete(provision.surfaceId);
       },
     };

@@ -10,6 +10,17 @@ export interface BotScreenCapture {
   bytes: Uint8Array;
 }
 
+/** A lossless source frame timestamped when capture completed. */
+export interface BotScreenCaptureFrame extends BotScreenCapture {
+  capturedAt: Date;
+}
+
+/** Pull-based stream with one in-flight capture and no stale frame queue. */
+export interface BotScreenCaptureStream {
+  next(): Promise<BotScreenCaptureFrame>;
+  close(): Promise<void>;
+}
+
 export interface BotScreenActionResult {
   text?: string;
   image?: BotScreenCapture;
@@ -61,6 +72,7 @@ export interface BotScreenProjectionSource {
   videoHeight: number;
   scale: number;
   capture(): Promise<BotScreenCapture>;
+  openCaptureStream(): Promise<BotScreenCaptureStream>;
   setInputAuthority(controllerEpoch: number): Promise<void>;
   input(event: BotScreenInputEvent): Promise<void>;
   releaseInput(controllerEpoch?: number): Promise<void>;
@@ -69,6 +81,7 @@ export interface BotScreenProjectionSource {
 /** Internal platform seam. Runtime handles keep process and socket facts private. */
 export interface BotScreenRuntime {
   capture(): Promise<BotScreenCapture>;
+  openCaptureStream(): Promise<BotScreenCaptureStream>;
   act(action: ComputerAction, inputAuthority?: ComputerInputAuthority): Promise<BotScreenActionResult>;
   setInputAuthority(controllerEpoch: number): Promise<void>;
   input(event: BotScreenInputEvent): Promise<void>;
@@ -279,6 +292,37 @@ export class BotScreenManager {
           this.#serialize(owner.surfaceId, () =>
             this.#invoke(owner.surfaceId, currentEntry(), () => runtime.capture())
           ),
+        openCaptureStream: async () => {
+          currentEntry();
+          const captureStream = await runtime.openCaptureStream();
+          let closed = false;
+          try {
+            currentEntry();
+          } catch (error) {
+            await captureStream.close().catch(() => {});
+            throw error;
+          }
+          return {
+            next: async () => {
+              if (closed) throw new Error("Screen Projection capture stream is closed");
+              try {
+                currentEntry();
+                const frame = await captureStream.next();
+                currentEntry();
+                return frame;
+              } catch (error) {
+                closed = true;
+                await captureStream.close().catch(() => {});
+                throw error;
+              }
+            },
+            close: async () => {
+              if (closed) return;
+              closed = true;
+              await captureStream.close();
+            },
+          };
+        },
         setInputAuthority: (controllerEpoch) =>
           this.#serialize(owner.surfaceId, () =>
             this.#invoke(owner.surfaceId, currentEntry(), () => runtime.setInputAuthority(controllerEpoch))
