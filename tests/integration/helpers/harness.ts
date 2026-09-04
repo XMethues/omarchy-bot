@@ -8,6 +8,7 @@ import path from "node:path";
 import type { DaemonServices } from "../../../apps/daemon/src/api/http.ts";
 import { FakeBotScreenRuntimeAdapter } from "../../../apps/daemon/src/modules/computer/fakeBotScreenRuntime.ts";
 import type { BotScreenRuntimeAdapter } from "../../../apps/daemon/src/modules/computer/botScreenManager.ts";
+import type { MessageDto } from "../../../packages/protocol/src/index.ts";
 
 export interface Harness {
   baseUrl: string;
@@ -93,6 +94,10 @@ export async function api<T>(h: Harness, method: string, p: string, body?: unkno
     throw new Error(`${method} ${p} -> ${res.status}: ${text}`);
   }
   return (await res.json()) as T;
+}
+
+export async function messages(h: Harness, threadId: string): Promise<MessageDto[]> {
+  return api<MessageDto[]>(h, "GET", `/api/threads/${threadId}/messages`);
 }
 
 export async function apiStatus(h: Harness, method: string, p: string, body?: unknown): Promise<{ status: number; body: unknown }> {

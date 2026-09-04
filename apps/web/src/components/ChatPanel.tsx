@@ -1,5 +1,5 @@
-import type { ChangeEvent, DragEvent, JSX, ReactNode } from "react";
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import type { ChangeEvent, CSSProperties, DragEvent, JSX, ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as stylex from "@stylexjs/stylex";
 import { Paperclip } from "lucide-react";
 import { AspectRatio } from "@astryxdesign/core/AspectRatio";
@@ -17,20 +17,34 @@ import {
   ChatToolCalls,
   type ChatToolCallItem,
 } from "@astryxdesign/core/Chat";
-import { Collapsible } from "@astryxdesign/core/Collapsible";
 import { EmptyState } from "@astryxdesign/core/EmptyState";
+import { Collapsible } from "@astryxdesign/core/Collapsible";
 import { HStack } from "@astryxdesign/core/HStack";
 import { Icon } from "@astryxdesign/core/Icon";
+import { Markdown, type MarkdownComponents } from "@astryxdesign/core/Markdown";
 import { Item } from "@astryxdesign/core/Item";
 import { Token } from "@astryxdesign/core/Token";
 import { VStack } from "@astryxdesign/core/VStack";
 import { VisuallyHidden } from "@astryxdesign/core/VisuallyHidden";
-import type { AgentDto, AttachmentDto, BotViewDto, DictationDto, DictationResultDto, MessageDto, ThreadDto } from "@omarchy-bot/protocol";
+import type {
+  AgentDto,
+  AttachmentDto,
+  BotViewDto,
+  DictationDto,
+  DictationResultDto,
+  MessageDto,
+  ThreadDto,
+  ToolCallSummaryDto,
+} from "@omarchy-bot/protocol";
 import { isTerminalTurn } from "@omarchy-bot/domain";
-import { getDelta, subscribeDeltas } from "../lib/live.ts";
 import { api, apiErrorMessage, randomUuid, trimSendText } from "../lib/api.ts";
 import { loadDraft, saveDraft, type ConversationDraft } from "../lib/drafts.ts";
 import { insertDictationTranscript } from "../lib/dictation.ts";
+import {
+  thinkingBoundaryAnnouncements,
+  toolCallBoundaryAnnouncements,
+  type ThinkingAnnouncementState,
+} from "../lib/transcriptAnnouncements.ts";
 import { WorkingAvatarView } from "./AvatarView.tsx";
 import { useTranscriptAttentionSurface } from "./TranscriptAttention.tsx";
 import styles from "../lib/styles.ts";
@@ -71,40 +85,157 @@ interface ContextualErrorCard {
   retry?: () => Promise<void>;
 }
 
-function stringPayloadField(payload: unknown, field: string): string | undefined {
-  if (payload === null || typeof payload !== "object" || !(field in payload)) return undefined;
-  const value = payload[field];
-  return typeof value === "string" ? value : undefined;
+
+type Row =
+  | { kind: "message"; message: MessageDto }
+  | { kind: "responses"; key: string; items: MessageDto[] }
+  | { kind: "tools"; key: string; items: MessageDto[] };
+
+function ExternalMarkdownLink({ href, children }: { href: string; children: ReactNode }): JSX.Element {
+  let protocol: string;
+  try {
+    protocol = new URL(href).protocol.toLowerCase();
+  } catch {
+    return <>{children}</>;
+  }
+  if (protocol !== "http:" && protocol !== "https:" && protocol !== "mailto:") {
+    return <>{children}</>;
+  }
+  return (
+    <a href={href} target="_blank" rel="noopener noreferrer" {...stylex.props(styles.markdownLink)}>
+      {children}
+    </a>
+  );
 }
 
-type Row = { kind: "message"; message: MessageDto } | { kind: "activity"; key: string; items: MessageDto[] };
+function DirectMarkdownImage({ src, alt }: { src: string; alt: string }): JSX.Element {
+  let protocol: string;
+  try {
+    protocol = new URL(src).protocol.toLowerCase();
+  } catch {
+    return <>{`[${alt}]`}</>;
+  }
+  if (protocol !== "http:" && protocol !== "https:") return <>{`[${alt}]`}</>;
+  return (
+    <img
+      src={src}
+      alt={alt}
+      referrerPolicy="no-referrer"
+      {...stylex.props(styles.markdownImage)}
+    />
+  );
+}
 
-/**
- * Consecutive non-text transcript records collapse into one Activity block.
- * Plain-language system notes remain inline so failures are never hidden.
- */
-function groupMessages(messages: MessageDto[]): Row[] {
+const MARKDOWN_COMPONENTS: MarkdownComponents = {
+  link: ExternalMarkdownLink,
+  image: DirectMarkdownImage,
+};
+
+// Astryx uses its disabled token for optional Tool Call metadata. At this
+// integration boundary, promote that token to readable primary text while
+// preserving the component's explicit running/completed/error and diff colors.
+const TOOL_CALL_TEXT_CONTRAST_STYLE = {
+  "--color-text-disabled": "var(--color-text-primary)",
+} as CSSProperties;
+
+function MessageMarkdown({ text, isStreaming = false }: { text: string; isStreaming?: boolean }): JSX.Element {
+  return (
+    <Markdown
+      density="compact"
+      headingLevelStart={3}
+      contentWidth="100%"
+      isStreaming={isStreaming}
+      components={MARKDOWN_COMPONENTS}
+      data-testid={isStreaming ? "streaming-markdown" : "message-markdown"}
+    >
+      {text}
+    </Markdown>
+  );
+}
+
+/** Preserve records while joining only adjacent Responses or adjacent Tool Calls. */
+export function groupTranscriptRows(messages: MessageDto[]): Row[] {
   const out: Row[] = [];
-  let run: MessageDto[] = [];
-  const flushRun = (): void => {
-    if (run.length > 0) {
-      out.push({ kind: "activity", key: run[0]!.id, items: run });
-      run = [];
+  let tools: MessageDto[] = [];
+  let responses: MessageDto[] = [];
+  const flushTools = (): void => {
+    if (tools.length > 0) {
+      out.push({ kind: "tools", key: tools[0]!.id, items: tools });
+      tools = [];
+    }
+  };
+  const flushResponses = (): void => {
+    if (responses.length > 0) {
+      out.push({ kind: "responses", key: responses[0]!.id, items: responses });
+      responses = [];
     }
   };
   for (const message of messages) {
-    const isActivity =
-      message.kind === "tool" ||
-      (message.kind === "event" && message.text === undefined);
-    if (isActivity) {
-      run.push(message);
+    if (message.kind === "response") {
+      flushTools();
+      responses.push(message);
       continue;
     }
-    flushRun();
+    if (message.kind === "tool") {
+      flushResponses();
+      tools.push(message);
+      continue;
+    }
+    flushResponses();
+    flushTools();
+    if (message.kind === "event") continue;
     out.push({ kind: "message", message });
   }
-  flushRun();
+  flushResponses();
+  flushTools();
   return out;
+}
+
+function formatToolDuration(durationMs: number): string {
+  if (durationMs < 1_000) return `${durationMs}ms`;
+  return `${(durationMs / 1_000).toFixed(durationMs < 10_000 ? 1 : 0)}s`;
+}
+
+export function formatThinkingDuration(startedAt: string, completedAt: string): string {
+  const elapsed = Math.max(0, Date.parse(completedAt) - Date.parse(startedAt));
+  return formatToolDuration(Number.isFinite(elapsed) ? elapsed : 0);
+}
+
+function ThinkingDisclosure({ message }: { message: MessageDto }): JSX.Element | null {
+  const thinking = message.thinking;
+  if (thinking === undefined) return null;
+  const header = thinking.state === "streaming"
+    ? "Thinking…"
+    : `Thinking complete · ${formatThinkingDuration(thinking.startedAt, thinking.completedAt ?? thinking.startedAt)}`;
+  return (
+    <ChatMessage
+      sender="assistant"
+      data-testid="thinking-message"
+      data-thinking-state={thinking.state}
+    >
+      <Collapsible trigger={header} defaultIsOpen={false}>
+        <MessageMarkdown
+          text={message.text ?? ""}
+          isStreaming={thinking.state === "streaming"}
+        />
+      </Collapsible>
+    </ChatMessage>
+  );
+}
+
+function toChatToolCall(message: MessageDto): ChatToolCallItem | undefined {
+  const toolCall = message.toolCall;
+  if (toolCall === undefined) return undefined;
+  return {
+    key: toolCall.id,
+    name: toolCall.name,
+    status: toolCall.status === "completed" ? "complete" : toolCall.status,
+    ...(toolCall.target !== undefined ? { target: toolCall.target } : {}),
+    ...(toolCall.durationMs !== undefined ? { duration: formatToolDuration(toolCall.durationMs) } : {}),
+    ...(toolCall.additions !== undefined ? { additions: toolCall.additions } : {}),
+    ...(toolCall.deletions !== undefined ? { deletions: toolCall.deletions } : {}),
+    ...(toolCall.errorSummary !== undefined ? { errorMessage: toolCall.errorSummary } : {}),
+  };
 }
 
 
@@ -219,6 +350,16 @@ export function ChatPanel({
   const dictationOriginRef = useRef<DictationOrigin | undefined>(undefined);
   const [workingAnnouncement, setWorkingAnnouncement] = useState("");
   const workingStateRef = useRef<{ selectionKey: string; active: boolean; name: string } | undefined>(undefined);
+  const [toolCallAnnouncement, setToolCallAnnouncement] = useState("");
+  const toolCallAnnouncementRef = useRef<{
+    selectionKey: string | undefined;
+    calls: Map<string, ToolCallSummaryDto>;
+  }>({ selectionKey: undefined, calls: new Map() });
+  const [thinkingAnnouncement, setThinkingAnnouncement] = useState("");
+  const thinkingAnnouncementRef = useRef<{
+    selectionKey: string | undefined;
+    blocks: Map<string, ThinkingAnnouncementState>;
+  }>({ selectionKey: undefined, blocks: new Map() });
   const draftBotId = bot?.id;
   const draftThreadId = thread?.id;
   const selectedDraftRef = useRef({ botId: draftBotId, threadId: draftThreadId });
@@ -545,11 +686,6 @@ export function ChatPanel({
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [voiceState.state, cancelDictation]);
 
-  const delta = useSyncExternalStore(
-    subscribeDeltas,
-    () => (thread !== undefined ? getDelta(thread.id) : ""),
-    () => "",
-  );
   const selectedThreadIsActive =
     thread?.latestTurn !== undefined && !isTerminalTurn(thread.latestTurn.status);
   const activeTurnCannotSteer = thread?.activeTurn !== undefined && !supportsSteering;
@@ -589,7 +725,51 @@ export function ChatPanel({
     }
   }, [composerIsDisabled]);
 
-  const grouped = useMemo(() => groupMessages(messages), [messages]);
+  const grouped = useMemo(() => groupTranscriptRows(messages), [messages]);
+  useEffect(() => {
+    const selectionKey = thread?.id;
+    const calls = new Map<string, ToolCallSummaryDto>();
+    for (const message of messages) {
+      if (message.kind === "tool" && message.toolCall !== undefined) {
+        calls.set(message.toolCall.id, message.toolCall);
+      }
+    }
+    const previous = toolCallAnnouncementRef.current;
+    toolCallAnnouncementRef.current = { selectionKey, calls };
+    if (selectionKey === undefined || previous.selectionKey !== selectionKey || messagesLoading) {
+      setToolCallAnnouncement("");
+      return;
+    }
+
+    const announcements = toolCallBoundaryAnnouncements(previous.calls, calls);
+    setToolCallAnnouncement(
+      bot?.showToolCalls === true && announcements.length > 0
+        ? announcements.join(". ")
+        : "",
+    );
+  }, [bot?.showToolCalls, messages, messagesLoading, thread?.id]);
+  useEffect(() => {
+    const selectionKey = thread?.id;
+    const blocks = new Map<string, ThinkingAnnouncementState>();
+    for (const message of messages) {
+      if (message.kind === "thinking" && message.thinking !== undefined) {
+        blocks.set(message.thinking.blockId, message.thinking.state);
+      }
+    }
+    const previous = thinkingAnnouncementRef.current;
+    thinkingAnnouncementRef.current = { selectionKey, blocks };
+    if (selectionKey === undefined || previous.selectionKey !== selectionKey || messagesLoading) {
+      setThinkingAnnouncement("");
+      return;
+    }
+
+    const announcements = thinkingBoundaryAnnouncements(previous.blocks, blocks);
+    setThinkingAnnouncement(
+      bot?.showThinking === true && announcements.length > 0
+        ? announcements.join(". ")
+        : "",
+    );
+  }, [bot?.showThinking, messages, messagesLoading, thread?.id]);
 
   const send = useCallback(
     async (): Promise<void> => {
@@ -663,29 +843,56 @@ export function ChatPanel({
   const rows = useMemo(() => {
     const out: ReactNode[] = [];
     for (const g of grouped) {
-      if (g.kind === "activity") {
-        const calls: ChatToolCallItem[] = g.items.map((message) => {
-          const name = stringPayloadField(message.payload, "name");
-          const capability = stringPayloadField(message.payload, "capability");
-          const state = stringPayloadField(message.payload, "state");
-          return {
-            key: message.id,
-            name: message.kind === "event" ? capability ?? "Agent event" : name ?? "Tool",
-            status: state === "running" ? "running" : state === "error" ? "error" : "complete",
-          };
-        });
+      if (g.kind === "responses") {
         out.push(
-          <ChatMessage key={g.key} sender="system">
-            <div {...stylex.props(styles.activityWrap)}>
-              <Collapsible trigger={`Activity (${g.items.length})`} defaultIsOpen={false} data-testid="activity">
-                <ChatToolCalls calls={calls} isExpanded />
-              </Collapsible>
-            </div>
+          <ChatMessage
+            key={g.key}
+            sender="assistant"
+            data-testid="assistant-message"
+            data-response-block-count={g.items.length}
+          >
+            <ChatMessageBubble variant="filled">
+              <VStack gap={2} xstyle={styles.messageContent}>
+                {g.items.map((response) => (
+                  <MessageMarkdown
+                    key={response.id}
+                    text={response.text ?? ""}
+                    isStreaming={response.response?.state === "streaming"}
+                  />
+                ))}
+              </VStack>
+            </ChatMessageBubble>
+          </ChatMessage>,
+        );
+        continue;
+      }
+      if (g.kind === "tools") {
+        if (bot?.showToolCalls !== true) continue;
+        const calls = g.items
+          .map(toChatToolCall)
+          .filter((call): call is ChatToolCallItem => call !== undefined);
+        out.push(
+          <ChatMessage
+            key={g.key}
+            sender="assistant"
+            data-testid="tool-call-message"
+          >
+            <ChatToolCalls
+              calls={calls}
+              style={TOOL_CALL_TEXT_CONTRAST_STYLE}
+              data-testid="tool-calls"
+            />
           </ChatMessage>,
         );
         continue;
       }
       const message = g.message;
+      if (message.kind === "thinking") {
+        if (bot?.showThinking === true) {
+          out.push(<ThinkingDisclosure key={message.id} message={message} />);
+        }
+        continue;
+      }
       if (message.author.kind === "system") {
         out.push(<ChatSystemMessage key={message.id}>{message.text ?? ""}</ChatSystemMessage>);
         continue;
@@ -699,16 +906,16 @@ export function ChatPanel({
           data-testid={sender === "assistant" ? "assistant-message" : "user-message"}
         >
           <ChatMessageBubble variant="filled">
-            <div {...stylex.props(styles.messageContent)}>
-              {message.text !== undefined ? <span>{message.text}</span> : null}
+            <VStack gap={2} xstyle={styles.messageContent}>
+              {message.text !== undefined ? <MessageMarkdown text={message.text} /> : null}
               {message.attachments?.map((attachment) => <AttachmentContent key={attachment.id} attachment={attachment} />)}
-            </div>
+            </VStack>
           </ChatMessageBubble>
         </ChatMessage>,
       );
     }
     return out;
-  }, [grouped]);
+  }, [bot?.showThinking, bot?.showToolCalls, grouped]);
   useEffect(() => {
     if (agentReadiness?.status !== "ready") return;
     const readinessKeyPrefix = `agent:${agentReadiness.id}:`;
@@ -968,17 +1175,6 @@ export function ChatPanel({
 
   const transcriptContent = messagesLoading || messagesError !== undefined ? [] : [...rows];
   if (selectedThreadIsActive && bot !== undefined && !messagesLoading && messagesError === undefined) {
-    if (delta.length > 0) {
-      transcriptContent.push(
-        <ChatMessage
-          key="streaming-response"
-          sender="assistant"
-          data-testid="streaming-message"
-        >
-          <ChatMessageBubble variant="filled">{delta}</ChatMessageBubble>
-        </ChatMessage>,
-      );
-    }
     transcriptContent.push(<WorkingAvatarView key="working-avatar" avatar={bot.avatar} name={bot.name} />);
   }
 
@@ -992,6 +1188,24 @@ export function ChatPanel({
         data-testid="working-announcement"
       >
         {workingAnnouncement}
+      </VisuallyHidden>
+      <VisuallyHidden
+        as="div"
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
+        data-testid="tool-call-announcement"
+      >
+        {toolCallAnnouncement}
+      </VisuallyHidden>
+      <VisuallyHidden
+        as="div"
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
+        data-testid="thinking-announcement"
+      >
+        {thinkingAnnouncement}
       </VisuallyHidden>
       <ChatLayout
         {...(transcriptAttention !== null

@@ -42,10 +42,15 @@ export class AgentsRegistry {
         .query(`INSERT INTO agents (id, display_name, updated_at) VALUES (?, ?, ?)`)
         .run(id, DISPLAY_NAMES[id], now);
     }
-    // Adapters without a worker script cannot run; mark them absent up front.
+    // Readiness is process-local because the exact inventory comes from the
+    // currently running adapter probe. Never publish a persisted ready status
+    // without that required v2 inventory.
     for (const id of AGENT_IDS) {
       const row = this.#row(id);
-      if (this.#adapterPresent(id)) continue;
+      if (this.#adapterPresent(id)) {
+        if (row.status === "ready") this.#setStatus(id, "checking");
+        continue;
+      }
       if (row.status !== "missing") {
         this.#setStatus(id, "missing", "adapter not installed in this build");
       }

@@ -1,12 +1,14 @@
 import { randomUUID } from "node:crypto";
 import type { Database } from "bun:sqlite";
-import type {
-  AgentComputerToolOutput,
-  AgentComputerToolRequest,
-  AgentEvent,
-  WorkerUserMessage,
+import {
+  isAgentToolCallEvent,
+  toolCallSummaryFromEvent,
+  type AgentComputerToolOutput,
+  type AgentComputerToolRequest,
+  type AgentEvent,
+  type WorkerUserMessage,
 } from "@omarchy-bot/agent-contract";
-import type { MessageDto, SendResultDto, TurnDto } from "@omarchy-bot/protocol";
+import type { SendResultDto, TurnDto } from "@omarchy-bot/protocol";
 import type { AgentId, SurfaceId, TurnStatus } from "@omarchy-bot/domain";
 import { canTransitionTurn, isTerminalTurn } from "@omarchy-bot/domain";
 import type { ThreadsService } from "../threads/threads.ts";
@@ -24,7 +26,6 @@ interface TurnContext {
   botId: string;
   agentId: AgentId;
   workerSessionId: string;
-  assistantBuf: string;
   computerToolSurfaces: Map<string, SurfaceId>;
   startedComputerToolCalls: Set<string>;
   turnTimeout: ReturnType<typeof setTimeout>;
@@ -255,7 +256,6 @@ export class TurnService {
       workerSessionId: opened.sessionId,
       computerToolSurfaces: new Map(),
       startedComputerToolCalls: new Set(),
-      assistantBuf: "",
       turnTimeout,
     };
     this.#turns.set(opened.sessionId, ctx);
@@ -380,18 +380,62 @@ export class TurnService {
     return computer.agentToolAct(owner, context.turnId, context.toolCallId, request.action, signal);
   }
 
-  /** Central agent-event router: worker events become transcript activity and turn transitions. */
+  /** Central agent-event router: worker events become ordered transcript records and Turn transitions. */
   onAgentEvent(agentId: AgentId, event: AgentEvent): void {
     const family = agentEventFamily(event);
-    if (!this.agents.capabilityInventory(agentId)?.nativeEventFamilies.includes(family)) {
+    const inventory = this.agents.capabilityInventory(agentId);
+    if (inventory === undefined) {
       this.events.append("agent", agentId, "agent.event_rejected", {
         agentId,
         family,
         eventType: event.type,
-        ...(event.type === "native"
-          ? { capability: event.capability, sensitivity: event.sensitivity }
-          : {}),
-        reason: "event family was not declared by the ready agent capability inventory",
+        reason: "event was not emitted by the exact ready agent capability inventory",
+      });
+      return;
+    }
+    if (family === "tool" && !isAgentToolCallEvent(event)) {
+      this.events.append("agent", agentId, "agent.event_rejected", {
+        agentId,
+        family,
+        eventType: event.type,
+        reason: "Tool Call event was not a validated safe summary",
+      });
+      return;
+    }
+    if (
+      family === "thinking" &&
+      (!inventory.thinking.supported ||
+        (event.type === "thinking.delta" && !inventory.thinking.streaming))
+    ) {
+      this.events.append("agent", agentId, "agent.event_rejected", {
+        agentId,
+        family,
+        eventType: event.type,
+        reason: "Thinking event was not declared by the ready agent capability inventory",
+      });
+      return;
+    }
+    if (
+      event.type === "native" &&
+      (
+        event.agentId !== agentId ||
+        typeof event.capability !== "string" ||
+        event.capability.length === 0 ||
+        (
+          event.sensitivity !== "public" &&
+          event.sensitivity !== "diagnostic" &&
+          event.sensitivity !== "secret"
+        ) ||
+        !inventory.nativeEventFamilies.includes(event.capability)
+      )
+    ) {
+      this.events.append("agent", agentId, "agent.event_rejected", {
+        agentId,
+        family,
+        eventType: event.type,
+        capability: event.capability,
+        sensitivity: event.sensitivity,
+        reason: "Native Event capability was not declared by the exact ready agent inventory",
       });
       return;
     }
@@ -405,40 +449,126 @@ export class TurnService {
 
   #routeTurnEvent(ctx: TurnContext, event: AgentEvent): void {
     switch (event.type) {
-      case "message.delta": {
-        ctx.assistantBuf += event.text;
-        this.events.append("thread", ctx.threadId, "message.delta", { threadId: ctx.threadId, text: event.text });
+      case "response.start": {
+        if (
+          event.blockId.length === 0 ||
+          !Number.isFinite(Date.parse(event.startedAt)) ||
+          this.threads.hasResponseBlock(event.blockId)
+        ) break;
+        this.threads.appendMessage(ctx.threadId, {
+          author: { kind: "bot" },
+          kind: "response",
+          text: "",
+          turnId: ctx.turnId,
+          response: {
+            blockId: event.blockId,
+            state: "streaming",
+            startedAt: event.startedAt,
+          },
+        });
+        break;
+      }
+      case "response.delta": {
+        if (event.text.length === 0) break;
+        const response = this.threads.appendResponseDelta(
+          ctx.threadId,
+          ctx.turnId,
+          event.blockId,
+          event.text,
+        );
+        if (response !== undefined) {
+          this.events.append("thread", ctx.threadId, "response.updated", response);
+        }
+        break;
+      }
+      case "response.end": {
+        if (!Number.isFinite(Date.parse(event.completedAt))) break;
+        const response = this.threads.completeResponse(
+          ctx.threadId,
+          ctx.turnId,
+          event.blockId,
+          event.completedAt,
+        );
+        if (response !== undefined) {
+          this.events.append("thread", ctx.threadId, "response.updated", response);
+          if (response.text?.trim()) {
+            this.bots.recordResponse(ctx.botId, ctx.threadId, response.text.trim());
+          }
+        }
+        break;
+      }
+      case "thinking.start": {
+        if (
+          event.blockId.length === 0 ||
+          !Number.isFinite(Date.parse(event.startedAt)) ||
+          this.threads.hasThinkingBlock(event.blockId)
+        ) break;
+        this.threads.appendMessage(ctx.threadId, {
+          author: { kind: "bot" },
+          kind: "thinking",
+          text: "",
+          turnId: ctx.turnId,
+          thinking: {
+            blockId: event.blockId,
+            state: "streaming",
+            startedAt: event.startedAt,
+          },
+        });
+        break;
+      }
+      case "thinking.delta": {
+        if (event.text.length === 0) break;
+        const thinking = this.threads.appendThinkingDelta(
+          ctx.threadId,
+          ctx.turnId,
+          event.blockId,
+          event.text,
+        );
+        if (thinking !== undefined) {
+          this.events.append("thread", ctx.threadId, "thinking.updated", thinking);
+        }
+        break;
+      }
+      case "thinking.end": {
+        if (!Number.isFinite(Date.parse(event.completedAt))) break;
+        const thinking = this.threads.completeThinking(
+          ctx.threadId,
+          ctx.turnId,
+          event.blockId,
+          event.completedAt,
+        );
+        if (thinking !== undefined) {
+          this.events.append("thread", ctx.threadId, "thinking.updated", thinking);
+        }
         break;
       }
       case "tool.started": {
-        const m = this.threads.appendMessage(ctx.threadId, {
+        if (!isAgentToolCallEvent(event) || this.threads.hasToolCall(ctx.threadId, event.id)) break;
+        const toolCall = toolCallSummaryFromEvent(event);
+        this.threads.appendMessage(ctx.threadId, {
           author: { kind: "bot" },
           kind: "tool",
-          payload: { toolId: event.id, name: event.name, input: event.input, state: "running" },
+          turnId: ctx.turnId,
+          toolCall,
         });
         if (event.name === "computer") {
           ctx.startedComputerToolCalls.add(event.id);
         }
-        this.events.append("thread", ctx.threadId, "message.delta", { threadId: ctx.threadId, messageId: m.id });
         break;
       }
       case "tool.updated":
       case "tool.completed": {
-        const isComplete = event.type === "tool.completed";
-        const isError = isComplete && event.isError;
-        this.threads.updateToolMessage(ctx.threadId, event.id, {
-          state: isError ? "error" : isComplete ? "complete" : "running",
-          ...(event.output !== undefined ? { output: event.output } : {}),
-          ...(isComplete ? { isError: event.isError } : {}),
-        });
-        this.events.append("thread", ctx.threadId, "tool.updated", {
-          threadId: ctx.threadId,
-          toolId: event.id,
-          output: event.output,
-          isError,
-          final: isComplete,
-        });
-        if (isComplete) ctx.startedComputerToolCalls.delete(event.id);
+        if (!isAgentToolCallEvent(event)) break;
+        const toolCall = toolCallSummaryFromEvent(event);
+        const updated = this.threads.updateToolCall(ctx.threadId, toolCall);
+        if (updated !== undefined) {
+          this.events.append("thread", ctx.threadId, "tool.updated", {
+            threadId: ctx.threadId,
+            messageId: updated.id,
+            toolCall: updated.toolCall,
+          });
+        }
+        if (event.type === "tool.completed") ctx.startedComputerToolCalls.delete(event.id);
         break;
       }
       case "turn.completed": {
@@ -482,12 +612,32 @@ export class TurnService {
   #finishTurn(ctx: TurnContext, outcome: "completed" | "cancelled" | "failed", reason?: string): void {
     clearTimeout(ctx.turnTimeout);
     this.#turns.delete(ctx.workerSessionId);
-
-    let assistantMsg: MessageDto | undefined;
-    if (ctx.assistantBuf.trim()) {
-      assistantMsg = this.threads.appendMessage(ctx.threadId, { author: { kind: "bot" }, kind: "text", text: ctx.assistantBuf });
-      this.bots.recordAssistantOutput(ctx.botId, ctx.threadId, ctx.assistantBuf.trim());
+    const removedIncompleteBlocks = this.threads.removeIncompleteAgentBlocks(ctx.turnId);
+    if (removedIncompleteBlocks.responses > 0) {
+      this.events.append("thread", ctx.threadId, "response.removed", {
+        threadId: ctx.threadId,
+        turnId: ctx.turnId,
+        count: removedIncompleteBlocks.responses,
+      });
     }
+    if (removedIncompleteBlocks.thinking > 0) {
+      this.events.append("thread", ctx.threadId, "thinking.removed", {
+        threadId: ctx.threadId,
+        turnId: ctx.turnId,
+        count: removedIncompleteBlocks.thinking,
+      });
+    }
+    const interruptedToolCalls = this.threads.finalizeIncompleteToolCalls(ctx.turnId);
+    for (const message of interruptedToolCalls) {
+      this.events.append("thread", ctx.threadId, "tool.updated", {
+        threadId: ctx.threadId,
+        messageId: message.id,
+        toolCall: message.toolCall,
+      });
+    }
+
+
+
     if (outcome === "cancelled") {
       this.#emitSystemNote(
         ctx.threadId,
@@ -496,11 +646,10 @@ export class TurnService {
     }
 
     this.#setTurnStatus(ctx.turnId, outcome, reason);
-    this.events.append("thread", ctx.threadId, "message.delta", { threadId: ctx.threadId, messageId: assistantMsg?.id ?? "turn-end" });
   }
 
   #emitSystemNote(threadId: string, text: string): void {
-    this.threads.appendMessage(threadId, { author: { kind: "system" }, kind: "event", text });
+    this.threads.appendMessage(threadId, { author: { kind: "system" }, kind: "text", text });
   }
 
   #queueTimeout(ctx: TurnContext): void {

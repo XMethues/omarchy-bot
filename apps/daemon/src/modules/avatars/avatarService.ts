@@ -193,7 +193,7 @@ export class AvatarService {
     if (pending === undefined || pending.agentId !== agentId) return false;
 
     switch (event.type) {
-      case "message.delta":
+      case "response.delta":
         pending.output += event.text;
         if (Buffer.byteLength(pending.output, "utf8") > MAX_RECIPE_OUTPUT_BYTES) {
           this.#settleRecipe(sessionId, new Error("avatar recipe response is too large"));

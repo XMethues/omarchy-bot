@@ -1,6 +1,6 @@
 # AI teammate workspace
 
-> Bot activity presentation, archive/restore, and permanent-deletion decisions are superseded by [Binary Bot activity and direct deletion](../bot-activity-lifecycle/spec.md).
+> Bot activity presentation, archive/restore, and permanent-deletion decisions are superseded by [Binary Bot activity and direct deletion](../bot-activity-lifecycle/spec.md). Transcript stories 60–62 and their Activity implementation decisions are superseded by [Ordered rich transcript](../ordered-rich-transcript/spec.md).
 
 Status: completed
 

@@ -5,8 +5,10 @@
 ## Authority
 
 - [Feature specification](./spec.md)
+- [Superseding ordered transcript specification](../ordered-rich-transcript/spec.md)
 - [Accepted workspace design](../../docs/workspace-redesign.md)
 - [Bot and Agent decision](../../docs/adr/0002-user-created-bots-reference-agents.md)
+- [Ordered transcript decision](../../docs/adr/0007-preserve-ordered-agent-blocks.md)
 - [Workspace language](../../docs/contexts/workspace/CONTEXT.md)
 - [Agent integration language](../../docs/contexts/agent-integration/CONTEXT.md)
 - [Computer control language](../../docs/contexts/computer-control/CONTEXT.md)

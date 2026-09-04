@@ -36,6 +36,9 @@ export interface Bot {
   agentId: AgentId;
   avatar: Avatar;
   pinned: boolean;
+  /** Presentation-only preferences shared by every Thread belonging to this Bot. */
+  showToolCalls: boolean;
+  showThinking: boolean;
   createdAt: string;
   updatedAt: string;
 }

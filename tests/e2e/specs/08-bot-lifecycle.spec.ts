@@ -24,7 +24,7 @@ test.describe("single Bot lifecycle", () => {
     await expect(page.getByRole("button", { name: "Restored legacy bot", exact: true })).toBeVisible();
     await row.click({ button: "right" });
     const menu = page.getByRole("menu", { name: "Restored legacy bot actions" });
-    await expect(menu.getByRole("menuitem")).toHaveText(["Edit Profile", "Delete"]);
+    await expect(menu.getByRole("menuitem")).toHaveText(["Bot Settings", "Delete"]);
 
     await page.keyboard.press("Escape");
     await page.getByRole("navigation", { name: "Bot navigation" })

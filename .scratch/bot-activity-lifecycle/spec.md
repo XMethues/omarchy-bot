@@ -1,5 +1,7 @@
 # Binary Bot activity and direct deletion
 
+> Transcript content, Tool Call presentation, and the former Activity surface are superseded by [Ordered rich transcript](../ordered-rich-transcript/spec.md). This specification remains authoritative for binary Bot Activity, the transient working avatar, errors, and Bot Deletion.
+
 Status: resolved
 
 ## Problem Statement
@@ -42,7 +44,7 @@ Remove archive and restore. A Bot exists until the user confirms permanent delet
 20. As an Omarchy Bot user, I want selecting an inactive Bot to highlight its row without adding an activity point, so that navigation state and work state stay separate.
 21. As an Omarchy Bot user, I want the conversation Header avatar to remain static, so that the identity control does not duplicate activity motion.
 22. As an Omarchy Bot user, I want one temporary working avatar below the selected Turn's current output, so that the conversation has a clear live endpoint.
-23. As an Omarchy Bot user, I want new text and tool Activity to appear above the working avatar, so that the marker follows the bottom of the growing response.
+23. As an Omarchy Bot user, I want visible live transcript content to appear above the working avatar, so that the marker follows the bottom of the growing response.
 24. As an Omarchy Bot user, I want generated working avatars to use DiceBear's working or streaming animation, so that their native character motion remains available.
 25. As an Omarchy Bot user, I want uploaded working avatars to use a restrained pulse, so that they still communicate current work.
 26. As an Omarchy Bot user, I want the temporary chat avatar to omit a redundant activity point, so that one element does not encode the same state repeatedly.
@@ -52,7 +54,7 @@ Remove archive and restore. A Bot exists until the user confirms permanent delet
 30. As a motion-sensitive user, I want activity motion disabled under reduced-motion preference, so that state remains available without unwanted animation.
 31. As an Omarchy Bot user, I want the working avatar removed as soon as the Turn reaches a terminal state, so that stopped work never appears active.
 32. As an Omarchy Bot user, I want historical Bot messages to render without avatars, so that completed conversation reads as content rather than repeated identity chrome.
-33. As an Omarchy Bot user, I want historical text, attachments, tool Activity, and necessary System content preserved, so that removing avatars does not remove conversation evidence.
+33. As an Omarchy Bot user, I want historical Response Blocks, Thinking Blocks, Tool Calls, attachments, and necessary System content preserved according to their display settings, so that removing avatars does not remove conversation evidence.
 34. As an Omarchy Bot user, I want a failed Turn to become inactive immediately, so that failure is never represented as continuing work.
 35. As an Omarchy Bot user, I want Turn, send, model-provider, and Agent Readiness errors in a contextual card immediately above the Composer, so that errors appear where I can act on them.
 36. As an Omarchy Bot user, I want applicable Retry and Close actions on the error card, so that recovery is direct.
@@ -86,7 +88,7 @@ Remove archive and restore. A Bot exists until the user confirms permanent delet
 - In the Sidebar, generated avatars keep DiceBear-native ambient animation independently of activity, uploaded avatars may remain static, and a separate point alone carries active/inactive.
 - The selected row carries selection styling without changing the avatar's activity point. Unread badges remain independent.
 - The conversation Header always uses a static identity avatar.
-- Historical Bot messages no longer allocate an avatar slot. Their text, attachments, tool Activity, and necessary System content remain unchanged.
+- Historical Bot messages no longer allocate an avatar slot. Their ordered content and attachments remain governed by the transcript specification.
 - The selected Thread owns one transient working mark after its live output. Generated avatars use DiceBear working/streaming animation; uploaded images use a restrained container pulse. The mark has no activity point.
 - The transient mark remains present through working and both waiting states. It disappears on every terminal state.
 - The working mark exposes `{Bot name} is working` on hover and focus and exposes equivalent nonvisual state transitions.
@@ -123,7 +125,7 @@ Remove archive and restore. A Bot exists until the user confirms permanent delet
 - Existing permanent-deletion integration tests are revised to remove the archive prerequisite and native Session cleanup. They continue to verify owned database/file removal, sibling Bot and shared Agent survival, local failure reporting, and retry.
 - Migration integration tests verify that previously archived Bots become visible and that obsolete archived and native-deletion storage does not remain part of the public model.
 - Agent capability integration and conformance tests verify removal of the native Session deletion capability and command without weakening remaining capability inventory behavior.
-- Playwright chat tests verify that the working mark follows streaming text and Activity, remains during waiting, disappears at terminal state, and never appears in an idle selected Thread merely because another Thread is active.
+- Playwright chat tests verify that the working mark follows visible streaming transcript content, remains during waiting, disappears at terminal state, and never appears in an idle selected Thread merely because another Thread is active.
 - Playwright avatar tests cover generated and uploaded avatars, Sidebar ambient motion, the independent activity point, static Header identity, historical messages without avatars, hover/focus explanation, and reduced-motion behavior.
 - Playwright error tests verify that failures remove the working mark, make the Bot inactive when appropriate, render one card above the Composer, do not create a duplicate history record, and follow the agreed dismissal lifetime.
 - Playwright deletion tests cover Sidebar right-click and Settings entry points, ordinary confirmation, active-work warning, cancellation, successful deletion, local cleanup failure, retry, selected-Bot fallback, and empty-workspace fallback.
@@ -141,7 +143,7 @@ Remove archive and restore. A Bot exists until the user confirms permanent delet
 - Adding Pin, Mark as unread, Duplicate, Copy Thread ID, or other Grok context-menu actions.
 - Adding a hover ellipsis or keyboard trigger for the Sidebar context menu.
 - Serializing Turns across a Bot's Threads or stopping work when the user switches Threads.
-- Changing Agent-native approvals, steering, Turn state names, computer handoff, attachments, tool Activity retention, notifications, or unread semantics.
+- Changing Agent-native approvals, steering, Turn state names, computer handoff, attachments, notifications, or unread semantics beyond the Response-only transcript projection.
 - Deleting, compacting, retaining, exporting, or otherwise managing Agent-owned Native Sessions.
 - Claiming that permanent Bot deletion erases Agent-owned data.
 - Adding new avatar renderers or modifying DiceBear SVG internals.

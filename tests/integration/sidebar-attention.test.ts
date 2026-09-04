@@ -34,7 +34,7 @@ describe("Sidebar attention", () => {
 
   test("keeps the latest Agent output while a user follow-up is in flight", async () => {
     const botId = await makeBot(h, "Output preview");
-    h.svc.bots.recordAssistantOutput(botId, "thread-preview", "Agent result remains visible");
+    h.svc.bots.recordResponse(botId, "thread-preview", "Agent result remains visible");
     h.svc.bots.recordUserMessage(botId, "thread-preview");
 
     const bot = await api<BotViewDto>(h, "GET", `/api/bots/${botId}`);
@@ -99,6 +99,17 @@ describe("Sidebar attention", () => {
     expect(untouched.unreadCount).toBe(1);
   });
 
+
+  test("does not create preview or unread content from Thinking, Tool Calls, or residual Native Events", async () => {
+    const botId = await makeBot(h, "Process-only Bot");
+    const sent = await sendToBot(h, botId, "process-only");
+    await waitThreadIdle(h, sent.threadId);
+
+    const bot = await api<BotViewDto>(h, "GET", `/api/bots/${botId}`);
+    expect(bot.previewText).toBeUndefined();
+    expect(bot.unreadCount).toBe(0);
+    expect(bot.unreadThreadId).toBeUndefined();
+  });
 });
 
 describe("binary Bot Activity", () => {

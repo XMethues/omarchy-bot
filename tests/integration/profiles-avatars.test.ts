@@ -37,7 +37,12 @@ const worker = {
           avatars.onAgentEvent("pi", { type: "error", sessionId, message: failure, retryable: false });
           return;
         }
-        avatars.onAgentEvent("pi", { type: "message.delta", sessionId, text: agentOutput });
+        avatars.onAgentEvent("pi", {
+          type: "response.delta",
+          sessionId,
+          blockId: `avatar-response-${sessionCounter}`,
+          text: agentOutput,
+        });
         avatars.onAgentEvent("pi", { type: "turn.completed", sessionId });
       });
       return { accepted: true };

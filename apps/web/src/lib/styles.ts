@@ -47,11 +47,17 @@ const styles = stylex.create({
     display: "flex",
     flexDirection: "column",
     gap: "var(--spacing-2)",
-    whiteSpace: "pre-wrap",
+    whiteSpace: "normal",
     minWidth: 0,
   },
-  activityWrap: {
-    paddingInline: "var(--spacing-2)",
+  markdownLink: {
+    color: "var(--color-text-accent)",
+    textDecoration: "underline",
+  },
+  markdownImage: {
+    display: "block",
+    maxWidth: "100%",
+    height: "auto",
   },
 });
 

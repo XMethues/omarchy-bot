@@ -7,6 +7,7 @@ const scenario = (process.argv[2] ?? "echo").replace(/^--scenario=/, "");
 let sessionCounter = 0;
 const sessions = new Map<string, { nativeSessionId: string; turnActive: boolean; aborted: boolean }>();
 let msgCounter = 0;
+let responseCounter = 0;
 
 const out = (m: WorkerOutbound) => writeJsonl(m);
 const result = (requestId: string, ok: boolean, payload: unknown) =>
@@ -20,29 +21,48 @@ function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-/** Stream a scripted turn with text and native tool activity. */
+/** Stream a scripted turn with ordered Response Blocks and Tool Calls. */
 async function runTurn(sessionId: string, turnId: string, text: string): Promise<void> {
   const s = sessions.get(sessionId)!;
   s.turnActive = true;
   s.aborted = false;
   try {
+    const firstBlockId = `response-${++responseCounter}`;
+    out({
+      type: "event",
+      event: { type: "response.start", sessionId, blockId: firstBlockId, startedAt: new Date().toISOString() },
+    });
     for (const chunk of ["Hello ", "from ", "fake ", "agent."]) {
       if (s.aborted) throw new Error("aborted");
-      out({ type: "event", event: { type: "message.delta", sessionId, text: chunk } });
+      out({ type: "event", event: { type: "response.delta", sessionId, blockId: firstBlockId, text: chunk } });
       await sleep(20);
     }
+    out({
+      type: "event",
+      event: { type: "response.end", sessionId, blockId: firstBlockId, completedAt: new Date().toISOString() },
+    });
     const toolId = `tool-${++msgCounter}`;
-    out({ type: "event", event: { type: "tool.started", sessionId, id: toolId, name: "read_file", input: { path: "/tmp/fake.txt" } } });
+    out({ type: "event", event: { type: "tool.started", sessionId, id: toolId, name: "read_file", status: "running", target: "/tmp/fake.txt" } });
     await sleep(20);
-    out({ type: "event", event: { type: "tool.completed", sessionId, id: toolId, output: "fake file content", isError: false } });
+    out({ type: "event", event: { type: "tool.completed", sessionId, id: toolId, name: "read_file", status: "completed", target: "/tmp/fake.txt", durationMs: 20 } });
 
     if (text.includes("!write")) {
       const wId = `tool-${++msgCounter}`;
-      out({ type: "event", event: { type: "tool.started", sessionId, id: wId, name: "write_file", input: {} } });
+      out({ type: "event", event: { type: "tool.started", sessionId, id: wId, name: "write_file", status: "running", target: "/tmp/fake.txt" } });
       await sleep(20);
-      out({ type: "event", event: { type: "tool.completed", sessionId, id: wId, output: "written", isError: false } });
+      out({ type: "event", event: { type: "tool.completed", sessionId, id: wId, name: "write_file", status: "completed", target: "/tmp/fake.txt", durationMs: 20, additions: 1, deletions: 0 } });
     }
     if (s.aborted) throw new Error("aborted");
+    const finalBlockId = `response-${++responseCounter}`;
+    out({
+      type: "event",
+      event: { type: "response.start", sessionId, blockId: finalBlockId, startedAt: new Date().toISOString() },
+    });
+    out({ type: "event", event: { type: "response.delta", sessionId, blockId: finalBlockId, text: "Done." } });
+    out({
+      type: "event",
+      event: { type: "response.end", sessionId, blockId: finalBlockId, completedAt: new Date().toISOString() },
+    });
     out({ type: "event", event: { type: "turn.completed", sessionId, usage: { turnId, tokens: 42 } } });
   } catch (err) {
     if (String((err as Error).message).includes("aborted")) {
@@ -74,8 +94,9 @@ readJsonl(Bun.stdin.stream(), async (raw) => {
           steering: true,
           abort: true,
           nativeThreadActions: ["resume", "history", "close"],
+          thinking: { supported: true, streaming: true },
           attachments: { text: false, image: false },
-          nativeEventFamilies: ["message", "tool", "turn", "error"],
+          nativeEventFamilies: [],
         },
       } satisfies ProbePayload);
       break;

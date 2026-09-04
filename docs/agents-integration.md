@@ -1,6 +1,6 @@
 # Agent adapters and native capability inventory
 
-> Inventory date: 2026-09-02. Every implementation entry must be verified against the installed Agent version and its official interface before the Agent is enabled.
+> Inventory date: 2026-09-04. Every implementation entry must be verified against the installed Agent version and its official interface before the Agent is enabled.
 
 ## Policy
 
@@ -20,27 +20,27 @@ A usable conversation adapter must prove the operations required by its own offi
 
 - create and restore a conversation/session;
 - send user content and stream output;
-- preserve structured tool and native events;
+- preserve ordered Response, Thinking, Tool Call, and residual Native Events;
 - reach explicit completed, cancelled, and failed boundaries;
 - cancel an active turn through the Agent's native mechanism;
 - accept the attachment forms claimed by that adapter;
 - close and recover without orphaning the worker.
 
-Steer, fork, compact, rename, Thread delete, subagents, plans, usage, and other advanced operations are inventory entries, not fabricated common features. The UI surfaces them contextually when the active adapter reports tested support.
+Steer, fork, compact, rename, Thread delete, subagents, plans, usage, and other advanced operations are inventory entries, not fabricated common features. A capability-specific product surface may expose them only after their common semantics and tested support are defined; raw Native Events are not a substitute.
 
 ## Official integration surfaces
 
 | Agent | Primary official surface | Adapter state | Notes |
 | --- | --- | --- | --- |
-| Pi | `@earendil-works/pi-coding-agent` TypeScript SDK | Implemented | Native sessions, streaming, tools, internal abort, history, attachments, and SDK steering are available. |
+| Pi | `@earendil-works/pi-coding-agent` TypeScript SDK | Implemented | Native sessions, Response and Thinking block streams, tools, internal abort, history, attachments, and SDK steering are available. |
 | OMP | `@oh-my-pi/pi-coding-agent` Bun SDK | Pending | Use the in-process SDK behind an isolated Bun worker; preserve extensions, skills, tools, and session events. |
 | Codex | `codex app-server --stdio` | Pending | Use `thread/start|resume`, `turn/start|interrupt`, generated protocol types, and structured server events. |
 | Claude Code | `@anthropic-ai/claude-agent-sdk` | Pending | Use `query()`, async multi-turn input, resume, interrupt, hooks, partial messages, and native tool decisions. |
 | Grok Build | native ACP plus `x.ai/*` extensions | Pending | Basic ACP alone is incomplete. Preserve Grok session, steering, queue, fork, compact, subagent, workspace, and other advertised extensions by version. |
 | OpenCode | `@opencode-ai/sdk` plus local server | Pending | Preserve server events and native session children, share, summarize, revert, commands, files, and LSP operations. |
-| Gemini CLI | `gemini --acp` | Pending | Use ACP negotiation, session lifecycle, updates, elicitation, and native image/file support. |
-| GitHub Copilot CLI | `@github/copilot-sdk` with explicit native runtime | Pending | Preserve sessions, steering/queueing, hooks, elicitation, subagents, usage, citations, and attachments. |
-| Crush | official Unix-socket HTTP/SSE server | Pending | Keep the workspace SSE connection alive and correlate workspace, session, run, tool, question, and cancel events. |
+| Gemini CLI | `gemini --acp` | Pending | Use ACP negotiation, session lifecycle, content/tool updates, permission requests, and native image/file support. |
+| GitHub Copilot CLI | `@github/copilot-sdk` with explicit native runtime | Pending | Preserve sessions, steering/queueing, hooks, elicitation, subagents, usage, workspace, and attachment events. |
+| Crush | official Unix-socket HTTP/SSE server | Pending | Keep the workspace SSE connection alive and correlate workspace, session, run, tool, question, and cancellation results. |
 
 `Pending` Agents remain visible but disabled in the Agent picker with setup/status guidance. Presence on `PATH` alone is not readiness.
 
@@ -50,9 +50,13 @@ Every adapter owns a machine-readable record tied to the exact Agent version:
 
 ```ts
 interface AgentCapabilityInventory {
-  version: 1;
+  version: 2;
   steering: boolean;
   abort: boolean;
+  thinking: {
+    supported: boolean;
+    streaming: boolean;
+  };
   nativeThreadActions: Array<
     "resume" | "history" | "close" | "rename" | "delete" | "fork" | "compact"
   >;
@@ -69,9 +73,10 @@ Rules:
 
 1. A claimed operation or modality means the official interface was exercised by conformance, not merely documented.
 2. `false` or an absent action is honest unavailability and must not trigger an emulated substitute.
-3. Unknown native envelopes remain typed `native` events with sensitivity metadata and are reported as capability drift.
-4. Upgrading the Agent invalidates the previous readiness record and inventory until conformance passes again.
-5. Feature UI and daemon services read this inventory as the sole source for support decisions; it never approves or denies Agent tools.
+3. Response, Thinking, Tool Call, Turn, and error semantics are normalized before an event may be classified as Native.
+4. Unknown public Native Event payloads may be retained for fidelity. Diagnostic and secret payloads retain redacted metadata only, and no generic raw Native Event renderer appears in the Thread.
+5. Upgrading the Agent invalidates the previous readiness record and inventory until conformance passes again.
+6. Feature UI and daemon services read this inventory as the sole source for support decisions; it never approves or denies Agent tools.
 
 ## Worker boundary
 
@@ -91,13 +96,17 @@ type AgentCommand =
 
 The exact accepted commands are versioned. An adapter may report an operation unavailable; it may not silently route it through a weaker headless or PTY transport.
 
-Native events carry `agentId`, capability name, payload, and sensitivity. Secret or diagnostic payloads are never forwarded to the browser without an explicit safe projection.
+Adapters assign a stable common block ID at each native Response or Thinking block start and reuse it for every delta and end event. They preserve occurrence order and expose only Thinking content or provider-authored summaries officially supplied by the backend.
+
+Tool Call events contain required identity, name, and status plus only reliably available Adapter-authored safe summaries such as target, duration, diff statistics, and a bounded redacted error. Full tool input and output are not transcript history.
+
+Native Events carry `agentId`, capability name, payload, and sensitivity only after common semantics have been removed. Secret or diagnostic payloads are never forwarded to the browser without an explicit safe projection.
 
 ## Adapter notes
 
 ### Pi
 
-Use `createAgentSession`, `DefaultResourceLoader`, `SessionManager.create/open`, and the SDK event subscription. Load the user's native Pi resources. Use `session.steer(...)` for messages sent during active work and `session.abort()` only for explicit local operations that must terminate work, such as deleting an active Bot.
+Use `createAgentSession`, `DefaultResourceLoader`, `SessionManager.create/open`, and the SDK event subscription. Load the user's native Pi resources. Normalize Pi 0.84.4 `text_start | text_delta | text_end` and `thinking_start | thinking_delta | thinking_end` as ordered common blocks correlated from native `contentIndex`; do not change Pi's native Thinking level or infer content it does not expose. Use `session.steer(...)` for messages sent during active work and `session.abort()` only for explicit local operations that must terminate work, such as deleting an active Bot.
 
 Pi Native Sessions are Agent-owned continuation state. Omarchy Bot does not advertise or invoke Native Session deletion; deleting a Bot leaves that native state intact.
 
@@ -124,13 +133,14 @@ A versioned adapter suite verifies:
 1. probe and authentication/readiness;
 2. session creation and restoration;
 3. streamed output and explicit terminal state;
-4. structured tool/native event preservation;
-5. native cancellation without late output;
-6. claimed attachment types;
-7. close/restart/recovery behavior;
-8. every `native` capability inventory entry;
-9. unknown-event drift handling;
-10. Computer tool coordination where the Agent uses the shared desktop.
+4. ordered Response and Thinking blocks, including multiple blocks around Tool Calls;
+5. safe Tool Call summary and residual Native Event preservation;
+6. native cancellation without late output;
+7. claimed attachment types;
+8. close/restart/recovery behavior;
+9. every `native` capability inventory entry;
+10. unknown-event drift handling;
+11. Computer tool coordination where the Agent uses the shared desktop.
 
 Only a passing record makes an installed Agent selectable.
 

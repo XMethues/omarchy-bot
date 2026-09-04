@@ -21,6 +21,7 @@ async function sendAndWait(page: Page, text: string): Promise<void> {
   await composerInput(page).fill(text);
   await composerInput(page).press("Enter");
   await expect(page.getByTestId("assistant-message")).toHaveCount(priorReplies + 1, { timeout: 15_000 });
+  await expect(page.getByTestId("working-avatar")).toHaveCount(0, { timeout: 15_000 });
 }
 
 async function currentThreadId(page: Page): Promise<string> {
@@ -100,7 +101,7 @@ test.describe("Sidebar attention", () => {
     await expect(scrollToLatest).toBeHidden();
   });
 
-  test("suppresses focused viewed-Bot notifications and notifies for another Bot without prompting", async ({ page }) => {
+  test("keeps completion notifications state-driven while process-only output leaves Sidebar attention unchanged", async ({ page }) => {
     await page.addInitScript(() => {
       const state = globalThis as typeof globalThis & {
         __notificationCalls: Array<{ title: string; body?: string }>;
@@ -125,15 +126,29 @@ test.describe("Sidebar attention", () => {
     const affectedBotId = await createBot(page, `Notification target ${Date.now()}`);
     await sendAndWait(page, "say: focused completion is quiet");
     const affectedThreadId = await currentThreadId(page);
+    const markedRead = await page.request.post(`/api/bots/${affectedBotId}/read`, {
+      data: { threadId: affectedThreadId },
+    });
+    expect(markedRead.ok()).toBe(true);
+    const affectedRow = page.getByTestId(`sidebar-bot-${affectedBotId}`);
+    await expect(affectedRow.getByLabel("1 unread message")).toHaveCount(0, { timeout: 15_000 });
     await expect.poll(() => page.evaluate(() => (globalThis as typeof globalThis & { __notificationCalls: unknown[] }).__notificationCalls.length)).toBe(0);
 
     await createBot(page, `Other selected ${Date.now()}`);
-    await postMessage(page, affectedThreadId, "say: background completion notifies");
+    await expect(affectedRow).toContainText("focused completion is quiet");
+
+    await postMessage(page, affectedThreadId, "process-only");
     await expect.poll(() => page.evaluate(() => (globalThis as typeof globalThis & { __notificationCalls: unknown[] }).__notificationCalls.length), { timeout: 15_000 }).toBe(1);
-    const notification = await page.evaluate(() => (globalThis as typeof globalThis & { __notificationCalls: Array<{ title: string }> }).__notificationCalls[0]);
-    expect(notification?.title).toContain("finished working");
-    expect(notification?.title).toContain("Notification target");
+    await expect(affectedRow).toContainText("focused completion is quiet");
+    await expect(affectedRow.getByLabel("1 unread message")).toHaveCount(0);
+
+    await postMessage(page, affectedThreadId, "say: background completion notifies");
+    await expect.poll(() => page.evaluate(() => (globalThis as typeof globalThis & { __notificationCalls: unknown[] }).__notificationCalls.length), { timeout: 15_000 }).toBe(2);
+    const notifications = await page.evaluate(() => (globalThis as typeof globalThis & { __notificationCalls: Array<{ title: string }> }).__notificationCalls);
+    expect(notifications.every((notification) => notification.title.includes("finished working"))).toBe(true);
+    expect(notifications.every((notification) => notification.title.includes("Notification target"))).toBe(true);
     expect(await page.evaluate(() => (globalThis as typeof globalThis & { __notificationPermissionRequests: number }).__notificationPermissionRequests)).toBe(0);
-    await expect(page.getByRole("navigation", { name: "Bot navigation" }).getByLabel("1 unread message")).toBeVisible();
+    await expect(affectedRow.getByLabel("1 unread message")).toBeVisible();
+    await expect(affectedRow).toContainText("background completion notifies");
   });
 });

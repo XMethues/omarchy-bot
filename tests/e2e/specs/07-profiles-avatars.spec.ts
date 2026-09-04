@@ -14,10 +14,10 @@ async function createBot(page: Page, name: string): Promise<string> {
   return botId;
 }
 
-async function openProfile(page: Page, botName: string): Promise<void> {
-  await page.getByRole("button", { name: `Open profile for ${botName}` }).click();
-  const profile = page.getByRole("complementary", { name: "Bot profile" });
-  await expect(profile.getByTestId("profile-drawer")).toBeVisible();
+async function openBotSettings(page: Page, botName: string): Promise<void> {
+  await page.getByRole("button", { name: `Open settings for ${botName}` }).click();
+  const botSettings = page.getByRole("complementary", { name: "Bot settings" });
+  await expect(botSettings.getByTestId("bot-settings-panel")).toBeVisible();
 }
 
 const onePixelPng = Buffer.from(
@@ -35,25 +35,25 @@ async function avatarSvg(avatar: Locator): Promise<string> {
 test.describe("Bot profiles and avatars", () => {
   test("edits profile fields, creates a variation, and uploads a local image", async ({ page }) => {
     const botId = await createBot(page, "Profile Bot");
-    await openProfile(page, "Profile Bot");
+    await openBotSettings(page, "Profile Bot");
 
-    const profile = page.getByRole("complementary", { name: "Bot profile" });
-    await expect(profile.getByText("Backing Agent", { exact: true })).toBeVisible();
-    await expect(profile.getByText("Pi", { exact: true })).toBeVisible();
-    await expect(profile.getByText("Fixed for this bot.", { exact: true })).toBeVisible();
-    await profile.getByRole("textbox", { name: "Name" }).fill("Renamed Profile Bot");
-    await profile.getByRole("textbox", { name: "Job / Instructions" }).fill("Use the latest profile instructions");
-    await profile.getByRole("button", { name: "Save profile" }).click();
+    const botSettings = page.getByRole("complementary", { name: "Bot settings" });
+    await expect(botSettings.getByText("Backing Agent", { exact: true })).toBeVisible();
+    await expect(botSettings.getByText("Pi", { exact: true })).toBeVisible();
+    await expect(botSettings.getByText("Fixed for this bot.", { exact: true })).toBeVisible();
+    await botSettings.getByRole("textbox", { name: "Name" }).fill("Renamed Profile Bot");
+    await botSettings.getByRole("textbox", { name: "Job / Instructions" }).fill("Use the latest profile instructions");
+    await botSettings.getByRole("button", { name: "Save profile" }).click();
     await expect(page.getByRole("button", { name: "Renamed Profile Bot", exact: true })).toBeVisible();
 
-    const profileAvatar = profile.getByRole("img", { name: "Renamed Profile Bot" }).locator("img");
+    const profileAvatar = botSettings.getByRole("img", { name: "Renamed Profile Bot" }).locator("img");
     const beforeSrc = await profileAvatar.getAttribute("src");
-    await profile.getByRole("button", { name: "New variation" }).click();
+    await botSettings.getByRole("button", { name: "New variation" }).click();
     await expect.poll(() => profileAvatar.getAttribute("src")).not.toBe(beforeSrc);
 
     await page.getByLabel("Choose an avatar image").setInputFiles({ name: "avatar.png", mimeType: "image/png", buffer: onePixelPng });
     await expect
-      .poll(() => profile.getByRole("img", { name: "Renamed Profile Bot" }).locator("img").getAttribute("src"))
+      .poll(() => botSettings.getByRole("img", { name: "Renamed Profile Bot" }).locator("img").getAttribute("src"))
       .toBe(`/api/bots/${botId}/avatar`);
   });
 
@@ -81,10 +81,10 @@ test.describe("Bot profiles and avatars", () => {
       });
     });
 
-    await openProfile(page, "Recipe UI Bot");
+    await openBotSettings(page, "Recipe UI Bot");
     await page.getByRole("textbox", { name: "Describe avatar" }).fill("A friendly teammate with round glasses");
     await page.getByRole("button", { name: "Create from description" }).click();
-    await expect(page.getByRole("complementary", { name: "Bot profile" }).getByTestId("avatar-thumbs")).toBeVisible();
+    await expect(page.getByRole("complementary", { name: "Bot settings" }).getByTestId("avatar-thumbs")).toBeVisible();
   });
 
 
@@ -99,7 +99,7 @@ test.describe("Bot profiles and avatars", () => {
     const ambientSrc = await sidebarAvatar.locator("img").getAttribute("src");
     await expect(sidebarRow.getByTestId("sidebar-activity-point")).toHaveCount(0);
 
-    const headerAvatar = page.getByTestId("profile-open").getByTestId("avatar-view");
+    const headerAvatar = page.getByTestId("bot-settings-open").getByTestId("avatar-view");
     await expect(headerAvatar).toHaveAttribute("data-avatar-presentation", "static");
     expect(await avatarSvg(headerAvatar)).not.toContain("@keyframes");
 
@@ -123,12 +123,7 @@ test.describe("Bot profiles and avatars", () => {
     await workingAvatarImage.focus();
     await expect(page.getByRole("tooltip", { name: "Activity Avatar Bot is working" })).toBeVisible();
 
-    const activity = page.getByTestId("activity").last();
-    await expect(activity).toBeVisible();
-    const [activityBox, workingBox] = await Promise.all([activity.boundingBox(), workingAvatar.boundingBox()]);
-    expect(activityBox).not.toBeNull();
-    expect(workingBox).not.toBeNull();
-    expect(workingBox!.y).toBeGreaterThanOrEqual(activityBox!.y + activityBox!.height);
+    await expect(page.getByTestId("tool-calls")).toHaveCount(0);
 
     await page.getByRole("button", { name: "Open conversation history" }).click();
     await page.getByRole("button", { name: "New conversation" }).click();
@@ -149,13 +144,13 @@ test.describe("Bot profiles and avatars", () => {
 
   test("uses whole-avatar pulse for uploads and preserves the working cue under reduced motion", async ({ page }) => {
     const botId = await createBot(page, "Uploaded Activity Bot");
-    await openProfile(page, "Uploaded Activity Bot");
+    await openBotSettings(page, "Uploaded Activity Bot");
     await page.getByLabel("Choose an avatar image").setInputFiles({
       name: "avatar.png",
       mimeType: "image/png",
       buffer: onePixelPng,
     });
-    await page.getByRole("button", { name: "Close profile drawer" }).click();
+    await page.getByRole("button", { name: "Close bot settings" }).click();
 
     const composer = page.getByRole("textbox", { name: "Message input" });
     await composer.fill("steer-echo");

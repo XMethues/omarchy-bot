@@ -10,6 +10,9 @@ import {
   type BotActivityEventPayload,
   type BotDto,
   type BotViewDto,
+  type BotUpdatedEventPayload,
+  type PatchBotBodyDto,
+  type ThinkingAvailabilityDto,
 } from "@omarchy-bot/protocol";
 import type { EventLog } from "../events/eventLog.ts";
 import type { AgentsRegistry } from "../agents/registry.ts";
@@ -20,6 +23,7 @@ interface BotRow {
   id: string; name: string; instructions: string; agent_id: string;
   avatar_kind: string; avatar_recipe: string; avatar_file: string | null;
   pinned: number;
+  show_tool_calls: number; show_thinking: number;
   created_at: string; updated_at: string;
 }
 interface BotStateRow {
@@ -50,24 +54,7 @@ export class BotsService {
     private readonly events: EventLog,
     private readonly agents: AgentsRegistry,
     private readonly threads: ThreadsService,
-  ) {
-    // TurnService already records user/final assistant text. Other Bot and
-    // system transcript output has no useful preview, but still needs attention.
-    this.events.subscribe((event) => {
-      if (event.type !== "message.appended" || event.aggregateType !== "thread") return;
-      const message = event.payload as {
-        author?: { kind?: unknown };
-        kind?: unknown;
-        threadId?: unknown;
-      } | undefined;
-      const isSystemOutput = message?.author?.kind === "system";
-      const isNonTextBotOutput = message?.author?.kind === "bot" && message.kind !== "text";
-      if (!isSystemOutput && !isNonTextBotOutput) return;
-      const threadId = typeof message?.threadId === "string" ? message.threadId : event.aggregateId;
-      const thread = this.threads.getThread(threadId);
-      if (thread !== undefined) this.#recordUnreadOutput(thread.botId, threadId);
-    });
-  }
+  ) {}
 
   #row(id: string): BotRow | undefined {
     return this.db
@@ -117,8 +104,12 @@ export class BotsService {
         : { kind: r.avatar_kind === "recipe" ? "recipe" : "generated", recipe: JSON.parse(r.avatar_recipe || defaultAvatarRecipe(r.id)) };
     return {
       id: r.id, surfaceId: r.surface_id as SurfaceId, name: r.name, instructions: r.instructions, agentId: r.agent_id as AgentId,
-      avatar, pinned: Boolean(r.pinned),
-      createdAt: r.created_at, updatedAt: r.updated_at,
+      avatar,
+      pinned: Boolean(r.pinned),
+      showToolCalls: Boolean(r.show_tool_calls),
+      showThinking: Boolean(r.show_thinking),
+      createdAt: r.created_at,
+      updatedAt: r.updated_at,
     };
   }
 
@@ -136,6 +127,14 @@ export class BotsService {
     return views;
   }
 
+  #thinkingAvailability(r: BotRow): ThinkingAvailabilityDto {
+    if (this.agents.capabilityInventory(r.agent_id as AgentId)?.thinking.supported === true) {
+      return "supported";
+    }
+
+    return this.threads.hasRetainedThinkingForBot(r.id) ? "history" : "unavailable";
+  }
+
   #toView(r: BotRow): BotViewDto {
     const st = this.#stateRow(r.id);
     const status: BotViewDto["status"] =
@@ -143,6 +142,7 @@ export class BotsService {
     return {
       ...this.#toDto(r),
       status,
+      thinkingAvailability: this.#thinkingAvailability(r),
       unreadCount: st?.unread_count ?? 0,
       ...(st?.unread_thread_id !== undefined && st.unread_thread_id !== null ? { unreadThreadId: st.unread_thread_id } : {}),
       ...(st?.preview_text !== undefined && st.preview_text !== null ? { previewText: st.preview_text } : {}),
@@ -168,15 +168,34 @@ export class BotsService {
   }
 
   /** Agent reference is fixed: any attempt to change it is a 400. */
-  patch(id: string, body: { name?: string | undefined; instructions?: string | undefined; agentId?: unknown }): BotDto {
-    const r = this.#row(id);
-    if (!r) throw new HttpError(404, `unknown bot ${id}`);
+  patch(id: string, body: PatchBotBodyDto & { agentId?: unknown }): BotDto {
+    if (!this.#row(id)) throw new HttpError(404, `unknown bot ${id}`);
     if (body.agentId !== undefined) throw new HttpError(400, "agent cannot change");
-    const name = body.name ?? r.name;
-    const instructions = body.instructions ?? r.instructions;
-    this.db.query(`UPDATE bots SET name = ?, instructions = ?, updated_at = ? WHERE id = ?`).run(name, instructions, new Date().toISOString(), id);
-    this.events.append("bot", id, "bot.updated", { name, instructions });
-    return this.getDto(id);
+    this.db.query(`
+      UPDATE bots
+      SET name = COALESCE(?, name),
+          instructions = COALESCE(?, instructions),
+          show_tool_calls = COALESCE(?, show_tool_calls),
+          show_thinking = COALESCE(?, show_thinking),
+          updated_at = ?
+      WHERE id = ?
+    `).run(
+      body.name ?? null,
+      body.instructions ?? null,
+      body.showToolCalls === undefined ? null : body.showToolCalls ? 1 : 0,
+      body.showThinking === undefined ? null : body.showThinking ? 1 : 0,
+      new Date().toISOString(),
+      id,
+    );
+    const updated = this.getDto(id);
+    const payload: BotUpdatedEventPayload = {
+      name: updated.name,
+      instructions: updated.instructions,
+      showToolCalls: updated.showToolCalls,
+      showThinking: updated.showThinking,
+    };
+    this.events.append("bot", id, "bot.updated", payload);
+    return updated;
   }
 
   /** Pinning changes navigation placement only; it never touches a Thread. */
@@ -239,7 +258,7 @@ export class BotsService {
       .run(kind, recipe === undefined ? "" : JSON.stringify(recipe), avatarFile, now, id);
   }
 
-  recordAssistantOutput(botId: string, threadId: string, text: string): void {
+  recordResponse(botId: string, threadId: string, text: string): void {
     const now = new Date().toISOString();
     const preview = text.replace(/\s+/g, " ").trim().slice(0, 120);
     this.db
@@ -267,18 +286,6 @@ export class BotsService {
     this.events.append("bot", botId, "bot.attention", { threadId, at: now });
   }
 
-  #recordUnreadOutput(botId: string, threadId: string): void {
-    const now = new Date().toISOString();
-    this.db
-      .query(`INSERT INTO bot_state (bot_id, last_activity_at, unread_count, unread_thread_id)
-              VALUES (?, ?, 1, ?)
-              ON CONFLICT(bot_id) DO UPDATE SET
-                last_activity_at = excluded.last_activity_at,
-                unread_count = bot_state.unread_count + 1,
-                unread_thread_id = excluded.unread_thread_id`)
-      .run(botId, now, threadId);
-    this.events.append("bot", botId, "bot.attention", { threadId, at: now });
-  }
 
   clearUnread(botId: string, threadId: string): BotViewDto {
     this.getView(botId);

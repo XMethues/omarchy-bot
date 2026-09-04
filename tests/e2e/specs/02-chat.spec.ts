@@ -47,6 +47,30 @@ function setFakeProbe(control: Record<string, unknown>): void {
   writeFileSync(fakeProbeFile(), JSON.stringify({ ok: true, ...control }));
 }
 
+async function recordAnnouncements(page: Page, testId: string, storageKey: string): Promise<void> {
+  await page.getByTestId(testId).waitFor({ state: "attached" });
+  await page.evaluate(({ testId, storageKey }) => {
+    sessionStorage.setItem(storageKey, "[]");
+    const region = document.querySelector(`[data-testid="${testId}"]`);
+    if (region === null) throw new Error(`missing ${testId} region`);
+    new MutationObserver(() => {
+      const text = region.textContent?.trim();
+      if (text === undefined || text.length === 0) return;
+      const announcements = JSON.parse(sessionStorage.getItem(storageKey) ?? "[]") as string[];
+      announcements.push(text);
+      sessionStorage.setItem(storageKey, JSON.stringify(announcements));
+    }).observe(region, { childList: true, characterData: true, subtree: true });
+  }, { testId, storageKey });
+}
+
+async function announcementBoundaries(page: Page, storageKey: string): Promise<string[]> {
+  return page.evaluate((key) =>
+    (JSON.parse(sessionStorage.getItem(key) ?? "[]") as string[])
+      .flatMap((announcement) => announcement.split(/\.\s+/))
+      .map((announcement) => announcement.trim())
+      .filter((announcement) => announcement.length > 0), storageKey);
+}
+
 async function expectCardAboveComposer(page: Page): Promise<void> {
   const card = page.getByTestId("composer-error-card");
   const composer = page.getByTestId("composer");
@@ -77,8 +101,8 @@ test.describe("chat through a bot", () => {
 
     await send(page, "say: hello streaming");
     const threadId = await waitForPersistedThread(page);
-    await expect(page.getByTestId("streaming-message")).toContainText(/hel|hello streaming/);
-    const streamingMessage = page.getByTestId("streaming-message");
+    await expect(page.getByTestId("streaming-markdown")).toContainText(/hel|hello streaming/);
+    const streamingMessage = page.getByTestId("assistant-message").last();
     const workingAvatar = page.getByTestId("working-avatar");
     await expect(workingAvatar).toBeVisible();
     const [streamingBox, workingBox] = await Promise.all([streamingMessage.boundingBox(), workingAvatar.boundingBox()]);
@@ -100,25 +124,439 @@ test.describe("chat through a bot", () => {
     await expect(page.getByTestId("assistant-message").last()).toContainText("hello streaming");
   });
 
-  test("keeps collapsed Activity separate from the persisted final answer", async ({ page }) => {
+  test("renders user and streamed Response Markdown with safe external navigation and direct no-referrer images", async ({ page }) => {
+    const seenImages: Array<{ url: string; referer?: string }> = [];
+    await page.route(/https?:\/\/(?:example\.test|127\.0\.0\.1|192\.168\.1\.8|169\.254\.1\.2)\/markdown-image\.png/, async (route) => {
+      seenImages.push({
+        url: route.request().url(),
+        ...(route.request().headers().referer === undefined ? {} : { referer: route.request().headers().referer }),
+      });
+      await route.abort();
+    });
+
     await page.goto("/");
-    await createBot(page, "Activity Bot");
-    await send(page, "tool please");
+    await createBot(page, "Markdown Bot");
+    const markdown = [
+      "**bold** and `code`",
+      "[external](https://example.com/docs)",
+      "[unsafe](javascript:alert(1))",
+      "![public](https://example.test/markdown-image.png)",
+      "![loopback](http://127.0.0.1/markdown-image.png)",
+      "![private](http://192.168.1.8/markdown-image.png)",
+      "![link-local](http://169.254.1.2/markdown-image.png)",
+      "![unsafe-image](javascript:alert(2))",
+      "<strong data-owned-html=\"true\">raw html</strong>",
+    ].join("\n\n");
+    await send(page, `say: ${markdown}`);
     await waitForPersistedThread(page);
 
-    const trigger = page.getByRole("button", { name: "Activity (2)" });
-    await expect(trigger).toBeVisible();
+    const user = page.getByTestId("user-message").last();
+    const response = page.getByTestId("assistant-message").last();
+    await expect(user.locator("strong")).toContainText("bold");
+    await expect(response.locator("strong")).toContainText("bold", { timeout: 15_000 });
+    const link = response.getByRole("link", { name: "external" });
+    await expect(link).toHaveAttribute("target", "_blank");
+    await expect(link).toHaveAttribute("rel", "noopener noreferrer");
+    await expect(response.getByRole("link", { name: "unsafe" })).toHaveCount(0);
+    await expect(response.locator("[data-owned-html]")).toHaveCount(0);
+
+    for (const alt of ["public", "loopback", "private", "link-local"]) {
+      const image = response.getByRole("img", { name: alt });
+      await expect(image).toHaveAttribute("referrerpolicy", "no-referrer");
+    }
+    await expect(response.getByRole("img", { name: "unsafe-image" })).toHaveCount(0);
+    const expectedImageUrls = [
+      "http://127.0.0.1/markdown-image.png",
+      "http://169.254.1.2/markdown-image.png",
+      "http://192.168.1.8/markdown-image.png",
+      "https://example.test/markdown-image.png",
+    ];
+    await expect.poll(() => [...new Set(seenImages.map((request) => request.url))].sort())
+      .toEqual(expectedImageUrls);
+    expect(seenImages.every((request) => request.referer === undefined)).toBe(true);
+  });
+
+  test("visually merges only adjacent Response records without merging their identities", async ({ page, request }) => {
+    await page.goto("/");
+    await createBot(page, "Response Group Bot");
+    await send(page, "adjacent-responses");
+    const threadId = await waitForPersistedThread(page);
+
+    const assistant = page.getByTestId("assistant-message").last();
+    await expect(assistant).toHaveAttribute("data-response-block-count", "2");
+    await expect(assistant.getByTestId("message-markdown")).toHaveCount(2);
+    await expect(assistant).toContainText("First block.Second block.");
+
+    const records = await request.get(`/api/threads/${threadId}/messages`).then((response) => response.json()) as Array<{
+      kind: string;
+      response?: { blockId: string };
+    }>;
+    const responseIds = records.filter((record) => record.kind === "response").map((record) => record.response?.blockId);
+    expect(responseIds).toHaveLength(2);
+    expect(responseIds[0]).not.toBe(responseIds[1]);
+  });
+
+  test("renders filtered Thinking as an accessible collapsed disclosure with stable live expansion and duration", async ({ page, request }) => {
+    await page.goto("/");
+    const botId = await createBot(page, "Thinking Bot");
+    const enabled = await request.patch(`/api/bots/${botId}`, { data: { showThinking: true } });
+    expect(enabled.ok()).toBe(true);
+    await page.reload();
+    await recordAnnouncements(page, "thinking-announcement", "thinking-announcements");
+
+    await send(page, "thinking-stream");
+    await waitForPersistedThread(page);
+
+    const disclosure = page.getByTestId("thinking-message");
+    const trigger = disclosure.getByRole("button");
+    await expect(disclosure).toHaveAttribute("data-thinking-state", "streaming");
+    await expect(trigger).toHaveAccessibleName("Thinking…");
     await expect(trigger).toHaveAttribute("aria-expanded", "false");
-    await expect(page.getByTestId("assistant-message").last()).toContainText("tool finished", { timeout: 15_000 });
-    await expect(trigger.locator("..").getByRole("article", { name: "Message from assistant" })).toHaveCount(0);
+    await expect(page.getByTestId("thinking-announcement")).toHaveText("Thinking started");
 
     await trigger.click();
     await expect(trigger).toHaveAttribute("aria-expanded", "true");
-    await expect(page.getByText("fake.progress", { exact: true }).first()).toBeVisible();
+    await expect(disclosure.getByTestId("streaming-markdown")).toContainText("Inspect");
+    await expect(
+      page.getByRole("log").getByTestId("assistant-message").filter({ hasText: "Thinking complete." }),
+    ).toBeVisible({ timeout: 15_000 });
+
+    await expect(disclosure).toHaveAttribute("data-thinking-state", "completed");
+    await expect(trigger).toHaveAttribute("aria-expanded", "true");
+    await expect(trigger).toHaveAccessibleName(/Thinking complete · \d+(?:\.\d)?s/);
+    await expect(disclosure.getByTestId("message-markdown").locator("strong")).toHaveText("Inspect inputs.");
+    await expect(page.getByTestId("thinking-announcement")).toHaveText("Thinking completed");
+    await expect(page.getByTestId("thinking-announcement")).not.toContainText("Inspect");
+    await expect.poll(() => announcementBoundaries(page, "thinking-announcements")).toEqual([
+      "Thinking started",
+      "Thinking completed",
+    ]);
+    expect((await announcementBoundaries(page, "thinking-announcements")).join(" ")).not.toMatch(
+      /inspect|progress|updated|delta/i,
+    );
+
+    const hidden = await request.patch(`/api/bots/${botId}`, { data: { showThinking: false } });
+    expect(hidden.ok()).toBe(true);
+    await expect(disclosure).toHaveCount(0);
+    const restored = await request.patch(`/api/bots/${botId}`, { data: { showThinking: true } });
+    expect(restored.ok()).toBe(true);
+    await expect(page.getByTestId("thinking-message")).toBeVisible();
 
     await page.reload();
-    await expect(page.getByRole("button", { name: "Activity (2)" })).toBeVisible();
-    await expect(page.getByTestId("assistant-message").last()).toContainText("tool finished");
+    await expect(page.getByTestId("thinking-message").getByRole("button")).toHaveAttribute("aria-expanded", "false");
+
+    setFakeProbe({ fakeCapabilities: { thinking: { supported: false, streaming: false } } });
+    try {
+      expect((await request.post("/api/agents/pi/recheck")).ok()).toBe(true);
+      await page.reload();
+      await expect(page.getByTestId("thinking-message")).toBeVisible();
+      await page.getByRole("button", { name: "Open settings for Thinking Bot" }).click();
+      const settings = page.getByRole("complementary", { name: "Bot settings" });
+      await expect(settings.getByRole("switch", { name: "Show Thinking" })).toBeEnabled();
+      await expect(settings).toContainText("no longer provides Thinking");
+      await expect(settings).toContainText("retained Thinking remains available");
+    } finally {
+      setFakeProbe({});
+      await request.post("/api/agents/pi/recheck");
+    }
+  });
+
+  test("announces unseen start boundaries before terminal Tool Call and Thinking boundaries", async ({ page, request }) => {
+    await page.goto("/");
+    const botId = await createBot(page, "Short Process Bot");
+    const enabled = await request.patch(`/api/bots/${botId}`, {
+      data: { showThinking: true, showToolCalls: true },
+    });
+    expect(enabled.ok()).toBe(true);
+    await page.reload();
+    await recordAnnouncements(page, "thinking-announcement", "short-thinking-announcements");
+    await recordAnnouncements(page, "tool-call-announcement", "short-tool-announcements");
+
+    await send(page, "thinking-order");
+    await expect(page.getByRole("log").getByText("After Thinking.", { exact: true })).toBeVisible({
+      timeout: 15_000,
+    });
+
+    await expect.poll(() => announcementBoundaries(page, "short-thinking-announcements")).toEqual([
+      "Thinking started",
+      "Thinking completed",
+      "Thinking started",
+      "Thinking completed",
+    ]);
+    await expect.poll(() => announcementBoundaries(page, "short-tool-announcements")).toEqual([
+      "read started",
+      "read completed",
+    ]);
+    expect([
+      ...(await announcementBoundaries(page, "short-thinking-announcements")),
+      ...(await announcementBoundaries(page, "short-tool-announcements")),
+    ].join(" ")).not.toMatch(/inspect|progress|updated|delta/i);
+  });
+
+  test("renders safe native Tool Calls with grouping, filtering, keyboard access, and boundary announcements", async ({ page, request }) => {
+    await page.goto("/");
+    const botId = await createBot(page, "Tool Call Bot");
+    await send(page, "tool please");
+    const threadId = await waitForPersistedThread(page);
+    await expect(page.getByTestId("assistant-message").last()).toContainText("tool finished", { timeout: 15_000 });
+    await expect(page.getByTestId("working-avatar")).toHaveCount(0);
+
+    await expect(page.getByTestId("tool-calls")).toHaveCount(0);
+    await expect(page.getByText("fake.progress", { exact: true })).toHaveCount(0);
+    const hiddenHistory = await request.get(`/api/threads/${threadId}/messages`).then((response) => response.json()) as Array<{
+      kind: string;
+      payload?: unknown;
+      toolCall?: { name: string; status: string; target?: string };
+    }>;
+    const hiddenTool = hiddenHistory.find((message) => message.kind === "tool");
+    expect(hiddenTool).toMatchObject({
+      toolCall: { name: "bash", status: "completed", target: "echo fake" },
+    });
+    expect(hiddenTool === undefined || "payload" in hiddenTool).toBe(false);
+
+    await page.getByRole("button", { name: "Open settings for Tool Call Bot" }).click();
+    const toolSwitch = page.getByRole("complementary", { name: "Bot settings" })
+      .getByRole("switch", { name: "Show tool calls" });
+    await toolSwitch.click();
+    await expect(page.getByTestId("tool-calls")).toHaveCount(1);
+    await expect(page.getByTestId("tool-call-message")).toHaveAttribute("data-sender", "assistant");
+    await expect(page.getByTestId("tool-calls").getByRole("button")).toHaveCount(0);
+    await expect(page.getByText("fake.progress", { exact: true })).toHaveCount(0);
+    await page.getByRole("button", { name: "Close settings for Tool Call Bot" }).click();
+
+    await recordAnnouncements(page, "tool-call-announcement", "tool-call-announcements");
+
+    await send(page, "tool adjacent");
+    await expect(page.getByTestId("assistant-message").last()).toContainText("tool finished", { timeout: 15_000 });
+    await expect(page.getByTestId("tool-calls")).toHaveCount(2);
+    const adjacentGroup = page.getByTestId("tool-calls").last();
+    const groupToggle = adjacentGroup.getByRole("button");
+    await expect(groupToggle).toHaveAttribute("aria-expanded", "false");
+    await groupToggle.focus();
+    await groupToggle.press("Enter");
+    await expect(groupToggle).toHaveAttribute("aria-expanded", "true");
+    await expect(adjacentGroup).toContainText("bash");
+    await expect(adjacentGroup).toContainText("write");
+
+    await expect.poll(() => announcementBoundaries(page, "tool-call-announcements")).toEqual([
+      "bash started",
+      "bash completed",
+      "write started",
+      "write completed",
+    ]);
+    expect((await announcementBoundaries(page, "tool-call-announcements")).join(" ")).not.toMatch(
+      /progress|updated|delta/i,
+    );
+
+    await expect(page.getByTestId("working-avatar")).toHaveCount(0);
+    await send(page, "tool separated");
+    await expect(page.getByTestId("assistant-message").last()).toContainText("tool finished", { timeout: 15_000 });
+    await expect(page.getByTestId("tool-calls")).toHaveCount(4);
+    const separatedFirst = page.getByTestId("tool-call-message").nth(2);
+    const separatedResponse = page.getByTestId("assistant-message").filter({ hasText: "Between tools." });
+    const separatedSecond = page.getByTestId("tool-call-message").nth(3);
+    const [firstBox, responseBox, secondBox] = await Promise.all([
+      separatedFirst.boundingBox(),
+      separatedResponse.boundingBox(),
+      separatedSecond.boundingBox(),
+    ]);
+    expect(firstBox).not.toBeNull();
+    expect(responseBox).not.toBeNull();
+    expect(secondBox).not.toBeNull();
+    expect(firstBox!.y).toBeLessThan(responseBox!.y);
+    expect(responseBox!.y).toBeLessThan(secondBox!.y);
+    await expect(separatedFirst.getByRole("button")).toHaveCount(0);
+    await expect(separatedSecond.getByRole("button")).toHaveCount(0);
+    await expect(page.getByTestId("working-avatar")).toHaveCount(0);
+    await send(page, "tool-fail");
+    await expect(page.getByTestId("composer-error-card")).toBeVisible();
+    await expect(page.getByTestId("tool-calls")).toHaveCount(5);
+    await expect(page.getByTestId("tool-calls").last()).toContainText(
+      "Interrupted before completion.",
+    );
+
+
+    await page.reload();
+    await expect(page.getByTestId("tool-calls")).toHaveCount(5);
+    await expect(page.getByText("fake.progress", { exact: true })).toHaveCount(0);
+    await page.getByRole("button", { name: "Open settings for Tool Call Bot" }).click();
+    await page.getByRole("complementary", { name: "Bot settings" })
+      .getByRole("switch", { name: "Show tool calls" })
+      .click();
+    await expect(page.getByTestId("tool-calls")).toHaveCount(0);
+    const retainedHistory = await request.get(`/api/threads/${threadId}/messages`).then((response) => response.json()) as Array<{ kind: string }>;
+    expect(retainedHistory.filter((message) => message.kind === "tool")).toHaveLength(6);
+  });
+
+  test("renders the integrated ordered transcript with real Steering boundaries before and after refresh", async ({ page, request }) => {
+    await page.goto("/");
+    const botId = await createBot(page, "Ordered Transcript Bot");
+    const enabled = await request.patch(`/api/bots/${botId}`, {
+      data: { showThinking: true, showToolCalls: true },
+    });
+    expect(enabled.ok()).toBe(true);
+    await page.reload();
+
+    await send(page, "ordered-transcript");
+    const threadId = await waitForPersistedThread(page);
+    const firstTool = page.getByTestId("tool-call-message").filter({ hasText: "src/transcript.ts" }).first();
+    await expect(firstTool).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByTestId("working-avatar")).toBeVisible();
+    await expect(page.getByTestId(`sidebar-bot-${botId}`).getByTestId("sidebar-activity-point")).toBeVisible();
+    await page.getByRole("button", { name: "Open settings for Ordered Transcript Bot" }).click();
+    const liveSettings = page.getByRole("complementary", { name: "Bot settings" });
+    const liveToolSwitch = liveSettings.getByRole("switch", { name: "Show tool calls" });
+    const liveThinkingSwitch = liveSettings.getByRole("switch", { name: "Show Thinking" });
+    await expect(liveToolSwitch).toBeChecked();
+    await expect(liveThinkingSwitch).toBeChecked();
+    await liveToolSwitch.click();
+    await liveThinkingSwitch.click();
+    await expect(page.getByTestId("tool-call-message")).toHaveCount(0);
+    await expect(page.getByTestId("thinking-message")).toHaveCount(0);
+    await expect(page.getByTestId("working-avatar")).toBeVisible();
+    await expect(page.getByTestId(`sidebar-bot-${botId}`).getByTestId("sidebar-activity-point")).toBeVisible();
+    await liveToolSwitch.click();
+    await liveThinkingSwitch.click();
+    await expect(firstTool).toBeVisible();
+    await expect(page.getByTestId("thinking-message")).toBeVisible();
+    await page.getByRole("button", { name: "Close settings for Ordered Transcript Bot" }).click();
+
+    await send(page, "Keep the browser boundary");
+    await expect(page.getByRole("log").getByText("Response after an unrendered Native Event boundary.", { exact: true })).toBeVisible({
+      timeout: 15_000,
+    });
+    await expect(page.getByTestId("working-avatar")).toHaveCount(0);
+    await expect(page.getByTestId(`sidebar-bot-${botId}`).getByTestId("sidebar-activity-point")).toHaveCount(0);
+    await expect(page.getByText("fake.progress", { exact: true })).toHaveCount(0);
+
+    const transcriptRows = page.getByRole("log").locator(
+      '[data-testid="user-message"], [data-testid="assistant-message"], [data-testid="thinking-message"], [data-testid="tool-call-message"]',
+    );
+    await expect(transcriptRows).toHaveCount(10);
+    expect(await transcriptRows.evaluateAll((rows) =>
+      rows.map((row) => ({
+        testId: row.getAttribute("data-testid"),
+        text: row.textContent?.replace(/\s+/g, " ").trim(),
+      }))
+    )).toEqual([
+      { testId: "user-message", text: "ordered-transcript" },
+      { testId: "assistant-message", text: expect.stringContaining("Release notes") },
+      { testId: "thinking-message", text: expect.stringContaining("Thinking complete") },
+      { testId: "tool-call-message", text: expect.stringContaining("read") },
+      { testId: "user-message", text: "Keep the browser boundary" },
+      {
+        testId: "assistant-message",
+        text: "Steering received: Keep the browser boundaryAdjacent response remains in the same visual reply.",
+      },
+      { testId: "thinking-message", text: expect.stringContaining("Thinking complete") },
+      { testId: "tool-call-message", text: expect.stringContaining("write") },
+      { testId: "assistant-message", text: "Final response after the second tool." },
+      { testId: "assistant-message", text: "Response after an unrendered Native Event boundary." },
+    ]);
+
+    const responses = page.getByTestId("assistant-message");
+    await expect(responses).toHaveCount(4);
+    await expect(responses.nth(0)).toHaveAttribute("data-response-block-count", "1");
+    await expect(responses.nth(1)).toHaveAttribute("data-response-block-count", "2");
+    await expect(responses.nth(2)).toHaveAttribute("data-response-block-count", "1");
+    await expect(responses.nth(3)).toHaveAttribute("data-response-block-count", "1");
+    await expect(responses.nth(0).getByRole("heading", { name: "Release notes" })).toBeVisible();
+    await expect(responses.nth(0).locator("table")).toBeVisible();
+    await expect(responses.nth(0).locator("pre")).toContainText("const order");
+
+    const thinking = page.getByTestId("thinking-message").first().getByRole("button");
+    await thinking.focus();
+    await thinking.press("Enter");
+    await expect(thinking).toBeFocused();
+    await expect(thinking).toHaveAttribute("aria-expanded", "true");
+    await expect(page.getByTestId("thinking-message").first().locator("strong")).toHaveText("Inspect");
+
+    await page.reload();
+    await expect(transcriptRows).toHaveCount(10);
+    expect(await transcriptRows.evaluateAll((rows) =>
+      rows.map((row) => row.getAttribute("data-testid"))
+    )).toEqual([
+      "user-message",
+      "assistant-message",
+      "thinking-message",
+      "tool-call-message",
+      "user-message",
+      "assistant-message",
+      "thinking-message",
+      "tool-call-message",
+      "assistant-message",
+      "assistant-message",
+    ]);
+    await expect(responses.nth(1)).toHaveAttribute("data-response-block-count", "2");
+    await expect(page.getByTestId("thinking-message").first().getByRole("button")).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+
+    await page.getByRole("button", { name: "Open settings for Ordered Transcript Bot" }).click();
+    const settings = page.getByRole("complementary", { name: "Bot settings" });
+    await settings.getByRole("switch", { name: "Show tool calls" }).click();
+    await settings.getByRole("switch", { name: "Show Thinking" }).click();
+    await expect(page.getByTestId("tool-call-message")).toHaveCount(0);
+    await expect(page.getByTestId("thinking-message")).toHaveCount(0);
+    await expect(page.getByTestId("assistant-message")).toHaveCount(4);
+    await page.getByRole("button", { name: "Close settings for Ordered Transcript Bot" }).click();
+
+    const retained = await request.get(`/api/threads/${threadId}/messages`).then((response) => response.json()) as Array<{ kind: string }>;
+    expect(retained.map((message) => message.kind)).toEqual([
+      "text",
+      "response",
+      "thinking",
+      "tool",
+      "text",
+      "response",
+      "response",
+      "thinking",
+      "tool",
+      "response",
+      "event",
+      "response",
+    ]);
+
+    await page.reload();
+    await expect(page.getByTestId("thinking-message")).toHaveCount(0);
+    await expect(page.getByTestId("tool-call-message")).toHaveCount(0);
+    await expect(page.getByTestId("assistant-message")).toHaveCount(4);
+    await expect(page.getByRole("log").getByText("Response after an unrendered Native Event boundary.", { exact: true })).toBeVisible();
+  });
+
+  test("renders a hidden process-only Turn without inventing a reply before or after refresh", async ({ page, request }) => {
+    await page.goto("/");
+    await createBot(page, "Quiet Process Bot");
+    await recordAnnouncements(page, "thinking-announcement", "hidden-thinking-announcements");
+    await recordAnnouncements(page, "tool-call-announcement", "hidden-tool-announcements");
+    await send(page, "process-only");
+    const threadId = await waitForPersistedThread(page);
+
+    await expect.poll(async () => {
+      const thread = await request.get(`/api/threads/${threadId}`).then((response) => response.json()) as {
+        latestTurn?: { status?: string };
+      };
+      return thread.latestTurn?.status;
+    }, { timeout: 15_000 }).toBe("completed");
+
+    await expect(page.getByTestId("assistant-message")).toHaveCount(0);
+    await expect(page.getByTestId("thinking-message")).toHaveCount(0);
+    await expect(page.getByTestId("tool-call-message")).toHaveCount(0);
+    await expect(page.getByText("Hidden process reasoning.", { exact: true })).toHaveCount(0);
+    expect(await announcementBoundaries(page, "hidden-thinking-announcements")).toEqual([]);
+    expect(await announcementBoundaries(page, "hidden-tool-announcements")).toEqual([]);
+    const retained = await request.get(`/api/threads/${threadId}/messages`).then((response) => response.json()) as Array<{
+      kind: string;
+      author: { kind: string };
+    }>;
+    expect(retained.map((message) => message.kind)).toEqual(["text", "thinking", "tool", "event"]);
+    expect(retained.some((message) => message.author.kind === "system")).toBe(false);
+
+    await page.reload();
+    await expect(page.getByTestId("assistant-message")).toHaveCount(0);
+    await expect(page.getByTestId("thinking-message")).toHaveCount(0);
+    await expect(page.getByTestId("tool-call-message")).toHaveCount(0);
   });
 
   test("shows failed Turns once above the Composer and supports retry and close", async ({ page, request }) => {
@@ -226,7 +664,7 @@ test.describe("chat through a bot", () => {
 
     await expect(page.getByRole("navigation", { name: "Bot navigation" })).toBeVisible();
     await expect(page.getByRole("heading", { level: 1, name: "Steering Bot" })).toBeVisible();
-    await expect(page.getByRole("navigation", { includeHidden: true })).toHaveCount(1);
+    await expect(page.getByRole("navigation", { name: "Bot navigation", includeHidden: true })).toHaveCount(1);
     await expect(page.getByRole("button", { name: /^Stop$/i })).toHaveCount(0);
 
     await send(page, "steer-echo");

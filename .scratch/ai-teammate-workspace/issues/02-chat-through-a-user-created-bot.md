@@ -1,5 +1,7 @@
 # 02: Chat through a user-created Bot
 
+> The Activity-specific acceptance criteria and implementation recorded here are historical and are superseded by [Ordered rich transcript](../../ordered-rich-transcript/spec.md). This ticket remains resolved evidence of the slice it originally delivered.
+
 **What to build:** Make one migrated or newly created Bot usable as a teammate: selecting it opens a blank or recent Thread, the first send creates the Thread, Pi answers through its native session, Activity stays compact, and the final answer remains the focus of the conversation workspace.
 
 **Blocked by:** 01: Separate Agents from user-created Bots

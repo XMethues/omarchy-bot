@@ -1,10 +1,10 @@
 # AI teammate workspace redesign
 
-Status: implemented; design accepted on 2026-09-02
+Status: implemented except the accepted ordered-transcript revision; original design accepted on 2026-09-02 and transcript revision accepted on 2026-09-04
 
 This document defines the accepted product and interaction design. Earlier architecture drafts remain research inputs only where they do not conflict with this specification.
 
-> Bot activity, avatar activity presentation, archive/restore, and permanent-deletion decisions are superseded by [Binary Bot activity and direct deletion](../.scratch/bot-activity-lifecycle/spec.md).
+> Bot activity, avatar activity presentation, archive/restore, and permanent-deletion decisions are superseded by [Binary Bot activity and direct deletion](../.scratch/bot-activity-lifecycle/spec.md). Transcript Activity, message rendering, and Agent-output structure are superseded by [Ordered rich transcript](../.scratch/ordered-rich-transcript/spec.md) and [ADR 0007](./adr/0007-preserve-ordered-agent-blocks.md).
 
 ## 1. Product model
 
@@ -31,7 +31,7 @@ This document defines the accepted product and interaction design. Earlier archi
 - Omarchy Bot preserves each Agent's native capabilities and native approval behavior.
 - It does not add an `ask`/`trusted` policy, capability filter, permission manifest, or parallel approval gate.
 - Every adapter owns a compact `AgentCapabilityInventory` returned by the probe protocol and derived from the official interface plus conformance probes.
-- The inventory is the sole support-policy source for steering, abort, Thread actions, accepted attachment modalities, and native event families.
+- The inventory is the sole support-policy source for steering, abort, Thinking, Thread actions, accepted attachment modalities, and native event families.
 - Contextual native operations are shown and executed according to that inventory. Unsupported operations are rejected rather than simulated; Pi image input is not claimed while its provider conformance reports images unsupported.
 - Bot deletion removes Omarchy Bot-owned data and local Agent-session mappings only. It neither acquires an Agent worker nor deletes Agent-owned Native Sessions.
 
@@ -87,9 +87,11 @@ Fields:
 
 The Agent picker lists every supported Agent. An unavailable Agent remains visible but disabled and includes plain-language setup guidance. Creation automatically selects the new Bot and opens a blank conversation.
 
-### Profile editing
+### Bot Settings
 
-The Bot avatar and name form one Conversation Header toggle for a right-side Astryx `LayoutPanel` at every window width. Selecting the identity again closes the panel. The profile surface identifies the Bot's immutable Agent as read-only context. The user may edit the Bot's name, Instructions, and avatar. Changing execution backend means creating another Bot.
+The Bot avatar and name form one Conversation Header toggle for a right-side Astryx `LayoutPanel` named Bot Settings at every window width. Selecting the identity again closes the panel. Its Profile section identifies the Bot's immutable Agent as read-only context and lets the user edit the Bot's name, Instructions, and avatar. Changing execution backend means creating another Bot.
+
+The Display section contains independent `Show tool calls` and `Show Thinking` switches. Both default off, apply to all Threads belonging to the Bot, persist through the daemon, and synchronize across windows. They filter presentation only: hidden content remains received and retained, and changing a switch does not change Agent configuration.
 
 ### Archive and delete
 
@@ -182,13 +184,17 @@ record stop --wait --json --wait-file <runtime-file>
 
 The app does not depend on Voxtype's synthetic Return because file output bypasses the typing/paste auto-submit chain and synthetic input could target the wrong conversation. Omarchy's normal Voxtype shortcuts remain untouched and continue typing into the focused control.
 
-## 9. Transcript and activity
+## 9. Ordered rich transcript
 
-- User and assistant text remain the visual focus.
-- Tool calls, intermediate steps, and Agent-native events collapse into one compact Activity presentation by default.
-- Activity can be expanded to inspect details.
-- The final answer is never buried inside the Activity surface.
-- Unsupported native event types are retained through typed/raw native envelopes rather than silently discarded.
+- User text and Bot Response Blocks render with Astryx Markdown inside filled message bubbles. Live Bot content uses streaming Markdown; raw HTML is ignored or shown as text.
+- Safe links open outside the workspace with `noopener noreferrer`. HTTP(S) Markdown images load directly with `no-referrer`, including addresses on public, private, loopback, and link-local networks.
+- Response Blocks, Thinking Blocks, Tool Calls, Steering, and recognized product content retain their original occurrence order. Adjacent Response Blocks may merge visually without merging persisted identity.
+- Thinking is only content or a provider-authored summary officially exposed by the Agent. Each Thinking Block is collapsed by default, renders compact Markdown when expanded, and shows its own state and wall-clock duration.
+- Tool Calls use Astryx `ChatToolCalls` directly inside assistant message context. Only adjacent calls group; there is no outer Activity disclosure.
+- Tool history contains status, name, and only Adapter-authored optional target, duration, diff statistics, and bounded redacted error summary. Full tool input and output are not retained as transcript details.
+- Bot Display Settings independently hide Tool Calls and Thinking; both default off. Hiding affects current output and all history immediately without changing receipt, persistence, or Agent behavior.
+- Native Events remain typed residual Agent-specific envelopes after common content is normalized. Unknown public payloads may be retained, diagnostic and secret payloads are redacted, and no generic Native Event renderer appears in the Thread.
+- Sidebar previews and unread content use Response Blocks only. A Turn that produces no Response remains quiet when process content is hidden.
 - Streaming follows the latest content only while the user is already at the bottom. Scrolling upward is never overridden; a quiet jump-to-latest action appears instead.
 - Errors appear inline at the turn where they occurred with plain-language recovery. Technical diagnostics live in details, not in the primary transcript.
 

@@ -12,13 +12,16 @@ import { StackItem } from "@astryxdesign/core/Stack";
 import { Text } from "@astryxdesign/core/Text";
 import { TextArea } from "@astryxdesign/core/TextArea";
 import { TextInput } from "@astryxdesign/core/TextInput";
+import { Switch } from "@astryxdesign/core/Switch";
 import { VStack } from "@astryxdesign/core/VStack";
 import type { BotDto, BotViewDto } from "@omarchy-bot/protocol";
 import { api, apiErrorMessage } from "../lib/api.ts";
 import styles from "../lib/styles.ts";
+import { rollbackBotDisplaySetting, selectBotDisplayState } from "../lib/botDisplaySettings.ts";
+import type { BotDisplaySetting } from "../lib/botDisplaySettings.ts";
 import { AvatarView } from "./AvatarView.tsx";
 
-export interface ProfilePanelProps {
+export interface BotSettingsPanelProps {
   bot: BotViewDto;
   open: boolean;
   agentDisplayName: string;
@@ -30,36 +33,49 @@ export interface ProfilePanelProps {
 type BusyAction = "save" | "variation" | "upload" | "recipe";
 type InvalidField = "name" | "avatarDescription";
 
-/** Right-side profile panel for one bot. Its backing agent remains fixed. */
-export function ProfilePanel({
+/** Right-side Bot Settings panel. Profile identity and Display preferences remain separate. */
+export function BotSettingsPanel({
   bot,
   agentDisplayName,
   open,
   returnFocusRef,
   onClose,
   onUpdated,
-}: ProfilePanelProps): JSX.Element | null {
+}: BotSettingsPanelProps): JSX.Element | null {
   const [current, setCurrent] = useState<BotDto>(bot);
   const [name, setName] = useState(bot.name);
   const [instructions, setInstructions] = useState(bot.instructions);
   const [prompt, setPrompt] = useState("");
   const [busy, setBusy] = useState<BusyAction | undefined>(undefined);
   const [error, setError] = useState<string | undefined>(undefined);
+  const [displayError, setDisplayError] = useState<string | undefined>(undefined);
+  const [displayBusy, setDisplayBusy] = useState<DisplaySetting | undefined>(undefined);
   const [invalidField, setInvalidField] = useState<InvalidField | undefined>(undefined);
   const fileInput = useRef<HTMLInputElement>(null);
+  const latestBotRef = useRef<BotDto>(bot);
+  const displayBusyRef = useRef<DisplaySetting | undefined>(undefined);
+  const panelOpenRef = useRef(false);
+  const panelBotIdRef = useRef<string | undefined>(undefined);
   const nameInput = useRef<HTMLInputElement>(null);
   const promptInput = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
-    if (!open) return;
+    if (displayBusyRef.current === undefined || latestBotRef.current.id === bot.id) latestBotRef.current = bot;
+    const resetTransientState = (open && !panelOpenRef.current) || panelBotIdRef.current !== bot.id;
+    panelOpenRef.current = open;
+    if (!open || displayBusyRef.current !== undefined) return;
+    panelBotIdRef.current = bot.id;
     setCurrent(bot);
     setName(bot.name);
     setInstructions(bot.instructions);
+    if (!resetTransientState) return;
     setPrompt("");
     setBusy(undefined);
     setError(undefined);
+    setDisplayError(undefined);
+    setDisplayBusy(undefined);
     setInvalidField(undefined);
-  }, [bot, open]);
+  }, [bot, displayBusy, open]);
 
   const closeDrawer = useCallback((): void => {
     onClose();
@@ -77,6 +93,7 @@ export function ProfilePanel({
 
   const acceptUpdate = useCallback(
     (updated: BotDto): void => {
+      latestBotRef.current = updated;
       setCurrent(updated);
       setName(updated.name);
       setInstructions(updated.instructions);
@@ -104,6 +121,32 @@ export function ProfilePanel({
       setBusy(undefined);
     }
   }, [acceptUpdate, bot.id, instructions, name]);
+
+  const updateDisplaySetting = useCallback(async (setting: BotDisplaySetting, value: boolean): Promise<void> => {
+    const previousValue = current[setting];
+    const optimistic = { ...current, [setting]: value };
+    setCurrent(optimistic);
+    displayBusyRef.current = setting;
+    setDisplayError(undefined);
+    setDisplayBusy(setting);
+    onUpdated(optimistic);
+    try {
+      const saved = await api.patchBot(bot.id, { [setting]: value });
+      latestBotRef.current = saved;
+      setCurrent(saved);
+      onUpdated(saved);
+    } catch (updateError) {
+      const rolledBack = rollbackBotDisplaySetting(latestBotRef.current, setting, previousValue);
+      latestBotRef.current = rolledBack;
+      setCurrent(rolledBack);
+      onUpdated(rolledBack);
+      const detail = apiErrorMessage(updateError, "This display setting couldn’t be saved.");
+      setDisplayError(`${detail} The previous setting has been restored.`);
+    } finally {
+      displayBusyRef.current = undefined;
+      setDisplayBusy(undefined);
+    }
+  }, [bot.id, current, onUpdated]);
 
   const newVariation = useCallback(async (): Promise<void> => {
     setBusy("variation");
@@ -166,6 +209,11 @@ export function ProfilePanel({
   }, [acceptUpdate, bot.id, prompt]);
 
   const disabled = busy !== undefined;
+  const displayState = selectBotDisplayState({
+    showToolCalls: current.showToolCalls,
+    showThinking: current.showThinking,
+    thinkingAvailability: bot.thinkingAvailability,
+  });
   if (!open) return null;
 
   return (
@@ -174,24 +222,24 @@ export function ProfilePanel({
       padding={0}
       hasDivider
       isScrollable
-      label="Bot profile"
+      label="Bot settings"
       role="complementary"
       style={{ width: "min(440px, 100vw)", minWidth: 0, maxWidth: "100vw" }}
     >
       <HStack gap={2} padding={4} vAlign="center">
         <StackItem size="fill">
           <VStack gap={0.5}>
-            <Heading level={2}>Bot profile</Heading>
-            <Text color="secondary">Update this teammate’s name, job, and avatar.</Text>
+            <Heading level={2}>Bot settings</Heading>
+            <Text color="secondary">Manage this teammate’s profile and transcript display.</Text>
           </VStack>
         </StackItem>
         <IconButton
-          label="Close profile drawer"
-          tooltip="Close profile drawer"
+          label="Close bot settings"
+          tooltip="Close bot settings"
           icon={<Icon icon="close" size="md" />}
           variant="ghost"
           onClick={closeDrawer}
-          data-testid="profile-drawer-close"
+          data-testid="bot-settings-close"
         />
       </HStack>
       <form
@@ -201,8 +249,10 @@ export function ProfilePanel({
           void save();
         }}
       >
-        <VStack padding={4} paddingBlockStart={0} gap={4} aria-busy={disabled || undefined} data-testid="profile-drawer">
+        <VStack padding={4} paddingBlockStart={0} gap={4} aria-busy={disabled || displayBusy !== undefined || undefined} data-testid="bot-settings-panel">
           {error !== undefined ? <Banner status="error" title={error} /> : null}
+          {displayError !== undefined ? <Banner status="error" title={displayError} /> : null}
+          <Heading level={3}>Profile</Heading>
           <HStack gap={3} align="center" wrap="wrap">
             <AvatarView avatar={current.avatar} name={current.name} size="lg" presentation="static" />
             <VStack gap={0.5}>
@@ -302,6 +352,31 @@ export function ProfilePanel({
               isDisabled={disabled && busy !== "recipe"}
               onClick={() => void createRecipe()}
               data-testid="avatar-recipe-submit"
+            />
+          </VStack>
+
+          <VStack gap={3} data-testid="bot-display-settings">
+            <VStack gap={0.5}>
+              <Heading level={3}>Display</Heading>
+              <Text color="secondary">
+                These preferences apply to current output and history in every conversation. Hidden content is still retained.
+              </Text>
+            </VStack>
+            <Switch
+              label="Show tool calls"
+              description="Show Agent tool work in every conversation for this Bot."
+              value={displayState.showToolCalls}
+              onChange={(value) => void updateDisplaySetting("showToolCalls", value)}
+              isDisabled={displayBusy !== undefined}
+              data-testid="show-tool-calls"
+            />
+            <Switch
+              label="Show Thinking"
+              description={displayState.thinkingDescription}
+              value={displayState.showThinking}
+              onChange={(value) => void updateDisplaySetting("showThinking", value)}
+              isDisabled={displayBusy !== undefined || displayState.thinkingDisabled}
+              data-testid="show-thinking"
             />
           </VStack>
         </VStack>

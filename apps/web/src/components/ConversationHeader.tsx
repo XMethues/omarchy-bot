@@ -25,13 +25,13 @@ export interface ConversationHeaderProps {
   thread?: ThreadDto;
   computerState: ComputerViewDto["state"];
   computerOpen: boolean;
-  profileOpen: boolean;
+  botSettingsOpen: boolean;
   onOpenHistory: () => void;
-  onToggleProfile: () => void;
+  onToggleBotSettings: () => void;
   onToggleComputer: () => void;
   mobileNavigationTriggerRef: RefObject<HTMLButtonElement | null>;
   computerTriggerRef: RefObject<HTMLButtonElement | null>;
-  profileTriggerRef: RefObject<HTMLButtonElement | null>;
+  botSettingsTriggerRef: RefObject<HTMLButtonElement | null>;
 }
 
 function MobileSidebarTrigger({ triggerRef }: { triggerRef: RefObject<HTMLButtonElement | null> }): JSX.Element | null {
@@ -62,20 +62,20 @@ function MobileSidebarTrigger({ triggerRef }: { triggerRef: RefObject<HTMLButton
 
 /**
  * Conversation-local header: the sole page heading, thread history, Computer,
- * and profile actions. AppShell provides the global navigation frame.
+ * and Bot Settings actions. AppShell provides the global navigation frame.
  */
 export function ConversationHeader({
   bot,
   thread,
   computerState,
   computerOpen,
-  profileOpen,
+  botSettingsOpen,
   onOpenHistory,
-  onToggleProfile,
+  onToggleBotSettings,
   onToggleComputer,
   mobileNavigationTriggerRef,
   computerTriggerRef,
-  profileTriggerRef,
+  botSettingsTriggerRef,
 }: ConversationHeaderProps): JSX.Element {
   return (
     <LayoutHeader hasDivider label="Conversation" padding={2}>
@@ -89,12 +89,12 @@ export function ConversationHeader({
           <HStack gap={1} vAlign="center">
             {bot !== undefined ? (
               <Button
-                ref={profileTriggerRef}
-                label={`${profileOpen ? "Close" : "Open"} profile for ${bot.name}`}
+                ref={botSettingsTriggerRef}
+                label={`${botSettingsOpen ? "Close" : "Open"} settings for ${bot.name}`}
                 variant="ghost"
                 size="sm"
-                onClick={onToggleProfile}
-                data-testid="profile-open"
+                onClick={onToggleBotSettings}
+                data-testid="bot-settings-open"
                 style={{
                   minWidth: 0,
                   maxWidth: "min(220px, 45vw)",
@@ -103,7 +103,7 @@ export function ConversationHeader({
                   paddingInline: 6,
                   overflow: "hidden",
                 }}
-                aria-expanded={profileOpen}
+                aria-expanded={botSettingsOpen}
               >
                 <HStack gap={1} vAlign="center">
                   <AvatarView

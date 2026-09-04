@@ -7,9 +7,13 @@ interface MessageView {
   id: string;
   seq: number;
   author: { kind: "user" | "bot" | "system" };
-  kind: "text" | "tool" | "event";
+  kind: "text" | "response" | "thinking" | "tool" | "event";
   text?: string;
   payload?: Record<string, unknown>;
+  toolCall?: {
+    id: string;
+    status: "running" | "completed" | "error";
+  };
 }
 
 interface TurnRow {
@@ -92,7 +96,7 @@ describe("integration: native turn steering", () => {
 
     await until(async () => {
       const current = await messages(first.threadId);
-      return current.some((message) => message.kind === "tool" && message.payload?.toolId === "steer-boundary" && message.payload.state === "running");
+      return current.some((message) => message.kind === "tool" && message.toolCall?.id === "steer-boundary" && message.toolCall.status === "running");
     });
 
     const beforeSteer = rowForTurn(active.turnId);
@@ -120,7 +124,7 @@ describe("integration: native turn steering", () => {
 
     const transcript = await messages(first.threadId);
     const activeSend = transcript.find((message) => message.author.kind === "user" && message.text === "steer-echo");
-    const finalReply = transcript.find((message) => message.author.kind === "bot" && message.kind === "text" && message.text?.includes("steered: redirect at boundary"));
+    const finalReply = transcript.find((message) => message.author.kind === "bot" && message.kind === "response" && message.text?.includes("steered: redirect at boundary"));
     expect(activeSend).toBeDefined();
     expect(steeringMessage).toBeDefined();
     expect(finalReply).toBeDefined();
@@ -144,15 +148,19 @@ describe("integration: native turn steering", () => {
     });
     const boundaryEvent = logged.find((event) => {
       const payload = event.payload;
-      return event.type === "tool.updated"
-        && payload !== null
-        && typeof payload === "object"
-        && "toolId" in payload
-        && payload.toolId === "steer-boundary";
+      if (
+        event.type !== "tool.updated" ||
+        payload === null ||
+        typeof payload !== "object" ||
+        !("toolCall" in payload) ||
+        payload.toolCall === null ||
+        typeof payload.toolCall !== "object"
+      ) return false;
+      return "id" in payload.toolCall && payload.toolCall.id === "steer-boundary";
     });
     const redirectedDelta = logged.find((event) => {
       const payload = event.payload;
-      return event.type === "message.delta"
+      return event.type === "response.updated"
         && payload !== null
         && typeof payload === "object"
         && "text" in payload
@@ -200,7 +208,7 @@ describe("integration: native turn steering", () => {
       steering: false,
       abort: false,
       nativeThreadActions: ["resume", "history", "close"],
-      nativeEventFamilies: ["message", "tool", "turn", "error", "native"],
+      nativeEventFamilies: [],
     });
     await h.svc.agents.recheck("pi");
 
@@ -229,7 +237,7 @@ describe("integration: native turn steering", () => {
         steering: true,
         abort: true,
         nativeThreadActions: ["resume", "history", "close"],
-        nativeEventFamilies: ["message", "tool", "turn", "error", "native"],
+        nativeEventFamilies: [],
       });
       await h.svc.agents.recheck("pi");
       if (turnId !== undefined) await abort(turnId);

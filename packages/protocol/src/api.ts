@@ -3,7 +3,12 @@ import {
   isAgentCapabilityInventory,
   type AgentCapabilityInventory,
 } from "@omarchy-bot/agent-contract";
-import { AGENT_IDS, isSurfaceId, type SurfaceId } from "@omarchy-bot/domain";
+import {
+  AGENT_IDS,
+  TOOL_CALL_ERROR_SUMMARY_MAX_LENGTH,
+  isSurfaceId,
+  type SurfaceId,
+} from "@omarchy-bot/domain";
 
 // ----- Agents -----
 
@@ -88,10 +93,23 @@ export const BotDto = z.object({
   agentId: z.enum(AGENT_IDS),
   avatar: AvatarDto,
   pinned: z.boolean(),
+  showToolCalls: z.boolean(),
+  showThinking: z.boolean(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
 export type BotDto = z.infer<typeof BotDto>;
+
+export const ThinkingAvailabilitySchema = z.enum(["supported", "history", "unavailable"]);
+export type ThinkingAvailabilityDto = z.infer<typeof ThinkingAvailabilitySchema>;
+
+export const BotUpdatedEventPayload = z.object({
+  name: z.string(),
+  instructions: z.string(),
+  showToolCalls: z.boolean(),
+  showThinking: z.boolean(),
+});
+export type BotUpdatedEventPayload = z.infer<typeof BotUpdatedEventPayload>;
 
 export const BotActivityStatusSchema = z.enum(["active", "inactive"]);
 export type BotActivityStatusDto = z.infer<typeof BotActivityStatusSchema>;
@@ -104,6 +122,8 @@ export const BotViewDto = BotDto.extend({
   previewText: z.string().optional(),
   previewAt: z.string().optional(),
   lastActivityAt: z.string().optional(),
+  /** Derived from current Agent capability and retained Thinking across every Thread. */
+  thinkingAvailability: ThinkingAvailabilitySchema,
 });
 export type BotViewDto = z.infer<typeof BotViewDto>;
 
@@ -167,7 +187,67 @@ export const AttachmentDto = z.object({
 });
 export type AttachmentDto = z.infer<typeof AttachmentDto>;
 
-export const MessageKindSchema = z.enum(["text", "tool", "event"]);
+export const ResponseStateSchema = z.enum(["streaming", "completed"]);
+export type ResponseStateDto = z.infer<typeof ResponseStateSchema>;
+
+export const ResponseBlockDto = z.object({
+  blockId: z.string().min(1),
+  state: ResponseStateSchema,
+  startedAt: z.string(),
+  completedAt: z.string().optional(),
+}).superRefine((response, context) => {
+  if (response.state === "completed" && response.completedAt === undefined) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "completed Responses require completedAt", path: ["completedAt"] });
+  }
+  if (response.state === "streaming" && response.completedAt !== undefined) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "streaming Responses cannot have completedAt", path: ["completedAt"] });
+  }
+});
+export type ResponseBlockDto = z.infer<typeof ResponseBlockDto>;
+
+export const ThinkingStateSchema = z.enum(["streaming", "completed"]);
+export type ThinkingStateDto = z.infer<typeof ThinkingStateSchema>;
+
+export const ThinkingBlockDto = z.object({
+  blockId: z.string().min(1),
+  state: ThinkingStateSchema,
+  startedAt: z.string(),
+  completedAt: z.string().optional(),
+}).superRefine((thinking, context) => {
+  if (thinking.state === "completed" && thinking.completedAt === undefined) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "completed Thinking Blocks require completedAt", path: ["completedAt"] });
+  }
+  if (thinking.state === "streaming" && thinking.completedAt !== undefined) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "streaming Thinking Blocks cannot have completedAt", path: ["completedAt"] });
+  }
+});
+export type ThinkingBlockDto = z.infer<typeof ThinkingBlockDto>;
+
+export const ToolCallStatusSchema = z.enum(["running", "completed", "error"]);
+export type ToolCallStatusDto = z.infer<typeof ToolCallStatusSchema>;
+
+export const ToolCallSummaryDto = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  status: ToolCallStatusSchema,
+  target: z.string().min(1).optional(),
+  durationMs: z.number().int().nonnegative().optional(),
+  additions: z.number().int().nonnegative().optional(),
+  deletions: z.number().int().nonnegative().optional(),
+  errorSummary: z.string().min(1).max(TOOL_CALL_ERROR_SUMMARY_MAX_LENGTH).optional(),
+}).strict().superRefine((toolCall, context) => {
+  if (toolCall.status !== "error" && toolCall.errorSummary !== undefined) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "only failed Tool Calls carry an error summary",
+      path: ["errorSummary"],
+    });
+  }
+});
+export type ToolCallSummaryDto = z.infer<typeof ToolCallSummaryDto>;
+
+
+export const MessageKindSchema = z.enum(["text", "response", "thinking", "tool", "event"]);
 export type MessageKindDto = z.infer<typeof MessageKindSchema>;
 
 export const MessageDto = z.object({
@@ -177,9 +257,68 @@ export const MessageDto = z.object({
   author: AuthorDto,
   kind: MessageKindSchema,
   text: z.string().optional(),
+  response: ResponseBlockDto.optional(),
+  thinking: ThinkingBlockDto.optional(),
+  toolCall: ToolCallSummaryDto.optional(),
   attachments: z.array(AttachmentDto).optional(),
   payload: z.unknown().optional(),
   createdAt: z.string(),
+}).strict().superRefine((message, context) => {
+  if (message.kind === "text") {
+    if (message.author.kind === "bot") {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "Bot output must use an ordered transcript block", path: ["author"] });
+    }
+    if (message.text === undefined) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "text messages require text content", path: ["text"] });
+    }
+  } else if (message.author.kind !== "bot") {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "ordered Agent transcript records must be Bot-authored", path: ["author"] });
+  }
+
+  if (message.kind === "response") {
+    if (message.text === undefined) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "Responses require text content", path: ["text"] });
+    }
+    if (message.response === undefined) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "Responses require lifecycle metadata", path: ["response"] });
+    }
+  } else if (message.response !== undefined) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "only Responses carry lifecycle metadata", path: ["response"] });
+  }
+
+  if (message.kind === "thinking") {
+    if (message.text === undefined) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "Thinking Blocks require text content", path: ["text"] });
+    }
+    if (message.thinking === undefined) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "Thinking Blocks require lifecycle metadata", path: ["thinking"] });
+    }
+  } else if (message.thinking !== undefined) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "only Thinking Blocks carry Thinking lifecycle metadata", path: ["thinking"] });
+  }
+
+  if (message.kind === "tool") {
+    if (message.toolCall === undefined) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "Tool Calls require a safe summary", path: ["toolCall"] });
+    }
+  } else if (message.toolCall !== undefined) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "only Tool Calls carry Tool Call summaries", path: ["toolCall"] });
+  }
+
+  if (message.kind === "event") {
+    if (message.payload === undefined) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "Native Events require retained metadata", path: ["payload"] });
+    }
+  } else if (message.kind !== "text" && message.payload !== undefined) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "only text records and Native Events carry payloads", path: ["payload"] });
+  }
+
+  if (message.kind !== "text" && message.kind !== "response" && message.kind !== "thinking" && message.text !== undefined) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "this transcript record cannot carry text", path: ["text"] });
+  }
+  if (message.attachments !== undefined && (message.kind !== "text" || message.author.kind !== "user")) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "only user text messages carry attachments", path: ["attachments"] });
+  }
 });
 export type MessageDto = z.infer<typeof MessageDto>;
 
@@ -229,13 +368,43 @@ export const SCREEN_H264_FMTP =
 export const ScreenProjectionModeDto = z.enum(["idle", "preview", "expanded"]);
 export type ScreenProjectionModeDto = z.infer<typeof ScreenProjectionModeDto>;
 
+export const ScreenProjectionCapabilitiesDto = z.object({
+  previewImage: z.object({
+    transport: z.literal("data-channel"),
+    channel: z.literal(SCREEN_PREVIEW_CHANNEL),
+    mediaType: z.literal("image/png"),
+  }),
+  expandedVideo: z.object({
+    transport: z.literal("webrtc-video-track"),
+    codec: z.literal("video/H264"),
+    profileLevelId: z.literal(SCREEN_H264_PROFILE),
+    clockRate: z.literal(SCREEN_H264_CLOCK_RATE),
+  }),
+  control: z.object({
+    transport: z.literal("data-channel"),
+    channel: z.literal(SCREEN_CONTROL_CHANNEL),
+  }),
+  input: z.object({
+    transport: z.literal("data-channel"),
+    channel: z.literal(SCREEN_INPUT_CHANNEL),
+  }),
+  snapshotFallback: z.object({
+    transport: z.literal("http"),
+    mediaType: z.literal("image/png"),
+  }),
+});
+export type ScreenProjectionCapabilitiesDto = z.infer<typeof ScreenProjectionCapabilitiesDto>;
+
 export const ScreenProjectionOfferDto = z.object({
+  version: z.literal(SCREEN_PROJECTION_PROTOCOL_VERSION),
   type: z.literal("offer"),
   sdp: z.string().min(1),
+  capabilities: ScreenProjectionCapabilitiesDto,
 });
 export type ScreenProjectionOfferDto = z.infer<typeof ScreenProjectionOfferDto>;
 
 export const ScreenProjectionAnswerDto = z.object({
+  version: z.literal(SCREEN_PROJECTION_PROTOCOL_VERSION),
   type: z.literal("answer"),
   sdp: z.string().min(1),
   sessionId: z.string().min(1),
@@ -394,43 +563,13 @@ export const ScreenInputAuthorityMessageDto = z.object({
   geometryGeneration: z.number().int().positive(),
   controllerEpoch: z.number().int().positive(),
   logicalWidth: z.number().int().positive(),
-export const ScreenProjectionCapabilitiesDto = z.object({
-  previewImage: z.object({
-    transport: z.literal("data-channel"),
-    channel: z.literal(SCREEN_PREVIEW_CHANNEL),
-    mediaType: z.literal("image/png"),
-  }),
-  expandedVideo: z.object({
-    transport: z.literal("webrtc-video-track"),
-    codec: z.literal("video/H264"),
-    profileLevelId: z.literal(SCREEN_H264_PROFILE),
-    clockRate: z.literal(SCREEN_H264_CLOCK_RATE),
-  }),
-  control: z.object({
-    transport: z.literal("data-channel"),
-    channel: z.literal(SCREEN_CONTROL_CHANNEL),
-  }),
-  input: z.object({
-    transport: z.literal("data-channel"),
-    channel: z.literal(SCREEN_INPUT_CHANNEL),
-  }),
-  snapshotFallback: z.object({
-    transport: z.literal("http"),
-    mediaType: z.literal("image/png"),
-  }),
-});
-export type ScreenProjectionCapabilitiesDto = z.infer<typeof ScreenProjectionCapabilitiesDto>;
-
   logicalHeight: z.number().int().positive(),
-  version: z.literal(SCREEN_PROJECTION_PROTOCOL_VERSION),
   videoWidth: z.number().int().positive(),
   videoHeight: z.number().int().positive(),
-  capabilities: ScreenProjectionCapabilitiesDto,
   scale: z.number().positive(),
 });
 export type ScreenInputAuthorityMessageDto = z.infer<typeof ScreenInputAuthorityMessageDto>;
 
-  version: z.literal(SCREEN_PROJECTION_PROTOCOL_VERSION),
 export const ScreenProjectionPreviewFrameHeaderDto = z.object({
   version: z.literal(SCREEN_PROJECTION_PROTOCOL_VERSION),
   type: z.literal("preview-frame"),
@@ -462,6 +601,8 @@ export type CreateBotBodyDto = z.infer<typeof CreateBotBody>;
 export const PatchBotBody = z.object({
   name: z.string().trim().min(1).max(80).optional(),
   instructions: z.string().max(8000).optional(),
+  showToolCalls: z.boolean().optional(),
+  showThinking: z.boolean().optional(),
 });
 export type PatchBotBodyDto = z.infer<typeof PatchBotBody>;
 

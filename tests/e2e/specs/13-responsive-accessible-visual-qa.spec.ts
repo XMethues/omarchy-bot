@@ -25,6 +25,7 @@ interface SeedOptions {
   primaryStatus?: BotStatus;
   computerState?: ComputerState;
   messagesGate?: Promise<void>;
+  richTranscript?: boolean;
 }
 
 const avatar = (seed: string) => ({
@@ -37,7 +38,7 @@ const avatar = (seed: string) => ({
   },
 });
 
-function botFixtures(primaryStatus: BotStatus) {
+function botFixtures(primaryStatus: BotStatus, richTranscript = false) {
   return [
     {
       id: PRIMARY_BOT_ID,
@@ -47,6 +48,8 @@ function botFixtures(primaryStatus: BotStatus) {
       agentId: "pi",
       avatar: avatar("ticket-13-release-partner"),
       pinned: true,
+      showToolCalls: richTranscript,
+      showThinking: richTranscript,
       createdAt: FIXED_EARLY,
       updatedAt: FIXED_LATE,
       status: primaryStatus,
@@ -54,6 +57,7 @@ function botFixtures(primaryStatus: BotStatus) {
       previewText: "The release checklist is ready.",
       previewAt: FIXED_LATE,
       lastActivityAt: FIXED_LATE,
+      thinkingAvailability: "unavailable",
     },
     {
       id: SECONDARY_BOT_ID,
@@ -63,6 +67,8 @@ function botFixtures(primaryStatus: BotStatus) {
       agentId: "claude",
       avatar: { kind: "upload", url: `/api/bots/${SECONDARY_BOT_ID}/avatar` },
       pinned: false,
+      showToolCalls: false,
+      showThinking: false,
       createdAt: FIXED_EARLY,
       updatedAt: FIXED_EARLY,
       status: "active",
@@ -70,6 +76,130 @@ function botFixtures(primaryStatus: BotStatus) {
       previewText: "Waiting for its agent.",
       previewAt: FIXED_EARLY,
       lastActivityAt: FIXED_EARLY,
+      thinkingAvailability: "unavailable",
+    },
+  ];
+}
+
+function richTranscriptMessages() {
+  const longChecklist = Array.from(
+    { length: 18 },
+    (_, index) => `${index + 1}. Validate ordered transcript boundary ${index + 1}.`,
+  ).join("\n");
+  return [
+    {
+      id: "message_ticket13_rich_user",
+      threadId: THREAD_ID,
+      seq: 1,
+      author: { kind: "user" },
+      kind: "text",
+      text: "Review the complete ordered transcript.",
+      createdAt: FIXED_EARLY,
+    },
+    {
+      id: "message_ticket13_rich_response_1",
+      threadId: THREAD_ID,
+      seq: 2,
+      author: { kind: "bot" },
+      kind: "response",
+      text: [
+        "## Ordered release review",
+        "",
+        longChecklist,
+        "",
+        "| Content | Boundary |",
+        "| --- | --- |",
+        "| Response | merged only when adjacent |",
+        "| Thinking and tools | preserved |",
+        "",
+        "```ts",
+        "const expected = [\"response\", \"thinking\", \"tool\"];",
+        "```",
+      ].join("\n"),
+      response: {
+        blockId: "response_ticket13_rich_1",
+        state: "completed",
+        startedAt: FIXED_EARLY,
+        completedAt: FIXED_LATE,
+      },
+      createdAt: FIXED_LATE,
+    },
+    {
+      id: "message_ticket13_rich_response_2",
+      threadId: THREAD_ID,
+      seq: 3,
+      author: { kind: "bot" },
+      kind: "response",
+      text: "Adjacent Response Block.",
+      response: {
+        blockId: "response_ticket13_rich_2",
+        state: "completed",
+        startedAt: FIXED_EARLY,
+        completedAt: FIXED_LATE,
+      },
+      createdAt: FIXED_LATE,
+    },
+    {
+      id: "message_ticket13_rich_thinking",
+      threadId: THREAD_ID,
+      seq: 4,
+      author: { kind: "bot" },
+      kind: "thinking",
+      text: `**Expanded reasoning summary**\n\n${longChecklist}`,
+      thinking: {
+        blockId: "thinking_ticket13_rich",
+        state: "completed",
+        startedAt: FIXED_EARLY,
+        completedAt: FIXED_LATE,
+      },
+      createdAt: FIXED_LATE,
+    },
+    {
+      id: "message_ticket13_rich_tool_1",
+      threadId: THREAD_ID,
+      seq: 5,
+      author: { kind: "bot" },
+      kind: "tool",
+      toolCall: {
+        id: "tool_ticket13_read",
+        name: "read",
+        status: "completed",
+        target: "src/transcript.ts",
+        durationMs: 12,
+      },
+      createdAt: FIXED_LATE,
+    },
+    {
+      id: "message_ticket13_rich_tool_2",
+      threadId: THREAD_ID,
+      seq: 6,
+      author: { kind: "bot" },
+      kind: "tool",
+      toolCall: {
+        id: "tool_ticket13_write",
+        name: "write",
+        status: "completed",
+        target: "src/transcript.ts",
+        durationMs: 8,
+        additions: 4,
+        deletions: 1,
+      },
+      createdAt: FIXED_LATE,
+    },
+    {
+      id: "message_ticket13_rich_response_3",
+      threadId: THREAD_ID,
+      seq: 7,
+      author: { kind: "bot" },
+      kind: "response",
+      text: "Final Response after grouped tools.",
+      response: {
+        blockId: "response_ticket13_rich_3",
+        state: "completed",
+        startedAt: FIXED_EARLY,
+        completedAt: FIXED_LATE,
+      },
+      createdAt: FIXED_LATE,
     },
   ];
 }
@@ -79,7 +209,7 @@ async function fulfillJson(route: Route, body: unknown): Promise<void> {
 }
 
 async function seedWorkspaceApi(page: Page, options: SeedOptions = {}): Promise<void> {
-  const bots = options.empty ? [] : botFixtures(options.primaryStatus ?? "active");
+  const bots = options.empty ? [] : botFixtures(options.primaryStatus ?? "active", options.richTranscript);
 
   await page.route(`**/api/bots/${SECONDARY_BOT_ID}/avatar`, (route) =>
     route.fulfill({ status: 200, contentType: "image/png", body: ONE_PIXEL_PNG }),
@@ -92,12 +222,13 @@ async function seedWorkspaceApi(page: Page, options: SeedOptions = {}): Promise<
         version: "fixture",
         status: "ready",
         capabilities: {
-          version: 1,
+          version: 2,
           steering: true,
           abort: true,
           nativeThreadActions: ["resume", "history", "close"],
+          thinking: { supported: true, streaming: true },
           attachments: { text: true, image: false, maxTextBytes: 64 * 1024 },
-          nativeEventFamilies: ["message", "tool", "turn", "error"],
+          nativeEventFamilies: [],
         },
       },
       {
@@ -149,26 +280,37 @@ async function seedWorkspaceApi(page: Page, options: SeedOptions = {}): Promise<
   });
   await page.route(`**/api/threads/${THREAD_ID}/messages`, async (route) => {
     await options.messagesGate;
-    await fulfillJson(route, [
-      {
-        id: "message_ticket13_user",
-        threadId: THREAD_ID,
-        seq: 1,
-        author: { kind: "user" },
-        kind: "text",
-        text: "Review the release checklist and call out the final risk.",
-        createdAt: FIXED_EARLY,
-      },
-      {
-        id: "message_ticket13_bot",
-        threadId: THREAD_ID,
-        seq: 2,
-        author: { kind: "bot" },
-        kind: "text",
-        text: "The checklist is complete. The final risk is the rollback rehearsal; schedule it before approval.",
-        createdAt: FIXED_LATE,
-      },
-    ]);
+    await fulfillJson(
+      route,
+      options.richTranscript
+        ? richTranscriptMessages()
+        : [
+            {
+              id: "message_ticket13_user",
+              threadId: THREAD_ID,
+              seq: 1,
+              author: { kind: "user" },
+              kind: "text",
+              text: "Review the release checklist and call out the final risk.",
+              createdAt: FIXED_EARLY,
+            },
+            {
+              id: "message_ticket13_bot",
+              threadId: THREAD_ID,
+              seq: 2,
+              author: { kind: "bot" },
+              kind: "response",
+              text: "The checklist is complete. The final risk is the rollback rehearsal; schedule it before approval.",
+              response: {
+                blockId: "response_ticket13_release",
+                state: "completed",
+                startedAt: FIXED_EARLY,
+                completedAt: FIXED_LATE,
+              },
+              createdAt: FIXED_LATE,
+            },
+          ],
+    );
   });
   await page.route("**/api/dictation", (route) => fulfillJson(route, { state: "idle" }));
   await page.route("**/api/computer/state**", (route) => {
@@ -192,7 +334,11 @@ async function seedWorkspaceApi(page: Page, options: SeedOptions = {}): Promise<
   );
 }
 
-async function gotoSeededWorkspace(page: Page, empty = false): Promise<void> {
+async function gotoSeededWorkspace(
+  page: Page,
+  empty = false,
+  expectedResponse = "rollback rehearsal",
+): Promise<void> {
   const initialResponses = [
     page.waitForResponse((response) => new URL(response.url()).pathname === "/api/agents"),
     page.waitForResponse((response) => {
@@ -212,7 +358,7 @@ async function gotoSeededWorkspace(page: Page, empty = false): Promise<void> {
     await expect(page.getByRole("heading", { name: "Create your first bot" })).toBeVisible();
   } else {
     await expect(page.getByRole("heading", { level: 1, name: "Release Partner" })).toBeVisible();
-    await expect(page.getByTestId("assistant-message").last()).toContainText("rollback rehearsal");
+    await expect(page.getByTestId("assistant-message").last()).toContainText(expectedResponse);
   }
   await page.evaluate(async () => document.fonts.ready);
 }
@@ -248,7 +394,7 @@ async function expectInsideViewport(page: Page, locator: Locator): Promise<void>
 }
 
 async function expectWorkspaceContract(page: Page): Promise<void> {
-  await expect(page.getByRole("navigation", { includeHidden: true })).toHaveCount(1);
+  await expect(page.getByRole("navigation", { name: "Bot navigation", includeHidden: true })).toHaveCount(1);
   await expect(page.getByRole("heading", { level: 1 })).toHaveCount(1);
   await expect(page.getByRole("button", { name: "Attach files" })).toBeVisible();
   await expect(page.getByLabel("Choose files to attach")).toBeHidden();
@@ -296,7 +442,7 @@ test.describe("ticket 13 responsive, accessible, and visual QA", () => {
     await seedWorkspaceApi(page, { empty: true });
     await gotoSeededWorkspace(page, true);
 
-    await expect(page.getByRole("navigation", { includeHidden: true })).toHaveCount(1);
+    await expect(page.getByRole("navigation", { name: "Bot navigation", includeHidden: true })).toHaveCount(1);
     await expect(page.getByRole("heading", { level: 1 })).toHaveCount(1);
     await expectNoSeriousOrCriticalViolations(page, "Empty workspace");
   });
@@ -350,7 +496,7 @@ test.describe("ticket 13 responsive, accessible, and visual QA", () => {
     await expect(uploadedRow.getByTestId("sidebar-activity-point")).toBeVisible();
     await expect(uploadedRow.getByTestId(`sidebar-unread-${SECONDARY_BOT_ID}`)).toBeVisible();
 
-    const headerAvatar = page.getByTestId("profile-open").getByTestId("avatar-view");
+    const headerAvatar = page.getByTestId("bot-settings-open").getByTestId("avatar-view");
     await expect(headerAvatar).toHaveAttribute("data-avatar-presentation", "static");
     const headerSvg = await headerAvatar.getByTestId("avatar-pixelbot").locator("img").getAttribute("src");
     expect(decodeURIComponent(headerSvg!.slice(headerSvg!.indexOf(",") + 1))).not.toContain("@keyframes");
@@ -388,11 +534,11 @@ test.describe("ticket 13 responsive, accessible, and visual QA", () => {
     await page.keyboard.press("Escape");
     await expect(history).toBeHidden();
 
-    await page.getByRole("button", { name: "Open profile for Release Partner" }).click();
-    const profile = page.getByRole("complementary", { name: "Bot profile" });
-    await expectInsideViewport(page, profile);
+    await page.getByRole("button", { name: "Open settings for Release Partner" }).click();
+    const botSettingsPanel = page.getByRole("complementary", { name: "Bot settings" });
+    await expectInsideViewport(page, botSettingsPanel);
     await page.keyboard.press("Escape");
-    await expect(profile).toBeHidden();
+    await expect(botSettingsPanel).toBeHidden();
 
     await page.getByRole("button", { name: "Open Computer Surface", exact: true }).click();
     const computer = page.getByRole("complementary", { name: "Computer Surface", exact: true });
@@ -473,16 +619,16 @@ test.describe("ticket 13 responsive, accessible, and visual QA", () => {
     await expect(page.getByRole("heading", { level: 1, name: "Offline Researcher" })).toBeVisible();
   });
 
-  test("returns focus after profile and computer drawer dismissal", async ({ page }) => {
+  test("returns focus after Bot Settings and computer drawer dismissal", async ({ page }) => {
     await page.setViewportSize(desktopViewport);
     await seedWorkspaceApi(page);
     await gotoSeededWorkspace(page);
 
-    const profileTrigger = page.getByTestId("profile-open");
+    const botSettingsTrigger = page.getByTestId("bot-settings-open");
     await expect(page.getByRole("button", { name: "Edit bot profile" })).toHaveCount(0);
-    await expect(profileTrigger.getByTestId("avatar-view")).toBeVisible();
-    await expect(profileTrigger.getByRole("heading", { level: 1, name: "Release Partner" })).toBeVisible();
-    const identityBox = await profileTrigger.boundingBox();
+    await expect(botSettingsTrigger.getByTestId("avatar-view")).toBeVisible();
+    await expect(botSettingsTrigger.getByRole("heading", { level: 1, name: "Release Partner" })).toBeVisible();
+    const identityBox = await botSettingsTrigger.boundingBox();
     const sessionBox = await page.getByRole("button", { name: "Open conversation history" }).boundingBox();
     expect(identityBox).not.toBeNull();
     expect(sessionBox).not.toBeNull();
@@ -497,8 +643,8 @@ test.describe("ticket 13 responsive, accessible, and visual QA", () => {
       };
     });
     expect(headerPadding).toEqual({ top: 8, bottom: 8 });
-    await profileTrigger.hover();
-    const identityPadding = await profileTrigger.evaluate((element) => {
+    await botSettingsTrigger.hover();
+    const identityPadding = await botSettingsTrigger.evaluate((element) => {
       const avatar = element.querySelector<HTMLElement>('[data-testid="avatar-view"]');
       if (avatar === null) throw new Error("Conversation header avatar is missing");
       const buttonBox = element.getBoundingClientRect();
@@ -519,23 +665,23 @@ test.describe("ticket 13 responsive, accessible, and visual QA", () => {
       inlineEnd: "6px",
       verticalSpace: 8,
     });
-    await expect(profileTrigger).toHaveAccessibleName("Open profile for Release Partner");
-    await expect(profileTrigger).toHaveAttribute("aria-expanded", "false");
-    await profileTrigger.focus();
-    await profileTrigger.press("Enter");
-    const profileDrawer = page.getByRole("complementary", { name: "Bot profile" });
-    await expect(profileDrawer.getByTestId("profile-drawer")).toBeVisible();
-    await expect(profileTrigger).toHaveAccessibleName("Close profile for Release Partner");
-    await expect(profileTrigger).toHaveAttribute("aria-expanded", "true");
-    await profileTrigger.click();
-    await expect(profileDrawer).toBeHidden();
-    await expect(profileTrigger).toHaveAccessibleName("Open profile for Release Partner");
-    await expect(profileTrigger).toHaveAttribute("aria-expanded", "false");
-    await profileTrigger.press("Enter");
-    await expect(profileDrawer).toBeVisible();
+    await expect(botSettingsTrigger).toHaveAccessibleName("Open settings for Release Partner");
+    await expect(botSettingsTrigger).toHaveAttribute("aria-expanded", "false");
+    await botSettingsTrigger.focus();
+    await botSettingsTrigger.press("Enter");
+    const botSettingsPanel = page.getByRole("complementary", { name: "Bot settings" });
+    await expect(botSettingsPanel.getByTestId("bot-settings-panel")).toBeVisible();
+    await expect(botSettingsTrigger).toHaveAccessibleName("Close settings for Release Partner");
+    await expect(botSettingsTrigger).toHaveAttribute("aria-expanded", "true");
+    await botSettingsTrigger.click();
+    await expect(botSettingsPanel).toBeHidden();
+    await expect(botSettingsTrigger).toHaveAccessibleName("Open settings for Release Partner");
+    await expect(botSettingsTrigger).toHaveAttribute("aria-expanded", "false");
+    await botSettingsTrigger.press("Enter");
+    await expect(botSettingsPanel).toBeVisible();
     await page.keyboard.press("Escape");
-    await expect(profileDrawer).toBeHidden();
-    await expect(profileTrigger).toBeFocused();
+    await expect(botSettingsPanel).toBeHidden();
+    await expect(botSettingsTrigger).toBeFocused();
 
     await page.setViewportSize(narrowViewport);
     const computerTrigger = page.getByRole("button", { name: "Open Computer Surface", exact: true });
@@ -565,11 +711,11 @@ test.describe("ticket 13 responsive, accessible, and visual QA", () => {
     await seedWorkspaceApi(page);
     await gotoSeededWorkspace(page);
 
-    await page.getByRole("button", { name: "Open profile for Release Partner" }).click();
-    const profile = page.getByRole("complementary", { name: "Bot profile" });
-    await expect(profile.getByText("Backing Agent", { exact: true })).toBeVisible();
-    await expect(profile.getByText("Pi", { exact: true })).toBeVisible();
-    await expect(profile.getByText("Fixed for this bot.", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Open settings for Release Partner" }).click();
+    const botSettingsPanel = page.getByRole("complementary", { name: "Bot settings" });
+    await expect(botSettingsPanel.getByText("Backing Agent", { exact: true })).toBeVisible();
+    await expect(botSettingsPanel.getByText("Pi", { exact: true })).toBeVisible();
+    await expect(botSettingsPanel.getByText("Fixed for this bot.", { exact: true })).toBeVisible();
     await page.keyboard.press("Escape");
 
     await page.getByRole("navigation", { name: "Bot navigation" }).getByRole("button", { name: "Settings", exact: true }).click();
@@ -577,6 +723,83 @@ test.describe("ticket 13 responsive, accessible, and visual QA", () => {
     await expect(settings.getByText("Follows your current Omarchy and system appearance.", { exact: true })).toBeVisible();
     await expect(settings.getByRole("radio")).toHaveCount(0);
     await expect.poll(() => page.locator("html").getAttribute("data-theme")).toBeNull();
+  });
+
+  test("keeps a long ordered transcript accessible, responsive, focusable, scrollable, and motion-safe", async ({ page }) => {
+    await page.setViewportSize(desktopViewport);
+    await page.emulateMedia({ colorScheme: "light", reducedMotion: "no-preference" });
+    await seedWorkspaceApi(page, { richTranscript: true, primaryStatus: "active" });
+    await gotoSeededWorkspace(page, false, "Final Response after grouped tools.");
+
+    const responses = page.getByTestId("assistant-message");
+    await expect(responses).toHaveCount(2);
+    await expect(responses.first()).toHaveAttribute("data-response-block-count", "2");
+    await expect(responses.first().getByRole("heading", { name: "Ordered release review" })).toBeVisible();
+    await expect(responses.first().locator("table")).toBeVisible();
+    await expect(responses.first().locator("pre")).toContainText("const expected");
+
+    const thinking = page.getByTestId("thinking-message");
+    const thinkingTrigger = thinking.getByRole("button");
+    await expect(thinkingTrigger).toHaveAccessibleName("Thinking complete · 3600s");
+    await expect(thinkingTrigger).toHaveAttribute("aria-expanded", "false");
+    await thinkingTrigger.focus();
+    await thinkingTrigger.press("Enter");
+    await expect(thinkingTrigger).toBeFocused();
+    await expect(thinkingTrigger).toHaveAttribute("aria-expanded", "true");
+    await expect(thinking.locator("strong")).toHaveText("Expanded reasoning summary");
+
+    const groupedTools = page.getByTestId("tool-calls");
+    const toolTrigger = groupedTools.getByRole("button");
+    await expect(toolTrigger).toHaveAttribute("aria-expanded", "false");
+    await toolTrigger.focus();
+    await toolTrigger.press("Enter");
+    await expect(toolTrigger).toBeFocused();
+    await expect(toolTrigger).toHaveAttribute("aria-expanded", "true");
+    await expect(groupedTools).toContainText("read");
+    await expect(groupedTools).toContainText("write");
+
+    expect(await page.evaluate(() => matchMedia("(prefers-color-scheme: light)").matches)).toBe(true);
+    await expectNoSeriousOrCriticalViolations(page, "Expanded ordered transcript in light mode");
+    await page.emulateMedia({ colorScheme: "dark", reducedMotion: "reduce" });
+    expect(await page.evaluate(() => matchMedia("(prefers-color-scheme: dark)").matches)).toBe(true);
+    expect(await page.evaluate(() => matchMedia("(prefers-reduced-motion: reduce)").matches)).toBe(true);
+    await expect(page.getByTestId("working-avatar").getByTestId("avatar-pixelbot")).toHaveCSS("animation-name", "none");
+    await expect(page.getByTestId("working-avatar").getByRole("img", { name: "Release Partner is working" })).toBeVisible();
+    await expect(page.getByTestId(`sidebar-bot-${PRIMARY_BOT_ID}`).getByTestId("sidebar-activity-point")).toBeVisible();
+    await expectNoSeriousOrCriticalViolations(page, "Expanded ordered transcript in dark reduced-motion mode");
+
+    const scrollState = await page.getByRole("log").evaluate(async (root) => {
+      const candidates = [root, ...root.querySelectorAll("*")]
+        .filter((element): element is HTMLElement => element instanceof HTMLElement);
+      let ancestor = root.parentElement;
+      while (ancestor !== null) {
+        if (ancestor instanceof HTMLElement) candidates.push(ancestor);
+        ancestor = ancestor.parentElement;
+      }
+      const viewport = candidates.find((candidate) => candidate.scrollHeight > candidate.clientHeight + 8);
+      if (viewport === undefined) throw new Error("long ordered transcript did not overflow");
+      viewport.scrollTop = viewport.scrollHeight;
+      viewport.dispatchEvent(new Event("scroll"));
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      return {
+        clientHeight: viewport.clientHeight,
+        scrollHeight: viewport.scrollHeight,
+        scrollTop: viewport.scrollTop,
+      };
+    });
+    expect(scrollState.scrollHeight).toBeGreaterThan(scrollState.clientHeight);
+    expect(scrollState.scrollTop).toBeGreaterThanOrEqual(
+      scrollState.scrollHeight - scrollState.clientHeight - 2,
+    );
+    await expect(responses.last()).toBeVisible();
+
+    await page.setViewportSize(narrowViewport);
+    await responses.last().scrollIntoViewIfNeeded();
+    await expectInsideViewport(page, responses.last());
+    await expect.poll(() => page.getByRole("log").evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+    await expect(thinkingTrigger).toHaveAttribute("aria-expanded", "true");
+    await expect(toolTrigger).toHaveAttribute("aria-expanded", "true");
+    await expectNoSeriousOrCriticalViolations(page, "Expanded ordered transcript at narrow breakpoint");
   });
 
   test("matches the fixed light desktop workspace", async ({ page }) => {

@@ -35,6 +35,7 @@ import { isSurfaceId, type ComputerAction } from "@omarchy-bot/domain";
 import { normalizeSessionEvent, toNormalizedMessages, type SessionRuntime } from "./normalize.ts";
 import { sdkVersion } from "./sdk-version.ts";
 import { createComputerTool } from "./computer-tool.ts";
+import { thinkingCapabilityForProbe } from "./thinking-capability.ts";
 
 const AGENT_ID = "pi";
 
@@ -109,6 +110,23 @@ async function hasAuthenticatedModel(): Promise<boolean> {
   return authAvailable;
 }
 
+// Probe has no Bot-scoped model override. Resolve Pi's native default exactly
+// as session.open does, using an in-memory native session to avoid persistence.
+async function resolveDefaultModel(): Promise<AgentSession["model"]> {
+  const cwd = process.cwd();
+  const { session } = await createAgentSession({
+    cwd,
+    agentDir: getAgentDir(),
+    sessionManager: SessionManager.inMemory(cwd),
+    modelRuntime: await getModelRuntime(),
+  });
+  try {
+    return session.model;
+  } finally {
+    session.dispose();
+  }
+}
+
 async function hasVerifiedImageInput(agentVersion: string): Promise<boolean> {
   const dataDir = process.env.OMARCHY_BOT_HOME ?? path.join(os.homedir(), ".local/share/omarchy-bot");
   try {
@@ -140,7 +158,7 @@ function attachSubscription(entry: SessionEntry): void {
   const { session, sessionId } = entry;
   session.subscribe((ev) => {
     if (!sessions.has(sessionId)) return;
-    for (const event of normalizeSessionEvent(ev, sessionId)) emit(event);
+    for (const event of normalizeSessionEvent(ev, sessionId, entry)) emit(event);
     if (ev.type === "agent_settled" && entry.running && !entry.finished) {
       entry.running = false;
       entry.finished = true;
@@ -201,6 +219,9 @@ async function openSession(
     running: false,
     finished: false,
     aborted: false,
+    responseBlockIds: new Map(),
+    thinkingBlocks: new Map(),
+    toolCalls: new Map(),
   };
   sessions.set(sessionId, newEntry);
   attachSubscription(newEntry);
@@ -218,6 +239,7 @@ async function handleMessage(cmd: AgentCommand): Promise<void> {
         const sdkOk = true; // reaching here means the SDK imported and ran
         const authed = await hasAuthenticatedModel();
         const agentVersion = sdkVersion();
+        const thinking = await thinkingCapabilityForProbe(authed, resolveDefaultModel);
         const payload: ProbePayload = {
           agentId: AGENT_ID,
           installed: sdkOk,
@@ -228,12 +250,13 @@ async function handleMessage(cmd: AgentCommand): Promise<void> {
             steering: true,
             abort: true,
             nativeThreadActions: ["resume", "history", "close"],
+            thinking,
             attachments: {
               text: true,
               image: await hasVerifiedImageInput(agentVersion),
               maxTextBytes: 64 * 1024,
             },
-            nativeEventFamilies: ["message", "tool", "turn", "error"],
+            nativeEventFamilies: [],
           },
           ...(authed ? {} : { reason: "no authenticated model provider (run `pi` once or fill ~/.pi/agent/auth.json)" }),
         };

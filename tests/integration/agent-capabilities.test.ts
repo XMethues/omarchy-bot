@@ -50,6 +50,11 @@ function diagnosticFamily(payload: unknown): string | undefined {
   return typeof payload.family === "string" ? payload.family : undefined;
 }
 
+function nativeCapability(payload: unknown): string | undefined {
+  if (payload === null || typeof payload !== "object" || !("capability" in payload)) return undefined;
+  return typeof payload.capability === "string" ? payload.capability : undefined;
+}
+
 describe("agent capability inventory", () => {
   let h: Harness;
 
@@ -62,23 +67,20 @@ describe("agent capability inventory", () => {
     rmSync(h.home, { recursive: true, force: true });
   });
 
-  test("reduced probe and command contracts preserve remaining capability policy", async () => {
+  test("publishes the exact versioned capability inventory", async () => {
     const worker = await h.svc.supervisor.agentWorker("pi");
     const initialProbe = await worker.request({ type: "probe" }, 30_000) as {
       capabilities: AgentCapabilityInventory;
     };
     expect(initialProbe.capabilities).toEqual({
-      version: 1,
+      version: 2,
       steering: true,
       abort: true,
       nativeThreadActions: ["resume", "history", "close"],
+      thinking: { supported: true, streaming: true },
       attachments: { text: true, image: true },
-      nativeEventFamilies: ["message", "tool", "turn", "error", "native"],
+      nativeEventFamilies: ["fake.progress", "fake.diagnostic-progress", "fake.secret-progress"],
     });
-    expect(initialProbe.capabilities).not.toHaveProperty("sessionDeletion");
-    await expect(
-      worker.request({ type: "session.delete", nativeSessionId: "fake://obsolete" }, 30_000),
-    ).rejects.toThrow("unknown command session.delete");
 
     const botId = await makeBot(h, "Capability Bot");
     const draftToken = crypto.randomUUID();
@@ -151,7 +153,7 @@ describe("agent capability inventory", () => {
     ).toBe(200);
   });
 
-  test("valid to invalid and offline rechecks clear the published policy", async () => {
+  test("invalid and offline rechecks clear the published policy", async () => {
     setProbeControl(h);
     const ready = await h.svc.agents.recheck("pi");
     expect(ready.status).toBe("ready");
@@ -159,12 +161,6 @@ describe("agent capability inventory", () => {
     expect(h.svc.agents.capabilityInventory("pi")?.steering).toBeTrue();
 
     try {
-      setProbeControl(h, { fakeProbe: "obsolete-session-deletion" });
-      const obsolete = await h.svc.agents.recheck("pi");
-      expect(obsolete.status).toBe("incompatible");
-      expect(obsolete.capabilities).toBeUndefined();
-      expect(h.svc.agents.capabilityInventory("pi")).toBeUndefined();
-      expect((await piAgent(h)).capabilities).toBeUndefined();
 
       setProbeControl(h, { fakeProbe: "invalid" });
       const invalid = await h.svc.agents.recheck("pi");
@@ -185,10 +181,10 @@ describe("agent capability inventory", () => {
     }
   });
 
-  test("drops undeclared normalized and native event families with payload-safe diagnostics", async () => {
+  test("drops undeclared Native capabilities and unsafe Tool Call detail with payload-safe diagnostics", async () => {
     setProbeControl(h, {
       fakeCapabilities: {
-        nativeEventFamilies: ["message", "turn", "error"],
+        nativeEventFamilies: ["fake.declared"],
       },
     });
     await h.svc.agents.recheck("pi");
@@ -207,12 +203,12 @@ describe("agent capability inventory", () => {
       );
       expect(transcript.some((message) => message.kind === "tool")).toBeFalse();
       expect(transcript.some((message) => message.kind === "event" && message.payload !== undefined)).toBeFalse();
-      expect(transcript.some((message) => message.text === "declared message")).toBeTrue();
+      expect(transcript.some((message) => message.text === "declared response")).toBeTrue();
 
       const diagnostics = h.svc.events
         .replay(cursor, h.svc.events.oldestCursor())
         .events.filter((event) => event.type === "agent.event_rejected");
-      expect(diagnostics.map((event) => diagnosticFamily(event.payload)).sort()).toEqual(["native", "tool"]);
+      expect(diagnostics.map((event) => diagnosticFamily(event.payload)).sort()).toEqual(["native", "native", "tool"]);
       expect(JSON.stringify(diagnostics)).not.toContain("must-not-leak");
     } finally {
       setProbeControl(h);
@@ -237,7 +233,7 @@ describe("agent capability inventory", () => {
     );
     const nativeMessage = transcript.find((message) =>
       message.kind === "event" &&
-      (message.payload as { capability?: string } | undefined)?.capability === "fake.secret-progress"
+      nativeCapability(message.payload) === "fake.secret-progress"
     );
     expect(nativeMessage?.payload).toEqual({
       capability: "fake.secret-progress",
@@ -254,6 +250,27 @@ describe("agent capability inventory", () => {
       redacted: true,
     });
     expect(JSON.stringify(nativeEvent)).not.toContain("must-not-leak");
+    const diagnosticMessage = transcript.find((message) =>
+      message.kind === "event" &&
+      nativeCapability(message.payload) === "fake.diagnostic-progress"
+    );
+    expect(diagnosticMessage?.payload).toEqual({
+      capability: "fake.diagnostic-progress",
+      sensitivity: "diagnostic",
+      redacted: true,
+    });
+    const diagnosticEvent = h.svc.events
+      .replay(cursor, h.svc.events.oldestCursor())
+      .events.find((event) =>
+        event.type === "agent.native" &&
+        nativeCapability(event.payload) === "fake.diagnostic-progress"
+      );
+    expect(diagnosticEvent?.payload).toMatchObject({
+      capability: "fake.diagnostic-progress",
+      sensitivity: "diagnostic",
+      redacted: true,
+    });
+    expect(JSON.stringify(diagnosticEvent)).not.toContain("must-not-leak");
   });
 
   test("serializes simultaneous timeouts for independent sessions on one Agent", async () => {

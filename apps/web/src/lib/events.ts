@@ -1,6 +1,5 @@
 import type { EventEnvelope } from "@omarchy-bot/protocol";
 import { api } from "./api.ts";
-import { clearDelta, pushDelta } from "./live.ts";
 import { clearDraftsByBot } from "./drafts.ts";
 
 export type QueryTag =
@@ -122,21 +121,17 @@ function route(envelope: EventEnvelope, invalidate: Invalidate): void {
       invalidate("bots");
       return;
     case "message.appended": {
-      clearDelta(threadIdOf(envelope) ?? "");
       invalidate("messages", threadIdOf(envelope));
       invalidate("threads");
       invalidate("bots");
       return;
     }
-    case "message.delta": {
-      if (typeof p.text === "string") {
-        pushDelta(threadIdOf(envelope) ?? "", p.text);
-      } else if (typeof p.messageId === "string") {
-        clearDelta(threadIdOf(envelope) ?? "");
-        invalidate("messages", threadIdOf(envelope));
-      }
+    case "response.updated":
+    case "response.removed":
+    case "thinking.updated":
+    case "thinking.removed":
+      invalidate("messages", threadIdOf(envelope));
       return;
-    }
     case "tool.updated":
       invalidate("messages", threadIdOf(envelope));
       return;

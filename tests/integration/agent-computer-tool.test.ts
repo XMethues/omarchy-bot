@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import path from "node:path";
 import type { ComputerAction, SurfaceId } from "../../packages/domain/src/index.ts";
+import type { MessageDto } from "../../packages/protocol/src/index.ts";
 import type {
   BotScreenProvision,
   BotScreenRuntime,
@@ -79,10 +80,10 @@ class AgentToolRuntimeAdapter implements BotScreenRuntimeAdapter {
   }
 
   async start(provision: BotScreenProvision): Promise<BotScreenRuntime> {
-    return {
     const videoWidth = Math.round(provision.logicalWidth * provision.scale);
     const videoHeight = Math.round(provision.logicalHeight * provision.scale);
     const rawFrame = new Uint8Array(videoWidth * videoHeight * 4);
+    return {
       readiness: {
         compositor: "ready",
         waylandSocket: "private",
@@ -177,8 +178,8 @@ function artifactCount(h: Harness, surfaceId: SurfaceId): number {
   return row.count;
 }
 
-async function messages(h: Harness, threadId: string): Promise<Array<{ author: { kind: string }; kind: string; text?: string; payload?: Record<string, unknown> }>> {
-  return api(h, "GET", `/api/threads/${threadId}/messages`);
+async function messages(h: Harness, threadId: string): Promise<MessageDto[]> {
+  return api<MessageDto[]>(h, "GET", `/api/threads/${threadId}/messages`);
 }
 
 describe("Bot-bound Pi computer tool", () => {
@@ -211,7 +212,7 @@ describe("Bot-bound Pi computer tool", () => {
     ]);
     const transcript = await messages(h, observed.threadId);
     expect(transcript.some((message) => message.text?.includes(`screen:${firstSurface}:observe`))).toBeTrue();
-    expect(transcript.some((message) => message.kind === "tool" && message.payload?.name === "computer")).toBeTrue();
+    expect(transcript.some((message) => message.kind === "tool" && message.toolCall?.name === "computer")).toBeTrue();
   });
 
   test("different Surfaces run concurrently while one Surface orders Agent actions", async () => {
@@ -331,7 +332,7 @@ describe("Bot-bound Pi computer tool", () => {
     expect(artifactCount(h, surfaceId)).toBe(1);
     const transcript = await messages(h, sent.threadId);
     const computerTools = transcript.filter((message) =>
-      message.kind === "tool" && message.payload?.name === "computer"
+      message.kind === "tool" && message.toolCall?.name === "computer"
     );
     expect(computerTools).toHaveLength(1);
     expect(transcript.some((message) =>

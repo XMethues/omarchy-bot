@@ -1,15 +1,92 @@
 import { randomUUID } from "node:crypto";
 import type { Database } from "bun:sqlite";
 import type { AgentCapabilityInventory } from "@omarchy-bot/agent-contract";
-import type { AgentId } from "@omarchy-bot/domain";
-import type { AttachmentDto, MessageDto, ThreadDto, TurnDto } from "@omarchy-bot/protocol";
+import {
+  TOOL_CALL_INTERRUPTED_ERROR_SUMMARY,
+  canTransitionToolCall,
+  isToolCallSummary,
+  type AgentId,
+  type ToolCallSummary,
+} from "@omarchy-bot/domain";
+import { MessageDto, type AttachmentDto, type ThreadDto, type TurnDto } from "@omarchy-bot/protocol";
 import type { EventLog } from "../events/eventLog.ts";
 
 interface ThreadRow {
   id: string; bot_id: string; title: string; cwd: string | null; created_at: string; updated_at: string;
 }
 interface MessageRow {
-  id: string; thread_id: string; seq: number; author_kind: string; kind: string; text: string | null; payload: string | null; created_at: string;
+  id: string;
+  thread_id: string;
+  seq: number;
+  author_kind: string;
+  kind: string;
+  text: string | null;
+  payload: string | null;
+  created_at: string;
+  turn_id: string | null;
+  block_id: string | null;
+  block_state: string | null;
+  block_started_at: string | null;
+  block_completed_at: string | null;
+}
+interface MessageInput {
+  author: MessageDto["author"];
+  kind: MessageDto["kind"];
+  text?: string;
+  payload?: unknown;
+  turnId?: string;
+  response?: NonNullable<MessageDto["response"]>;
+  thinking?: NonNullable<MessageDto["thinking"]>;
+  toolCall?: ToolCallSummary;
+}
+
+function assertMessageInput(message: MessageInput): void {
+  if (message.kind === "text") {
+    if (message.author.kind === "bot" || message.text === undefined) {
+      throw new Error("text messages are required user or system content");
+    }
+  } else if (message.author.kind !== "bot") {
+    throw new Error("ordered Agent transcript records must be Bot-authored");
+  }
+
+  if (message.kind === "response") {
+    if (message.text === undefined || message.response === undefined) {
+      throw new Error("Responses require text and lifecycle metadata");
+    }
+  } else if (message.response !== undefined) {
+    throw new Error("only Responses can persist Response lifecycle metadata");
+  }
+
+  if (message.kind === "thinking") {
+    if (message.text === undefined || message.thinking === undefined) {
+      throw new Error("Thinking Blocks require text and lifecycle metadata");
+    }
+  } else if (message.thinking !== undefined) {
+    throw new Error("only Thinking Blocks can persist Thinking lifecycle metadata");
+  }
+
+  if (message.kind === "tool") {
+    if (message.payload !== undefined || !isToolCallSummary(message.toolCall)) {
+      throw new Error("Tool Calls require only a validated safe summary");
+    }
+  } else if (message.toolCall !== undefined) {
+    throw new Error("only Tool Calls can persist Tool Call summaries");
+  }
+
+  if (message.kind === "event" && message.payload === undefined) {
+    throw new Error("Native Events require retained metadata");
+  }
+  if (message.kind !== "text" && message.kind !== "event" && message.payload !== undefined) {
+    throw new Error("only text records and Native Events can persist payloads");
+  }
+  if (
+    message.kind !== "text" &&
+    message.kind !== "response" &&
+    message.kind !== "thinking" &&
+    message.text !== undefined
+  ) {
+    throw new Error("this transcript record cannot persist text");
+  }
 }
 interface MessageAttachmentRow {
   id: string; name: string; media_type: string; size: number;
@@ -113,6 +190,17 @@ export class ThreadsService {
     return all.filter((thread) => thread.title.toLowerCase().includes(needle));
   }
 
+  hasRetainedThinkingForBot(botId: string): boolean {
+    const row = this.db.query(`
+      SELECT 1
+      FROM messages
+      JOIN threads ON threads.id = messages.thread_id
+      WHERE threads.bot_id = ? AND messages.kind = 'thinking'
+      LIMIT 1
+    `).get(botId);
+    return row !== null && row !== undefined;
+  }
+
   /**
    * Rename only through an Agent operation declared by the adapter inventory.
    * The local title changes after the native operation succeeds, never before.
@@ -169,55 +257,244 @@ export class ThreadsService {
       size: attachment.size,
       url: `/api/attachments/${attachment.id}`,
     }));
-    return {
+    const storedPayload: unknown = m.payload === null ? undefined : JSON.parse(m.payload);
+    const toolCall = m.kind === "tool" && isToolCallSummary(storedPayload)
+      ? storedPayload
+      : undefined;
+    if (m.kind === "tool" && toolCall === undefined) {
+      throw new Error(`Tool Call message ${m.id} has no valid safe summary`);
+    }
+    const block =
+      (m.kind === "response" || m.kind === "thinking") &&
+        m.block_id !== null &&
+        m.block_state !== null &&
+        m.block_started_at !== null
+        ? {
+            blockId: m.block_id,
+            state: m.block_state as "streaming" | "completed",
+            startedAt: m.block_started_at,
+            ...(m.block_completed_at !== null ? { completedAt: m.block_completed_at } : {}),
+          }
+        : undefined;
+    return MessageDto.parse({
       id: m.id, threadId: m.thread_id, seq: m.seq,
-      author: m.author_kind === "user" ? { kind: "user" } : m.author_kind === "bot" ? { kind: "bot" } : { kind: "system" },
-      kind: m.kind as MessageDto["kind"],
+      author: { kind: m.author_kind },
+      kind: m.kind,
       ...(m.text !== null ? { text: m.text } : {}),
+      ...(m.kind === "response" && block !== undefined ? { response: block } : {}),
+      ...(m.kind === "thinking" && block !== undefined ? { thinking: block } : {}),
+      ...(toolCall !== undefined ? { toolCall } : {}),
       ...(attachments.length > 0 ? { attachments } : {}),
-      ...(m.payload !== null ? { payload: JSON.parse(m.payload) } : {}),
+      ...(m.kind !== "tool" && storedPayload !== undefined ? { payload: storedPayload } : {}),
       createdAt: m.created_at,
-    };
+    });
   }
 
   /**
    * Append without emitting an event — callers inside a turn own the event
    * shape (delta flush, tool cards). Used by TurnService.
    */
-  appendMessageQuiet(threadId: string, m: { author: MessageDto["author"]; kind: MessageDto["kind"]; text?: string; payload?: unknown }): MessageDto {
+  appendMessageQuiet(threadId: string, m: MessageInput): MessageDto {
+    assertMessageInput(m);
     const seq = (this.db.query(`SELECT COALESCE(MAX(seq), 0) AS s FROM messages WHERE thread_id = ?`).get(threadId) as { s: number }).s + 1;
     const id = randomUUID();
     const now = new Date().toISOString();
     this.db
-      .query(`INSERT INTO messages (id, thread_id, seq, author_kind, kind, text, payload, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(id, threadId, seq, m.author.kind, m.kind, m.text ?? null, m.payload === undefined ? null : JSON.stringify(m.payload), now);
+      .query(
+        `INSERT INTO messages (
+           id, thread_id, seq, author_kind, kind, text, payload, created_at,
+           turn_id, block_id, block_state, block_started_at, block_completed_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        id,
+        threadId,
+        seq,
+        m.author.kind,
+        m.kind,
+        m.text ?? null,
+        m.kind === "tool"
+          ? JSON.stringify(m.toolCall)
+          : m.payload === undefined
+            ? null
+            : JSON.stringify(m.payload),
+        now,
+        m.turnId ?? null,
+        (m.response ?? m.thinking)?.blockId ?? null,
+        (m.response ?? m.thinking)?.state ?? null,
+        (m.response ?? m.thinking)?.startedAt ?? null,
+        (m.response ?? m.thinking)?.completedAt ?? null,
+      );
     this.touch(threadId);
     return this.getMessage(id)!;
   }
 
-  appendMessage(threadId: string, m: { author: MessageDto["author"]; kind: MessageDto["kind"]; text?: string; payload?: unknown }): MessageDto {
+  appendMessage(threadId: string, m: MessageInput): MessageDto {
     const dto = this.appendMessageQuiet(threadId, m);
     this.events.append("thread", threadId, "message.appended", dto);
     return dto;
   }
 
-  updateToolMessage(
+  hasResponseBlock(blockId: string): boolean {
+    const row = this.db.query(
+      `SELECT 1 FROM messages WHERE kind = 'response' AND block_id = ?`,
+    ).get(blockId);
+    return row !== null && row !== undefined;
+  }
+
+  hasThinkingBlock(blockId: string): boolean {
+    const row = this.db.query(
+      `SELECT 1 FROM messages WHERE kind = 'thinking' AND block_id = ?`,
+    ).get(blockId);
+    return row !== null && row !== undefined;
+  }
+
+  appendResponseDelta(
     threadId: string,
-    toolId: string,
-    update: { state: "running" | "complete" | "error"; output?: unknown; isError?: boolean },
+    turnId: string,
+    blockId: string,
+    text: string,
   ): MessageDto | undefined {
+    const updated = this.db.query(
+      `UPDATE messages
+       SET text = text || ?
+       WHERE thread_id = ? AND turn_id = ? AND kind = 'response'
+         AND block_id = ? AND block_state = 'streaming'`,
+    ).run(text, threadId, turnId, blockId);
+    if (updated.changes !== 1) return undefined;
+    const row = this.db.query(
+      `SELECT id FROM messages WHERE thread_id = ? AND turn_id = ? AND block_id = ?`,
+    ).get(threadId, turnId, blockId) as { id: string };
+    return this.getMessage(row.id);
+  }
+
+  completeResponse(
+    threadId: string,
+    turnId: string,
+    blockId: string,
+    completedAt: string,
+  ): MessageDto | undefined {
+    const updated = this.db.query(
+      `UPDATE messages
+       SET block_state = 'completed', block_completed_at = ?
+       WHERE thread_id = ? AND turn_id = ? AND kind = 'response'
+         AND block_id = ? AND block_state = 'streaming'
+         AND block_started_at <= ?`,
+    ).run(completedAt, threadId, turnId, blockId, completedAt);
+    if (updated.changes !== 1) return undefined;
+    const row = this.db.query(
+      `SELECT id FROM messages WHERE thread_id = ? AND turn_id = ? AND block_id = ?`,
+    ).get(threadId, turnId, blockId) as { id: string };
+    return this.getMessage(row.id);
+  }
+
+  appendThinkingDelta(
+    threadId: string,
+    turnId: string,
+    blockId: string,
+    text: string,
+  ): MessageDto | undefined {
+    const updated = this.db.query(
+      `UPDATE messages
+       SET text = text || ?
+       WHERE thread_id = ? AND turn_id = ? AND kind = 'thinking'
+         AND block_id = ? AND block_state = 'streaming'`,
+    ).run(text, threadId, turnId, blockId);
+    if (updated.changes !== 1) return undefined;
+    const row = this.db.query(
+      `SELECT id FROM messages WHERE thread_id = ? AND turn_id = ? AND block_id = ?`,
+    ).get(threadId, turnId, blockId) as { id: string };
+    return this.getMessage(row.id);
+  }
+
+  completeThinking(
+    threadId: string,
+    turnId: string,
+    blockId: string,
+    completedAt: string,
+  ): MessageDto | undefined {
+    const updated = this.db.query(
+      `UPDATE messages
+       SET block_state = 'completed', block_completed_at = ?
+       WHERE thread_id = ? AND turn_id = ? AND kind = 'thinking'
+         AND block_id = ? AND block_state = 'streaming'
+         AND block_started_at <= ?`,
+    ).run(completedAt, threadId, turnId, blockId, completedAt);
+    if (updated.changes !== 1) return undefined;
+    const row = this.db.query(
+      `SELECT id FROM messages WHERE thread_id = ? AND turn_id = ? AND block_id = ?`,
+    ).get(threadId, turnId, blockId) as { id: string };
+    return this.getMessage(row.id);
+  }
+
+  removeIncompleteAgentBlocks(turnId: string): { responses: number; thinking: number } {
+    const responses = this.db.query(
+      `DELETE FROM messages
+       WHERE turn_id = ? AND kind = 'response' AND block_state = 'streaming'`,
+    ).run(turnId).changes;
+    const thinking = this.db.query(
+      `DELETE FROM messages
+       WHERE turn_id = ? AND kind = 'thinking' AND block_state = 'streaming'`,
+    ).run(turnId).changes;
+    return { responses, thinking };
+  }
+
+  hasToolCall(threadId: string, toolCallId: string): boolean {
+    const row = this.db.query(
+      `SELECT 1 FROM messages
+       WHERE thread_id = ? AND kind = 'tool' AND json_extract(payload, '$.id') = ?`,
+    ).get(threadId, toolCallId);
+    return row !== null && row !== undefined;
+  }
+
+  updateToolCall(
+    threadId: string,
+    summary: ToolCallSummary,
+  ): MessageDto | undefined {
+    if (!isToolCallSummary(summary)) return undefined;
     const row = this.db
       .query(
         `SELECT id, payload FROM messages
-         WHERE thread_id = ? AND kind = 'tool' AND json_extract(payload, '$.toolId') = ?
+         WHERE thread_id = ? AND kind = 'tool' AND json_extract(payload, '$.id') = ?
          ORDER BY seq DESC LIMIT 1`,
       )
-      .get(threadId, toolId) as { id: string; payload: string } | undefined;
+      .get(threadId, summary.id) as { id: string; payload: string } | undefined;
     if (row === undefined) return undefined;
     const stored: unknown = JSON.parse(row.payload);
-    if (stored === null || typeof stored !== "object" || Array.isArray(stored)) return undefined;
-    this.db.query(`UPDATE messages SET payload = ? WHERE id = ?`).run(JSON.stringify({ ...stored, ...update }), row.id);
+    if (
+      !isToolCallSummary(stored) ||
+      stored.name !== summary.name ||
+      !canTransitionToolCall(stored.status, summary.status)
+    ) return undefined;
+    const updated = { ...stored, ...summary };
+    if (!isToolCallSummary(updated)) return undefined;
+    this.db.query(`UPDATE messages SET payload = ? WHERE id = ?`).run(JSON.stringify(updated), row.id);
     return this.getMessage(row.id);
+  }
+
+  finalizeIncompleteToolCalls(turnId: string): MessageDto[] {
+    const rows = this.db.query(
+      `SELECT id, payload FROM messages
+       WHERE turn_id = ? AND kind = 'tool' AND json_extract(payload, '$.status') = 'running'
+       ORDER BY seq`,
+    ).all(turnId) as Array<{ id: string; payload: string }>;
+    const finalized: MessageDto[] = [];
+    for (const row of rows) {
+      const stored: unknown = JSON.parse(row.payload);
+      if (!isToolCallSummary(stored) || stored.status !== "running") continue;
+      const interrupted: ToolCallSummary = {
+        ...stored,
+        status: "error",
+        errorSummary: TOOL_CALL_INTERRUPTED_ERROR_SUMMARY,
+      };
+      this.db.query(`UPDATE messages SET payload = ? WHERE id = ?`).run(
+        JSON.stringify(interrupted),
+        row.id,
+      );
+      const message = this.getMessage(row.id);
+      if (message !== undefined) finalized.push(message);
+    }
+    return finalized;
   }
 
   getMessage(id: string): MessageDto | undefined {

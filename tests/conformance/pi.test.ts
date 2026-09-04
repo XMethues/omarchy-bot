@@ -103,7 +103,7 @@ async function turn(sessionId: string, text: string, opts: { attachments?: { id:
 function assistantText(recent: { type: string; event: Record<string, unknown> }[]): string {
   let text = "";
   for (const e of recent) {
-    if (e.type === "message.delta") text += String((e.event as { text?: string }).text ?? "");
+    if (e.type === "response.delta" && typeof e.event.text === "string") text += e.event.text;
   }
   return text;
 }
@@ -145,7 +145,7 @@ describe("pi conformance (10 steps, real model)", () => {
       const sayRecent = await turn(opened.sessionId, "Reply with exactly: CONFORM-STREAM-OK and nothing else.");
       const streamed = assistantText(sayRecent);
       expect(streamed).toContain("CONFORM-STREAM-OK");
-      const deltaCount = sayRecent.filter((e) => e.type === "message.delta").length;
+      const deltaCount = sayRecent.filter((e) => e.type === "response.delta").length;
       expect(deltaCount).toBeGreaterThanOrEqual(1);
       expect(sayRecent.some((e) => e.type === "turn.completed")).toBeTrue();
       console.log(`conformance: step 2 ok — streamed in ${deltaCount} deltas`);
@@ -157,7 +157,7 @@ describe("pi conformance (10 steps, real model)", () => {
       expect(lsRecent.some((e) => e.type === "tool.started" && (e.event as { name?: string }).name === "read")).toBeTrue();
       const lsDone = lsRecent.find((e) => e.type === "tool.completed");
       expect(lsDone).toBeDefined();
-      expect((lsDone!.event as { isError?: boolean }).isError).toBeFalse();
+      expect(lsDone!.event.status).toBe("completed");
       console.log("conformance: step 3 ok — read-only native tool lifecycle");
 
       // ---- Step 4: native write tool lifecycle under Pi's own behavior ----
@@ -168,7 +168,7 @@ describe("pi conformance (10 steps, real model)", () => {
         { timeoutMs: 180_000 },
       );
       expect(writeRecent.some((e) => e.type === "tool.started" && (e.event as { name?: string }).name === "write")).toBeTrue();
-      expect(writeRecent.some((e) => e.type === "tool.completed" && (e.event as { isError?: boolean }).isError === false)).toBeTrue();
+      expect(writeRecent.some((e) => e.type === "tool.completed" && e.event.status === "completed")).toBeTrue();
       expect(writeRecent.some((e) => e.type === "turn.completed")).toBeTrue();
       const deadline4 = Date.now() + 30_000;
       while (!existsSync(target) && Date.now() < deadline4) await Bun.sleep(200);
@@ -182,7 +182,7 @@ describe("pi conformance (10 steps, real model)", () => {
       const deadline5 = Date.now() + 60_000;
       let sawDeltas = 0;
       while (Date.now() < deadline5) {
-        sawDeltas = events.slice(before).filter((e) => e.type === "message.delta").length;
+        sawDeltas = events.slice(before).filter((e) => e.type === "response.delta").length;
         if (sawDeltas >= 5) break;
         await Bun.sleep(150);
       }
@@ -194,7 +194,7 @@ describe("pi conformance (10 steps, real model)", () => {
       const cancelledIndex = events.findIndex((event) => event === cancelled);
       const lateWrites = events
         .slice(cancelledIndex + 1)
-        .filter((event) => event.type === "tool.started" || event.type === "message.delta");
+        .filter((event) => event.type === "tool.started" || event.type === "response.delta");
       expect(lateWrites).toEqual([]);
       console.log("conformance: step 5 ok — cancelled mid-turn, no late writes");
 
@@ -212,7 +212,7 @@ describe("pi conformance (10 steps, real model)", () => {
       );
       await waitForEvent(
         steerBefore,
-        (event) => event.type === "message.delta" && event.event.sessionId === steerSession.sessionId,
+        (event) => event.type === "response.delta" && event.event.sessionId === steerSession.sessionId,
         60_000,
       );
       const steerResult = await pi.request({
@@ -317,19 +317,21 @@ describe("pi conformance (10 steps, real model)", () => {
       }
       const capabilities = probePayload.capabilities;
       expect(capabilities).toMatchObject({
-        version: 1,
+        version: 2,
         steering: true,
         abort: true,
         nativeThreadActions: ["resume", "history", "close"],
         attachments: { text: true, maxTextBytes: 64 * 1024 },
-        nativeEventFamilies: ["message", "tool", "turn", "error"],
+        nativeEventFamilies: [],
       });
+      expect(capabilities.thinking.streaming).toBe(capabilities.thinking.supported);
       expect(Object.keys(capabilities ?? {}).sort()).toEqual([
         "abort",
         "attachments",
         "nativeEventFamilies",
         "nativeThreadActions",
         "steering",
+        "thinking",
         "version",
       ]);
       await expect(
@@ -341,19 +343,31 @@ describe("pi conformance (10 steps, real model)", () => {
       // Pi does not emit progress updates for every tool (fast read/write tools
       // commonly jump from start to end), so require only live lifecycle
       // boundaries here and exercise the optional update mapping directly.
-      const REQUIRED_LIVE_EVENT_TYPES = ["message.delta", "tool.started", "tool.completed", "turn.completed", "turn.cancelled"] as const;
+      const REQUIRED_LIVE_EVENT_TYPES = ["response.start", "response.delta", "response.end", "tool.started", "tool.completed", "turn.completed", "turn.cancelled"] as const;
       for (const t of REQUIRED_LIVE_EVENT_TYPES) {
         expect(seenEventTypes.has(t), `missing live event type ${t}; saw ${[...seenEventTypes].sort().join(", ")}`).toBeTrue();
       }
+      const toolTracker = {
+        responseBlockIds: new Map<number, string>(),
+        thinkingBlocks: new Map<number, { blockId: string; text: string }>(),
+        toolCalls: new Map<string, { name: string; startedAt: number }>(),
+      };
+      normalizeSessionEvent({
+        type: "tool_execution_start",
+        toolCallId: "tool_conformance",
+        toolName: "read",
+        args: { secret: "must-not-cross" },
+      }, "session_conformance", toolTracker);
       expect(normalizeSessionEvent({
         type: "tool_execution_update",
         toolCallId: "tool_conformance",
         partialResult: { content: [{ type: "text", text: "partial output" }] },
-      }, "session_conformance")).toEqual([{
+      }, "session_conformance", toolTracker)).toEqual([{
         type: "tool.updated",
         sessionId: "session_conformance",
         id: "tool_conformance",
-        output: { text: "partial output" },
+        name: "read",
+        status: "running",
       }]);
       console.log(`conformance: step 9 ok — normalized event inventory mapped: ${[...seenEventTypes].sort().join(", ")}`);
 
@@ -383,19 +397,21 @@ describe("pi conformance (10 steps, real model)", () => {
       ).then((response) => response.json()) as Array<{
         kind: string;
         text?: string;
-        payload?: {
-          name?: string;
-          state?: string;
-          input?: { action?: string };
+        payload?: unknown;
+        toolCall?: {
+          id: string;
+          name: string;
+          status: string;
+          durationMs?: number;
         };
       }>;
       const computerCalls = transcript.filter((message) =>
         message.kind === "tool"
-        && message.payload?.name === "computer"
-        && message.payload.state === "complete"
+        && message.toolCall?.name === "computer"
+        && message.toolCall.status === "completed"
       );
-      expect(computerCalls.some((message) => message.payload?.input?.action === "type")).toBeTrue();
-      expect(computerCalls.some((message) => message.payload?.input?.action === "screenshot")).toBeTrue();
+      expect(computerCalls).toHaveLength(2);
+      expect(computerCalls.every((message) => message.payload === undefined)).toBeTrue();
       expect(
         transcript.some((message) => message.text?.includes("PI-COMPUTER-TOOL-OK")),
       ).toBeTrue();

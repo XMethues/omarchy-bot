@@ -21,7 +21,7 @@ function deletionConfirmation(page: Page, botName: string): Locator {
 }
 
 test.describe("direct local Bot deletion", () => {
-  test("opens the pointer-only Sidebar menu, keeps profile editing, cancels unchanged, then deletes and falls back", async ({ page, context }) => {
+  test("opens the pointer-only Sidebar menu, keeps Bot Settings reachable, cancels unchanged, then deletes and falls back", async ({ page, context }) => {
     await page.goto("/");
     const otherSelectedBotId = await createBot(page, "Other window selection");
     const otherPage = await context.newPage();
@@ -57,10 +57,10 @@ test.describe("direct local Bot deletion", () => {
 
     await botRow.click({ button: "right" });
     await expect(menu).toBeVisible();
-    await expect(menu.getByRole("menuitem")).toHaveText(["Edit Profile", "Delete"]);
-    await menu.getByRole("menuitem", { name: "Edit Profile" }).click();
-    await expect(page.getByRole("complementary", { name: "Bot profile" })).toBeVisible();
-    await page.getByRole("button", { name: "Close profile drawer" }).click();
+    await expect(menu.getByRole("menuitem")).toHaveText(["Bot Settings", "Delete"]);
+    await menu.getByRole("menuitem", { name: "Bot Settings" }).click();
+    await expect(page.getByRole("complementary", { name: "Bot settings" })).toBeVisible();
+    await page.getByRole("button", { name: "Close bot settings" }).click();
 
     await botRow.click({ button: "right" });
     await page.getByRole("menuitem", { name: "Delete" }).click();

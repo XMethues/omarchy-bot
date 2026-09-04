@@ -2,6 +2,7 @@ import { lstatSync, readdirSync, unlinkSync, type Dirent } from "node:fs";
 import path from "node:path";
 import { Database } from "bun:sqlite";
 import { AVATAR_RENDERER_ID, DEFAULT_AVATAR_STYLE_ID } from "@omarchy-bot/protocol";
+import { TOOL_CALL_INTERRUPTED_ERROR_SUMMARY } from "@omarchy-bot/domain";
 import type { Config } from "../bootstrap/config.ts";
 
 type MigrationConfig = Pick<Config, "artifactsDir">;
@@ -514,20 +515,77 @@ CREATE TABLE messages_new (
   id TEXT PRIMARY KEY,
   thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
   seq INTEGER NOT NULL,
-  author_kind TEXT NOT NULL,
-  kind TEXT NOT NULL,
+  author_kind TEXT NOT NULL CHECK (author_kind IN ('user', 'bot', 'system')),
+  kind TEXT NOT NULL CHECK (kind IN ('text', 'response', 'thinking', 'tool', 'event')),
   text TEXT,
   payload TEXT,
   created_at TEXT NOT NULL,
-  UNIQUE(thread_id, seq)
+  turn_id TEXT REFERENCES turns(id),
+  block_id TEXT,
+  block_state TEXT CHECK (block_state IN ('streaming', 'completed')),
+  block_started_at TEXT,
+  block_completed_at TEXT,
+  UNIQUE(thread_id, seq),
+  CHECK (
+    (
+      kind = 'text'
+      AND author_kind IN ('user', 'system')
+      AND text IS NOT NULL
+      AND block_id IS NULL
+      AND block_state IS NULL
+      AND block_started_at IS NULL
+      AND block_completed_at IS NULL
+    )
+    OR (
+      kind IN ('response', 'thinking')
+      AND author_kind = 'bot'
+      AND text IS NOT NULL
+      AND payload IS NULL
+      AND turn_id IS NOT NULL
+      AND block_id IS NOT NULL
+      AND block_state IS NOT NULL
+      AND block_started_at IS NOT NULL
+      AND (
+        (block_state = 'streaming' AND block_completed_at IS NULL)
+        OR (block_state = 'completed' AND block_completed_at IS NOT NULL)
+      )
+    )
+    OR (
+      kind = 'tool'
+      AND author_kind = 'bot'
+      AND text IS NULL
+      AND payload IS NOT NULL
+      AND json_valid(payload)
+      AND turn_id IS NOT NULL
+      AND block_id IS NULL
+      AND block_state IS NULL
+      AND block_started_at IS NULL
+      AND block_completed_at IS NULL
+    )
+    OR (
+      kind = 'event'
+      AND author_kind = 'bot'
+      AND text IS NULL
+      AND payload IS NOT NULL
+      AND json_valid(payload)
+      AND block_id IS NULL
+      AND block_state IS NULL
+      AND block_started_at IS NULL
+      AND block_completed_at IS NULL
+    )
+  )
 );
-INSERT INTO messages_new (id, thread_id, seq, author_kind, kind, text, payload, created_at)
+INSERT INTO messages_new (
+  id, thread_id, seq, author_kind, kind, text, payload, created_at
+)
 SELECT id, thread_id, seq, author_kind, kind, text, payload, created_at
-FROM messages
-WHERE kind <> 'approval';
+FROM messages;
 DROP TABLE messages;
 ALTER TABLE messages_new RENAME TO messages;
 CREATE INDEX idx_messages_thread ON messages(thread_id, seq);
+CREATE UNIQUE INDEX idx_messages_agent_block
+  ON messages(block_id)
+  WHERE kind IN ('response', 'thinking');
 
 DROP TABLE IF EXISTS computer_leases;
 
@@ -765,6 +823,15 @@ ${CURRENT_AVATAR_REPAIR_SQL}
       removeUnreferencedSnapshotFiles(db, cfg);
     },
   },
+  {
+    name: "0016-bot-display-settings",
+    sql: `
+ALTER TABLE bots ADD COLUMN show_tool_calls INTEGER NOT NULL DEFAULT 0
+  CHECK (show_tool_calls IN (0, 1));
+ALTER TABLE bots ADD COLUMN show_thinking INTEGER NOT NULL DEFAULT 0
+  CHECK (show_thinking IN (0, 1));
+`,
+  },
 ];
 export function openDb(cfg: Config): Database {
   const db = new Database(cfg.dbPath, { create: true });
@@ -799,6 +866,16 @@ export function openDb(cfg: Config): Database {
 /** Active turns cannot survive a daemon restart; supervised Bot Screens are reconciled separately. */
 export function recoverOnStartup(db: Database): void {
   const now = new Date().toISOString();
+  db.query(
+    `UPDATE messages
+     SET payload = json_set(payload, '$.status', 'error', '$.errorSummary', ?)
+     WHERE kind = 'tool'
+       AND json_extract(payload, '$.status') = 'running'
+       AND turn_id IN (
+         SELECT id FROM turns WHERE status NOT IN ('completed','cancelled','failed')
+       )`,
+  ).run(TOOL_CALL_INTERRUPTED_ERROR_SUMMARY);
+  db.query(`DELETE FROM messages WHERE kind IN ('response', 'thinking') AND block_state = 'streaming'`).run();
   db.query(`UPDATE turns SET status='failed', finished_at=?, outcome_reason='daemon restart' WHERE status NOT IN ('completed','cancelled','failed')`).run(now);
   db.query(`UPDATE bot_deletions SET state='failed', failure_json=?, updated_at=? WHERE state='cleaning'`)
     .run(JSON.stringify([{ stage: "database", resource: "daemon", message: "daemon restarted during permanent deletion" }]), now);

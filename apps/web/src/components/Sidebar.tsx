@@ -23,7 +23,7 @@ export interface SidebarProps {
   bots: BotViewDto[];
   selectedBotId?: string;
   onSelectBot: (botId: string) => void;
-  onEditProfile: (botId: string) => void;
+  onOpenBotSettings: (botId: string) => void;
   onDeleteBot: (bot: BotViewDto) => void;
   onCreateBot: () => void;
   onOpenSettings: () => void;
@@ -53,7 +53,7 @@ export function Sidebar({
   bots,
   selectedBotId,
   onSelectBot,
-  onEditProfile,
+  onOpenBotSettings,
   onDeleteBot,
   onCreateBot,
   onOpenSettings,
@@ -75,7 +75,7 @@ export function Sidebar({
       key={bot.id}
       label={`${bot.name} actions`}
       items={[
-        { label: "Edit Profile", onClick: () => onEditProfile(bot.id) },
+        { label: "Bot Settings", onClick: () => onOpenBotSettings(bot.id) },
         {
           label: "Delete",
           variant: "destructive",

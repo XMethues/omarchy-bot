@@ -1,15 +1,105 @@
-import type { ComputerAction, SurfaceId } from "@omarchy-bot/domain";
+import {
+  TOOL_CALL_ERROR_SUMMARY_MAX_LENGTH,
+  isToolCallSummary,
+  type ComputerAction,
+  type SurfaceId,
+  type ToolCallSummary,
+} from "@omarchy-bot/domain";
 import type { Hello, OpenSessionOptionsLike } from "./shared.ts";
 
 /**
  * Normalized agent events (agents-integration.md §2). Adapters may only emit a
  * unified terminal state after the native protocol's own final event.
  */
+/** Ordered Response lifecycle emitted at native text-block boundaries. */
+export type AgentResponseEvent =
+  | { type: "response.start"; sessionId: string; blockId: string; startedAt: string }
+  | { type: "response.delta"; sessionId: string; blockId: string; text: string }
+  | { type: "response.end"; sessionId: string; blockId: string; completedAt: string };
+
+/** Ordered Thinking lifecycle emitted only at officially exposed native boundaries. */
+export type AgentThinkingEvent =
+  | { type: "thinking.start"; sessionId: string; blockId: string; startedAt: string }
+  | { type: "thinking.delta"; sessionId: string; blockId: string; text: string }
+  | { type: "thinking.end"; sessionId: string; blockId: string; completedAt: string };
+
+type AgentToolCallEventBase = Omit<ToolCallSummary, "status"> & {
+  sessionId: string;
+};
+
+export type AgentToolCallEvent =
+  | (AgentToolCallEventBase & { type: "tool.started" | "tool.updated"; status: "running" })
+  | (AgentToolCallEventBase & { type: "tool.completed"; status: "completed" | "error" });
+
+const AGENT_TOOL_CALL_EVENT_KEYS: Record<
+  keyof ToolCallSummary | "type" | "sessionId",
+  true
+> = {
+  type: true,
+  sessionId: true,
+  id: true,
+  name: true,
+  status: true,
+  target: true,
+  durationMs: true,
+  additions: true,
+  deletions: true,
+  errorSummary: true,
+};
+
+/** Runtime guard at the untrusted worker boundary; extra native detail is rejected. */
+export function isAgentToolCallEvent(value: unknown): value is AgentToolCallEvent {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  if (Object.keys(value).some((key) => !(key in AGENT_TOOL_CALL_EVENT_KEYS))) return false;
+  const event = value as Record<string, unknown>;
+  if (typeof event.sessionId !== "string" || event.sessionId.length === 0) return false;
+  if (
+    event.type !== "tool.started" &&
+    event.type !== "tool.updated" &&
+    event.type !== "tool.completed"
+  ) return false;
+  if (!isToolCallSummary({
+    id: event.id,
+    name: event.name,
+    status: event.status,
+    ...(event.target !== undefined ? { target: event.target } : {}),
+    ...(event.durationMs !== undefined ? { durationMs: event.durationMs } : {}),
+    ...(event.additions !== undefined ? { additions: event.additions } : {}),
+    ...(event.deletions !== undefined ? { deletions: event.deletions } : {}),
+    ...(event.errorSummary !== undefined ? { errorSummary: event.errorSummary } : {}),
+  })) return false;
+  return event.type === "tool.completed"
+    ? event.status === "completed" || event.status === "error"
+    : event.status === "running";
+}
+
+export function toolCallSummaryFromEvent(event: AgentToolCallEvent): ToolCallSummary {
+  return {
+    id: event.id,
+    name: event.name,
+    status: event.status,
+    ...(event.target !== undefined ? { target: event.target } : {}),
+    ...(event.durationMs !== undefined ? { durationMs: event.durationMs } : {}),
+    ...(event.additions !== undefined ? { additions: event.additions } : {}),
+    ...(event.deletions !== undefined ? { deletions: event.deletions } : {}),
+    ...(event.errorSummary !== undefined ? { errorSummary: event.errorSummary } : {}),
+  };
+}
+
+/** Produce a one-line, bounded summary without common credential forms. */
+export function redactToolErrorSummary(value: unknown): string {
+  const redacted = String(value ?? "")
+    .replace(/\b(Bearer)\s+\S+/gi, "$1 [redacted]")
+    .replace(/\b((?:api[_-]?key|token|password|secret)\s*[:=]\s*)\S+/gi, "$1[redacted]")
+    .replace(/\s+/g, " ")
+    .trim();
+  return (redacted || "Tool call failed.").slice(0, TOOL_CALL_ERROR_SUMMARY_MAX_LENGTH);
+}
+
 export type AgentEvent =
-  | { type: "message.delta"; sessionId: string; text: string }
-  | { type: "tool.started"; sessionId: string; id: string; name: string; input: unknown }
-  | { type: "tool.updated"; sessionId: string; id: string; output?: unknown }
-  | { type: "tool.completed"; sessionId: string; id: string; output: unknown; isError: boolean }
+  | AgentResponseEvent
+  | AgentThinkingEvent
+  | AgentToolCallEvent
   | { type: "turn.completed"; sessionId: string; usage?: unknown }
   | { type: "turn.cancelled"; sessionId: string }
   | { type: "error"; sessionId?: string; message: string; retryable: boolean }
@@ -89,7 +179,7 @@ export type WorkerOutbound =
   | AgentComputerToolCancel
   | AgentResult;
 
-export const AGENT_CAPABILITY_INVENTORY_VERSION = 1 as const;
+export const AGENT_CAPABILITY_INVENTORY_VERSION = 2 as const;
 
 export const NATIVE_THREAD_ACTIONS = ["resume", "history", "close", "rename", "delete", "fork", "compact"] as const;
 export type NativeThreadAction = (typeof NATIVE_THREAD_ACTIONS)[number];
@@ -100,33 +190,65 @@ export interface AgentCapabilityInventory {
   steering: boolean;
   abort: boolean;
   nativeThreadActions: NativeThreadAction[];
+  thinking: {
+    supported: boolean;
+    streaming: boolean;
+  };
   attachments: {
     text: boolean;
     image: boolean;
     /** Adapter input bound for inlined text. Omitted when only the daemon upload bound applies. */
     maxTextBytes?: number;
   };
+  /** Exact capability identifiers permitted on residual `native` events. */
   nativeEventFamilies: string[];
 }
 
+const AGENT_CAPABILITY_INVENTORY_KEYS: Record<string, true> = {
+  version: true,
+  steering: true,
+  abort: true,
+  nativeThreadActions: true,
+  thinking: true,
+  attachments: true,
+  nativeEventFamilies: true,
+};
+
+const THINKING_CAPABILITY_KEYS: Record<string, true> = { supported: true, streaming: true };
+const ATTACHMENT_CAPABILITY_KEYS: Record<string, true> = {
+  text: true,
+  image: true,
+  maxTextBytes: true,
+};
+
 export function isAgentCapabilityInventory(value: unknown): value is AgentCapabilityInventory {
-  if (value === null || typeof value !== "object") return false;
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
   const inventory = value as Partial<AgentCapabilityInventory>;
   const attachments = inventory.attachments as Partial<AgentCapabilityInventory["attachments"]> | null | undefined;
-  return inventory.version === AGENT_CAPABILITY_INVENTORY_VERSION &&
+  const thinking = inventory.thinking as Partial<AgentCapabilityInventory["thinking"]> | null | undefined;
+  return Object.keys(value).every((key) => key in AGENT_CAPABILITY_INVENTORY_KEYS) &&
+    inventory.version === AGENT_CAPABILITY_INVENTORY_VERSION &&
     typeof inventory.steering === "boolean" &&
     typeof inventory.abort === "boolean" &&
-    !("sessionDeletion" in inventory) &&
     Array.isArray(inventory.nativeThreadActions) &&
     inventory.nativeThreadActions.every((action) => NATIVE_THREAD_ACTIONS.includes(action)) &&
+    new Set(inventory.nativeThreadActions).size === inventory.nativeThreadActions.length &&
+    thinking !== null &&
+    thinking !== undefined &&
+    Object.keys(thinking).every((key) => key in THINKING_CAPABILITY_KEYS) &&
+    typeof thinking.supported === "boolean" &&
+    typeof thinking.streaming === "boolean" &&
+    (!thinking.streaming || thinking.supported) &&
     attachments !== null &&
     attachments !== undefined &&
+    Object.keys(attachments).every((key) => key in ATTACHMENT_CAPABILITY_KEYS) &&
     typeof attachments.text === "boolean" &&
     typeof attachments.image === "boolean" &&
     (attachments.maxTextBytes === undefined ||
       (Number.isSafeInteger(attachments.maxTextBytes) && attachments.maxTextBytes > 0)) &&
     Array.isArray(inventory.nativeEventFamilies) &&
-    inventory.nativeEventFamilies.every((family) => typeof family === "string" && family.length > 0);
+    inventory.nativeEventFamilies.every((family) => typeof family === "string" && family.length > 0) &&
+    new Set(inventory.nativeEventFamilies).size === inventory.nativeEventFamilies.length;
 }
 
 export interface ProbePayload {

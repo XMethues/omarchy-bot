@@ -21,7 +21,7 @@ import { ConversationHeader } from "../components/ConversationHeader.tsx";
 import { ChatPanel } from "../components/ChatPanel.tsx";
 import { CreateBotDialog } from "../components/CreateBotDialog.tsx";
 import { HistoryDialog } from "../components/HistoryDialog.tsx";
-import { ProfilePanel } from "../components/ProfilePanel.tsx";
+import { BotSettingsPanel } from "../components/BotSettingsPanel.tsx";
 import { SettingsDialog } from "../components/SettingsDialog.tsx";
 import { ComputerPanel } from "../components/ComputerPanel.tsx";
 import { useVoiceAutoSendSetting } from "../components/VoiceSettingsControl.tsx";
@@ -68,7 +68,7 @@ function HomeScreen(): JSX.Element {
   const { bot: selectedBotId, thread: selectedThreadId } = Route.useSearch();
   const [createOpen, setCreateOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
-  const [profileOpen, setProfileOpen] = useState(false);
+  const [botSettingsOpen, setBotSettingsOpen] = useState(false);
   const [computerOpen, setComputerOpen] = useState(false);
   const [computerError, setComputerError] = useState<string | undefined>(undefined);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -84,7 +84,7 @@ function HomeScreen(): JSX.Element {
   const botNamesRef = useRef<Record<string, string>>({});
   const mobileNavigationTriggerRef = useRef<HTMLButtonElement>(null);
   const computerTriggerRef = useRef<HTMLButtonElement>(null);
-  const profileTriggerRef = useRef<HTMLButtonElement>(null);
+  const botSettingsTriggerRef = useRef<HTMLButtonElement>(null);
   selectedBotRef.current = selectedBotId;
 
   const invalidate = useCallback(
@@ -455,7 +455,7 @@ function HomeScreen(): JSX.Element {
 
       if (selectedBotId === target.id) {
         setHistoryOpen(false);
-        setProfileOpen(false);
+        setBotSettingsOpen(false);
         setComputerOpen(false);
         const fallback = mostRecentlyActiveBot(remaining);
         await navigate({
@@ -483,13 +483,13 @@ function HomeScreen(): JSX.Element {
       bots={bots.data ?? []}
       {...(selectedBotId !== undefined ? { selectedBotId } : {})}
       onSelectBot={selectBot}
-      onEditProfile={(botId) => {
+      onOpenBotSettings={(botId) => {
         setComputerOpen(false);
         if (selectedBotId === botId) {
-          setProfileOpen(true);
+          setBotSettingsOpen(true);
           return;
         }
-        void navigate({ search: { bot: botId } }).then(() => setProfileOpen(true));
+        void navigate({ search: { bot: botId } }).then(() => setBotSettingsOpen(true));
       }}
       onDeleteBot={requestBotDeletion}
       onCreateBot={() => setCreateOpen(true)}
@@ -521,38 +521,44 @@ function HomeScreen(): JSX.Element {
             {...(bot !== undefined ? { bot } : {})}
             {...(thread !== undefined ? { thread } : {})}
             onOpenHistory={() => setHistoryOpen(true)}
-            profileOpen={profileOpen}
-            onToggleProfile={() => {
-              const nextOpen = !profileOpen;
-              setProfileOpen(nextOpen);
+            botSettingsOpen={botSettingsOpen}
+            onToggleBotSettings={() => {
+              const nextOpen = !botSettingsOpen;
+              setBotSettingsOpen(nextOpen);
               if (nextOpen) setComputerOpen(false);
             }}
             computerState={computer.data?.state ?? "unavailable"}
             computerOpen={computerOpen}
             onToggleComputer={() => {
-              setProfileOpen(false);
+              setBotSettingsOpen(false);
               setComputerOpen((open) => !open);
             }}
             mobileNavigationTriggerRef={mobileNavigationTriggerRef}
             computerTriggerRef={computerTriggerRef}
-            profileTriggerRef={profileTriggerRef}
+            botSettingsTriggerRef={botSettingsTriggerRef}
           />
         }
         content={
-          <ConversationWorkspace panelOpen={profileOpen || computerOpen}>
+          <ConversationWorkspace panelOpen={botSettingsOpen || computerOpen}>
             {workspaceContent}
           </ConversationWorkspace>
         }
         end={
           bot !== undefined ? (
-            profileOpen ? (
-              <ProfilePanel
+            botSettingsOpen ? (
+              <BotSettingsPanel
                 bot={bot}
                 agentDisplayName={selectedAgent?.displayName ?? bot.agentId}
                 open
-                returnFocusRef={profileTriggerRef}
-                onClose={() => setProfileOpen(false)}
-                onUpdated={() => invalidate("bots")}
+                returnFocusRef={botSettingsTriggerRef}
+                onClose={() => setBotSettingsOpen(false)}
+                onUpdated={(updated) => {
+                  qc.setQueryData<BotViewDto[]>(["bots"], (currentBots) =>
+                    currentBots?.map((candidate) =>
+                      candidate.id === updated.id ? { ...candidate, ...updated } : candidate,
+                    ),
+                  );
+                }}
               />
             ) : (
               <ComputerPanel
