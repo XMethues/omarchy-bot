@@ -10,10 +10,19 @@ import {
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import rtc, { type DataChannel, type PeerConnection } from "node-datachannel";
+import rtc, { type DataChannel, type PeerConnection, type Track } from "node-datachannel";
 import { BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL } from "../../apps/daemon/src/bootstrap/config.ts";
 import type { ProjectionLoadMetrics } from "../../apps/daemon/src/modules/computer/screenProjection.ts";
 import type { SurfaceId } from "../../packages/domain/src/ids.ts";
+import {
+  SCREEN_CONTROL_CHANNEL,
+  SCREEN_H264_CLOCK_RATE,
+  SCREEN_H264_FMTP,
+  SCREEN_H264_PROFILE,
+  SCREEN_INPUT_CHANNEL,
+  SCREEN_PREVIEW_CHANNEL,
+  SCREEN_PROJECTION_PROTOCOL_VERSION,
+} from "../../packages/protocol/src/api.ts";
 import { api, apiStatus, makeBot, startDaemon, type Harness } from "./helpers/harness.ts";
 import {
   buildFinalWebClient,
@@ -30,6 +39,34 @@ const loadTest = process.env.OMARCHY_BOT_REAL_SCREEN_LOAD === "1" ? test : test.
 const ROLES = ["compositor", "application", "input", "worker"] as const;
 const MATRIX = [1, 2, 4, 8] as const;
 
+
+const PROJECTION_CAPABILITIES = {
+  previewImage: { transport: "data-channel", channel: SCREEN_PREVIEW_CHANNEL, mediaType: "image/png" },
+  expandedVideo: {
+    transport: "webrtc-video-track",
+    codec: "video/H264",
+    profileLevelId: SCREEN_H264_PROFILE,
+    clockRate: SCREEN_H264_CLOCK_RATE,
+  },
+  control: { transport: "data-channel", channel: SCREEN_CONTROL_CHANNEL },
+  input: { transport: "data-channel", channel: SCREEN_INPUT_CHANNEL },
+  snapshotFallback: { transport: "http", mediaType: "image/png" },
+} as const;
+
+function projectionOffer(sdp: string): object {
+  return {
+    version: SCREEN_PROJECTION_PROTOCOL_VERSION,
+    type: "offer",
+    sdp,
+    capabilities: PROJECTION_CAPABILITIES,
+  };
+}
+
+function receiveH264(peer: PeerConnection): Track {
+  const video = new rtc.Video("screen", "RecvOnly");
+  video.addH264Codec(96, SCREEN_H264_FMTP);
+  return peer.addTrack(video);
+}
 interface Owner {
   botId: string;
   surfaceId: SurfaceId;
@@ -176,9 +213,11 @@ function openChannel(channel: DataChannel): Promise<void> {
 class ProjectionClient {
   readonly frames: CompletedFrame[] = [];
   readonly peer: PeerConnection;
+  readonly videoTrack: Track;
   readonly frameChannel: DataChannel;
   readonly controlChannel: DataChannel;
   readonly inputChannel: DataChannel;
+  #videoSequence = 0;
   #pendingHeader: { sequence: number; chunkCount: number } | undefined;
   #chunks: Buffer[] = [];
   #authority: Authority | undefined;
@@ -189,14 +228,17 @@ class ProjectionClient {
     readonly owner: Owner,
     readonly answer: ProjectionAnswer,
     peer: PeerConnection,
+    videoTrack: Track,
     frameChannel: DataChannel,
     controlChannel: DataChannel,
     inputChannel: DataChannel,
   ) {
     this.peer = peer;
+    this.videoTrack = videoTrack;
     this.frameChannel = frameChannel;
     this.controlChannel = controlChannel;
     this.inputChannel = inputChannel;
+    videoTrack.onMessage((raw) => this.#onVideo(raw));
     frameChannel.onMessage((raw) => this.#onFrame(raw));
     inputChannel.onMessage((raw) => this.#onAuthority(raw));
   }
@@ -205,9 +247,10 @@ class ProjectionClient {
     const peer = new rtc.PeerConnection(name, { iceServers: [] });
     const described = Promise.withResolvers<void>();
     peer.onLocalDescription(() => described.resolve());
-    const frameChannel = peer.createDataChannel("screen.frames.v1", { unordered: false });
-    const controlChannel = peer.createDataChannel("screen.control.v1", { unordered: false });
-    const inputChannel = peer.createDataChannel("screen.input.v1", { unordered: false });
+    const videoTrack = receiveH264(peer);
+    const frameChannel = peer.createDataChannel(SCREEN_PREVIEW_CHANNEL, { unordered: false });
+    const controlChannel = peer.createDataChannel(SCREEN_CONTROL_CHANNEL, { unordered: false });
+    const inputChannel = peer.createDataChannel(SCREEN_INPUT_CHANNEL, { unordered: false });
     peer.setLocalDescription("offer");
     await withTimeout(described.promise, 5_000, "WebRTC offer description timed out");
     await until(
@@ -222,7 +265,7 @@ class ProjectionClient {
       {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ type: "offer", sdp: offer.sdp }),
+        body: JSON.stringify(projectionOffer(offer.sdp)),
       },
     ), 15_000, "Screen Projection answer timed out");
     if (response.status !== 201) throw new Error(`projection signaling failed: ${response.status} ${await response.text()}`);
@@ -253,13 +296,13 @@ class ProjectionClient {
       );
       throw new Error(`${error instanceof Error ? error.message : String(error)} (${connectionState})`);
     }
-    return new ProjectionClient(owner, answer, peer, frameChannel, controlChannel, inputChannel);
+    return new ProjectionClient(owner, answer, peer, videoTrack, frameChannel, controlChannel, inputChannel);
   }
 
   async mode(mode: "idle" | "preview" | "expanded"): Promise<Authority | undefined> {
     const authority = mode === "expanded" ? this.waitForAuthority(true) : undefined;
     if (!this.controlChannel.sendMessage(JSON.stringify({
-      version: 1,
+      version: SCREEN_PROJECTION_PROTOCOL_VERSION,
       type: "view",
       surfaceId: this.owner.surfaceId,
       runtimeGeneration: this.answer.runtimeGeneration,
@@ -319,7 +362,7 @@ class ProjectionClient {
     const sequence = this.#nextSequence;
     this.#nextSequence += 1;
     const sent = this.inputChannel.sendMessage(JSON.stringify({
-      version: 1,
+      version: SCREEN_PROJECTION_PROTOCOL_VERSION,
       type,
       surfaceId: this.owner.surfaceId,
       runtimeGeneration: this.answer.runtimeGeneration,
@@ -348,7 +391,7 @@ class ProjectionClient {
   #onFrame(raw: string | Buffer | ArrayBuffer): void {
     if (typeof raw === "string") {
       const parsed = JSON.parse(raw) as { type?: string; sequence?: number; chunkCount?: number };
-      if (parsed.type !== "frame" || typeof parsed.sequence !== "number" || typeof parsed.chunkCount !== "number") return;
+      if (parsed.type !== "preview-frame" || typeof parsed.sequence !== "number" || typeof parsed.chunkCount !== "number") return;
       this.#pendingHeader = { sequence: parsed.sequence, chunkCount: parsed.chunkCount };
       this.#chunks = [];
       return;
@@ -364,6 +407,14 @@ class ProjectionClient {
     });
     this.#pendingHeader = undefined;
     this.#chunks = [];
+  }
+
+  #onVideo(raw: Buffer): void {
+    this.frames.push({
+      sequence: ++this.#videoSequence,
+      receivedAtMs: performance.now(),
+      digest: new Bun.CryptoHasher("sha256").update(raw).digest("hex"),
+    });
   }
 }
 
@@ -543,16 +594,16 @@ async function killUnit(owner: Owner, generation: number, role: "input" | "compo
   if (result.status !== 0) throw new Error(`could not crash ${role}: ${result.stderr}`);
 }
 
-function activeCaptureCount(owners: Owner[]): number {
-  const outputs = new Set(owners.map((owner) => `BOT-${owner.surfaceId.slice(-12).toUpperCase()}`));
+function activeEncoderCount(): number {
   let count = 0;
   for (const entry of readdirSync("/proc")) {
     if (!/^\d+$/.test(entry)) continue;
     try {
       const commandLine = readFileSync(`/proc/${entry}/cmdline`, "utf8").split("\0");
-      if (path.basename(commandLine[0] ?? "") === "grim" && commandLine.some((argument) => outputs.has(argument))) {
-        count += 1;
-      }
+      if (
+        path.basename(commandLine[0] ?? "") === "ffmpeg"
+        && commandLine.some((argument) => argument.includes("repeat-headers=1:aud=1"))
+      ) count += 1;
     } catch {
       // Processes may exit while /proc is sampled.
     }
@@ -623,7 +674,7 @@ async function runRow(profile: "1080p" | "720p", count: number, durationMs: numb
 
     idle = await resourceWindow(owners, generationBySurface, Math.min(durationMs, 2_000));
     for (let sample = 0; sample < 10; sample += 1) {
-      idleEncodeProcessesObserved += activeCaptureCount(owners);
+      idleEncodeProcessesObserved += activeEncoderCount();
       await Bun.sleep(50);
     }
     console.log(`Bot Screen load ${profile}/${count}: idle measured`);

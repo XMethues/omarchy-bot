@@ -7,7 +7,7 @@ import type {
   RefObject,
   WheelEvent as ReactWheelEvent,
 } from "react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import * as stylex from "@stylexjs/stylex";
 import { Maximize2 } from "lucide-react";
 import { AspectRatio } from "@astryxdesign/core/AspectRatio";
@@ -187,6 +187,12 @@ function ComputerPanelContent({
         <Text color="secondary">{STATE_LABELS[view.state]}</Text>
       ) : null}
       {error !== undefined ? <Banner status="error" title={error} /> : null}
+      {projectionUnavailable && frameUrl !== undefined ? (
+        <Banner
+          status="warning"
+          title={`Read-only snapshot — ${projectionError ?? "Live Screen Projection is unavailable."}`}
+        />
+      ) : null}
       {loading ? (
         <EmptyState
           icon={<Icon icon="clock" size="lg" />}
@@ -297,22 +303,46 @@ export function ComputerPanel({
   const [previewExpanded, setPreviewExpanded] = useState(false);
   const [projectionState, setProjectionState] = useState<ScreenProjectionState>("closed");
   const [projectionError, setProjectionError] = useState<string>();
-  const [frameUrl, setFrameUrl] = useState<string>();
+  const [frameProjection, setFrameProjection] = useState<{ surfaceId: string; url: string }>();
+  const [videoProjection, setVideoProjection] = useState<{ surfaceId: string; stream: MediaStream }>();
   const [controlReady, setControlReady] = useState(false);
   const [projectionAttempt, setProjectionAttempt] = useState(0);
   const [screenRetrying, setScreenRetrying] = useState(false);
   const connectionRef = useRef<ScreenProjectionConnection | undefined>(undefined);
-  const frameUrlRef = useRef<string | undefined>(undefined);
+  const frameUrlRef = useRef<{ surfaceId: string; url: string } | undefined>(undefined);
+  const selectedSurfaceRef = useRef(view.surfaceId);
+  selectedSurfaceRef.current = view.surfaceId;
   const expandedRef = useRef<HTMLDialogElement | null>(null);
+  const expandedVideoRef = useRef<HTMLVideoElement | null>(null);
   const pressedPointersRef = useRef(new Map<number, number>());
   const browserPasteKeysRef = useRef(new Set<string>());
 
-  const replaceFrame = useCallback((frame: Blob | undefined): void => {
-    if (frameUrlRef.current !== undefined) URL.revokeObjectURL(frameUrlRef.current);
-    const nextUrl = frame === undefined ? undefined : URL.createObjectURL(frame);
-    frameUrlRef.current = nextUrl;
-    setFrameUrl(nextUrl);
+  const replaceFrame = useCallback((surfaceId: string, frame: Blob | undefined): void => {
+    const current = frameUrlRef.current;
+    if (frame === undefined) {
+      if (current?.surfaceId === surfaceId) {
+        URL.revokeObjectURL(current.url);
+        frameUrlRef.current = undefined;
+      }
+      setFrameProjection((projection) => projection?.surfaceId === surfaceId ? undefined : projection);
+      return;
+    }
+    if (selectedSurfaceRef.current !== surfaceId) return;
+    if (current !== undefined) URL.revokeObjectURL(current.url);
+    const next = { surfaceId, url: URL.createObjectURL(frame) };
+    frameUrlRef.current = next;
+    setFrameProjection(next);
   }, []);
+  const replaceVideo = useCallback((surfaceId: string, stream: MediaStream | undefined): void => {
+    if (stream !== undefined && selectedSurfaceRef.current !== surfaceId) return;
+    setVideoProjection((projection) =>
+      stream === undefined
+        ? projection?.surfaceId === surfaceId ? undefined : projection
+        : { surfaceId, stream }
+    );
+  }, []);
+  const frameUrl = frameProjection?.surfaceId === view.surfaceId ? frameProjection.url : undefined;
+  const videoStream = videoProjection?.surfaceId === view.surfaceId ? videoProjection.stream : undefined;
   const clearBrowserHeldInput = useCallback((): void => {
     for (const pointerId of pressedPointersRef.current.keys()) {
       if (expandedRef.current?.hasPointerCapture(pointerId)) {
@@ -322,6 +352,11 @@ export function ComputerPanel({
     pressedPointersRef.current.clear();
     browserPasteKeysRef.current.clear();
   }, []);
+  useLayoutEffect(() => {
+    setPreviewExpanded(false);
+    setControlReady(false);
+    clearBrowserHeldInput();
+  }, [clearBrowserHeldInput, view.surfaceId]);
   const closePanel = useCallback((): void => {
     setPreviewExpanded(false);
     setControlReady(false);
@@ -335,24 +370,32 @@ export function ComputerPanel({
     if (!open || (view.state === "unavailable" && (!screenRetrying || view.unavailableReason === "capacity"))) {
       connectionRef.current?.close();
       connectionRef.current = undefined;
-      replaceFrame(undefined);
+      replaceFrame(view.surfaceId, undefined);
+      replaceVideo(view.surfaceId, undefined);
       setControlReady(false);
       setProjectionState("closed");
       return;
     }
     setProjectionError(undefined);
+    const surfaceId = view.surfaceId;
     const connection = new ScreenProjectionConnection(
       projectionUrl,
-      { botId: bot.id, surfaceId: view.surfaceId },
+      { botId: bot.id, surfaceId },
       {
         onState: (state) => {
+          if (selectedSurfaceRef.current !== surfaceId) return;
           setProjectionState(state);
           if (state === "unavailable") setScreenRetrying(false);
         },
-        onError: setProjectionError,
-        onFrame: replaceFrame,
+        onError: (error) => {
+          if (selectedSurfaceRef.current === surfaceId) setProjectionError(error);
+        },
+        onFrame: (frame) => replaceFrame(surfaceId, frame),
+        onVideo: (stream) => replaceVideo(surfaceId, stream),
         onControlRevoked: clearBrowserHeldInput,
-        onControlStateChange: setControlReady,
+        onControlStateChange: (active) => {
+          if (selectedSurfaceRef.current === surfaceId) setControlReady(active);
+        },
       },
     );
     connectionRef.current = connection;
@@ -361,7 +404,8 @@ export function ComputerPanel({
     return () => {
       if (connectionRef.current === connection) connectionRef.current = undefined;
       connection.close();
-      replaceFrame(undefined);
+      replaceFrame(surfaceId, undefined);
+      replaceVideo(surfaceId, undefined);
     };
   }, [
     bot.id,
@@ -371,6 +415,7 @@ export function ComputerPanel({
     projectionUrl,
     screenRetrying,
     replaceFrame,
+    replaceVideo,
     view.state === "unavailable",
     view.unavailableReason,
     view.surfaceId,
@@ -391,10 +436,25 @@ export function ComputerPanel({
   useEffect(() => {
     const dialog = expandedRef.current;
     if (dialog === null) return;
-    const shouldOpen = open && !isSmallScreen && previewExpanded && frameUrl !== undefined;
+    const shouldOpen = open && !isSmallScreen && previewExpanded && videoStream !== undefined;
     if (shouldOpen && !dialog.open) dialog.showModal();
     else if (!shouldOpen && dialog.open) dialog.close();
-  }, [frameUrl, isSmallScreen, open, previewExpanded]);
+  }, [isSmallScreen, open, previewExpanded, videoStream]);
+
+  useEffect(() => {
+    const video = expandedVideoRef.current;
+    const connection = connectionRef.current;
+    if (video === null || videoStream === undefined || connection === undefined || !previewExpanded) return;
+    video.srcObject = videoStream;
+    void video.play().catch(() => {});
+    const callback = video.requestVideoFrameCallback(() => {
+      connection.videoFramePainted(video.videoWidth, video.videoHeight);
+    });
+    return () => {
+      video.cancelVideoFrameCallback(callback);
+      video.srcObject = null;
+    };
+  }, [previewExpanded, videoStream]);
 
   useEffect(() => {
     if (!open || isSmallScreen || !previewExpanded) return;
@@ -446,24 +506,24 @@ export function ComputerPanel({
   }, [closePanel, open, previewExpanded]);
 
   const sendExpandedMotion = (event: ReactPointerEvent<HTMLDialogElement>): void => {
-    const image = event.currentTarget.querySelector("img");
+    const video = event.currentTarget.querySelector("video");
     const overControl = event.target instanceof Element && event.target.closest("button") !== null;
-    if (image === null || (overControl && !pressedPointersRef.current.has(event.pointerId))) return;
+    if (video === null || (overControl && !pressedPointersRef.current.has(event.pointerId))) return;
     connectionRef.current?.pointerMotion(
       event.clientX,
       event.clientY,
-      image,
+      video,
       pressedPointersRef.current.has(event.pointerId),
     );
   };
   const pressExpandedPointer = (event: ReactPointerEvent<HTMLDialogElement>): void => {
     if (event.target instanceof Element && event.target.closest("button") !== null) return;
-    const image = event.currentTarget.querySelector("img");
-    if (image === null || event.button < 0 || event.button > 2) return;
+    const video = event.currentTarget.querySelector("video");
+    if (video === null || event.button < 0 || event.button > 2) return;
     const sent = connectionRef.current?.pointerButton(
       event.clientX,
       event.clientY,
-      image,
+      video,
       event.button,
       "pressed",
     ) ?? false;
@@ -475,11 +535,11 @@ export function ComputerPanel({
   const releaseExpandedPointer = (event: ReactPointerEvent<HTMLDialogElement>): void => {
     const button = pressedPointersRef.current.get(event.pointerId);
     if (button === undefined) return;
-    const image = event.currentTarget.querySelector("img");
-    const sent = image !== null && connectionRef.current?.pointerButton(
+    const video = event.currentTarget.querySelector("video");
+    const sent = video !== null && connectionRef.current?.pointerButton(
       event.clientX,
       event.clientY,
-      image,
+      video,
       button,
       "released",
     ) === true;
@@ -491,10 +551,10 @@ export function ComputerPanel({
   };
   const scrollExpandedPointer = (event: ReactWheelEvent<HTMLDialogElement>): void => {
     if (event.target instanceof Element && event.target.closest("button") !== null) return;
-    const image = event.currentTarget.querySelector("img");
-    if (image === null) return;
+    const video = event.currentTarget.querySelector("video");
+    if (video === null) return;
     event.preventDefault();
-    connectionRef.current?.pointerScroll(event.clientX, event.clientY, image, event.deltaX, event.deltaY);
+    connectionRef.current?.pointerScroll(event.clientX, event.clientY, video, event.deltaX, event.deltaY);
   };
   const suppressExpandedMenu = (event: ReactMouseEvent<HTMLDialogElement>): void => {
     if (!(event.target instanceof Element) || event.target.closest("button") === null) event.preventDefault();
@@ -569,7 +629,7 @@ export function ComputerPanel({
         setProjectionAttempt((attempt) => attempt + 1);
       }}
       onRetryScreen={retryUnavailableScreen}
-      {...(!isSmallScreen && frameUrl !== undefined
+      {...(!isSmallScreen && frameUrl !== undefined && projectionState !== "unavailable"
         ? {
             onExpandPreview:
               view.takeover === "available"
@@ -579,7 +639,7 @@ export function ComputerPanel({
         : {})}
     />
   );
-  const expandedDialog = frameUrl === undefined ? null : (
+  const expandedDialog = videoStream === undefined ? null : (
     <dialog
       ref={expandedRef}
       aria-label={`Web Control for ${bot.name}`}
@@ -602,11 +662,14 @@ export function ComputerPanel({
     >
       <div {...stylex.props(localStyles.webControlShell)}>
         <div {...stylex.props(localStyles.webControlViewport)}>
-          <img
-            src={frameUrl}
-            alt={`Web Control for ${bot.name}`}
-            draggable={false}
+          <video
+            ref={expandedVideoRef}
+            aria-label={`Web Control for ${bot.name}`}
+            autoPlay
+            playsInline
+            muted
             {...stylex.props(localStyles.webControlImage)}
+            data-testid="computer-expanded-video"
           />
         </div>
         <HStack gap={2} padding={3} vAlign="center" wrap="wrap" xstyle={localStyles.webControlToolbar}>

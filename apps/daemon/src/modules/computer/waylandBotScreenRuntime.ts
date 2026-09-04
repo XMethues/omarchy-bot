@@ -446,14 +446,11 @@ class WaylandCaptureStream implements BotScreenCaptureStream {
         }
         const capturedAt = new Date();
         const raw = await this.protocol.readBytes(byteLength);
-        const png = await sharp(raw, {
-          raw: { width, height, channels: 4 },
-          failOn: "error",
-          limitInputPixels: width * height,
-        }).png().toBuffer();
         return {
-          mediaType: "image/png" as const,
-          bytes: new Uint8Array(png.buffer, png.byteOffset, png.byteLength),
+          pixelFormat: "rgba" as const,
+          width,
+          height,
+          bytes: raw,
           capturedAt,
         };
       })();

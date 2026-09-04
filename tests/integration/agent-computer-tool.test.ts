@@ -80,6 +80,9 @@ class AgentToolRuntimeAdapter implements BotScreenRuntimeAdapter {
 
   async start(provision: BotScreenProvision): Promise<BotScreenRuntime> {
     return {
+    const videoWidth = Math.round(provision.logicalWidth * provision.scale);
+    const videoHeight = Math.round(provision.logicalHeight * provision.scale);
+    const rawFrame = new Uint8Array(videoWidth * videoHeight * 4);
       readiness: {
         compositor: "ready",
         waylandSocket: "private",
@@ -98,8 +101,10 @@ class AgentToolRuntimeAdapter implements BotScreenRuntimeAdapter {
       capture: async () => ({ mediaType: "image/png", bytes: new Uint8Array([1]) }),
       openCaptureStream: async () => ({
         next: async () => ({
-          mediaType: "image/png",
-          bytes: new Uint8Array([1]),
+          pixelFormat: "rgba",
+          width: videoWidth,
+          height: videoHeight,
+          bytes: rawFrame,
           capturedAt: new Date(),
         }),
         close: async () => {},

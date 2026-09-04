@@ -182,6 +182,9 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     let highestControllerEpoch = 0;
     let lastInputSequence = 0;
     let actionCount = 0;
+    const videoWidth = Math.round(provision.logicalWidth * provision.scale);
+    const videoHeight = Math.round(provision.logicalHeight * provision.scale);
+    const rawFrame = Buffer.alloc(videoWidth * videoHeight * 4);
     const outcome = Promise.withResolvers<BotScreenRuntimeOutcome>();
     let record!: FakeRuntimeRecord;
     const captureStreams = new Set<BotScreenCaptureStream>();
@@ -223,8 +226,10 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
                 throw new Error("fake Bot Screen capture stream failed");
               }
               return {
-                mediaType: "image/png",
-                bytes: FAKE_SCREEN_PNG,
+                pixelFormat: "rgba",
+                width: videoWidth,
+                height: videoHeight,
+                bytes: rawFrame,
                 capturedAt: new Date(),
               };
             } finally {

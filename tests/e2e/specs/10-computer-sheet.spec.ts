@@ -30,6 +30,23 @@ async function installProjectionPeer(
 ): Promise<void> {
   await page.addInitScript(({ pngBase64, inputAuthorityAvailable, frameAvailable }) => {
     const png = Uint8Array.from(atob(pngBase64), (character) => character.charCodeAt(0)).buffer;
+    const canvas = document.createElement("canvas");
+    canvas.width = 2000;
+    canvas.height = 1000;
+    const canvasContext = canvas.getContext("2d");
+    if (canvasContext === null) throw new Error("fake projection canvas was unavailable");
+    const paintContext: CanvasRenderingContext2D = canvasContext;
+    paintContext.fillStyle = "#345";
+    paintContext.fillRect(0, 0, canvas.width, canvas.height);
+    const videoStream = canvas.captureStream(5);
+    const fakeOffer = [
+      "v=0",
+      "m=video 9 UDP/TLS/RTP/SAVPF 104",
+      "a=recvonly",
+      "a=rtpmap:104 H264/90000",
+      "a=fmtp:104 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f",
+      "",
+    ].join("\r\n");
     const inputMessages: unknown[] = [];
     Object.defineProperty(window, "__screenInputMessages", { configurable: true, value: inputMessages });
     const controlMessages: unknown[] = [];
@@ -93,6 +110,7 @@ async function installProjectionPeer(
       private readonly channels = new Map<string, FakeDataChannel>();
       private surfaceId = "";
       private sequence = 0;
+      private trackSent = false;
       constructor() {
         super();
         peers.push(this);
@@ -100,9 +118,9 @@ async function installProjectionPeer(
 
       dispatchInputAuthority(active: boolean, controllerEpoch = 7): void {
         testControl.inputAuthorityActive = active;
-        this.channels.get("screen.input.v1")?.dispatchEvent(new MessageEvent("message", {
+        this.channels.get("screen.input.v2")?.dispatchEvent(new MessageEvent("message", {
           data: JSON.stringify({
-            version: 1,
+            version: 2,
             type: "input-authority",
             active,
             surfaceId: this.surfaceId,
@@ -120,7 +138,7 @@ async function installProjectionPeer(
 
       createDataChannel(label: string): RTCDataChannel {
         const channel = new FakeDataChannel(label, (sentLabel, raw) => {
-          if (sentLabel === "screen.input.v1") {
+          if (sentLabel === "screen.input.v2") {
             const message = JSON.parse(raw) as { type?: string; controllerEpoch?: number };
             inputMessages.push(message);
             if (message.type === "release-control") {
@@ -128,22 +146,39 @@ async function installProjectionPeer(
             }
             return;
           }
-          if (sentLabel !== "screen.control.v1") return;
+          if (sentLabel !== "screen.control.v2") return;
           const message = JSON.parse(raw) as { mode?: string };
           controlMessages.push(message);
           if (message.mode !== "preview" && message.mode !== "expanded") return;
           if (!testControl.frameAvailable) return;
-          const frames = this.channels.get("screen.frames.v1");
+          if (message.mode === "expanded") {
+            queueMicrotask(() => {
+              if (!this.trackSent) {
+                this.trackSent = true;
+                const event = new Event("track") as Event & {
+                  track: MediaStreamTrack;
+                  streams: MediaStream[];
+                };
+                Object.defineProperties(event, {
+                  track: { value: videoStream.getVideoTracks()[0] },
+                  streams: { value: [videoStream] },
+                });
+                this.dispatchEvent(event);
+              }
+              paintContext.fillStyle = this.sequence++ % 2 === 0 ? "#345" : "#456";
+              paintContext.fillRect(0, 0, canvas.width, canvas.height);
+              if (testControl.inputAuthorityAvailable) this.dispatchInputAuthority(true);
+            });
+            return;
+          }
+          const frames = this.channels.get("screen.preview.v2");
           if (frames === undefined) return;
           this.sequence += 1;
           queueMicrotask(() => {
-            if (message.mode === "expanded" && testControl.inputAuthorityAvailable) {
-              this.dispatchInputAuthority(true);
-            }
             frames.dispatchEvent(new MessageEvent("message", {
               data: JSON.stringify({
-                version: 1,
-                type: "frame",
+                version: 2,
+                type: "preview-frame",
                 surfaceId: this.surfaceId,
                 runtimeGeneration: 1,
                 geometryGeneration: 1,
@@ -154,7 +189,6 @@ async function installProjectionPeer(
                 scale: 2,
                 sequence: this.sequence,
                 mediaType: "image/png",
-                mode: message.mode,
                 byteLength: png.byteLength,
                 chunkCount: 1,
               }),
@@ -166,12 +200,16 @@ async function installProjectionPeer(
         return channel as unknown as RTCDataChannel;
       }
 
+      addTransceiver(): RTCRtpTransceiver {
+        return { setCodecPreferences() {} } as unknown as RTCRtpTransceiver;
+      }
+
       async createOffer(): Promise<RTCSessionDescriptionInit> {
-        return { type: "offer", sdp: "fake-browser-offer" };
+        return { type: "offer", sdp: fakeOffer };
       }
 
       async setLocalDescription(description?: RTCLocalSessionDescriptionInit): Promise<void> {
-        this.localDescription = { type: description?.type ?? "offer", sdp: description?.sdp ?? "fake-browser-offer", toJSON() { return this; } };
+        this.localDescription = { type: description?.type ?? "offer", sdp: description?.sdp ?? fakeOffer, toJSON() { return this; } };
       }
 
       async setRemoteDescription(description: RTCSessionDescriptionInit): Promise<void> {
@@ -214,11 +252,29 @@ async function fulfillProjection(route: Route): Promise<boolean> {
     await route.fulfill({ status: 204, body: "" });
     return true;
   }
+  const offer = route.request().postDataJSON() as {
+    version?: unknown;
+    sdp?: unknown;
+    capabilities?: unknown;
+  };
+  expect(offer).toMatchObject({
+    version: 2,
+    capabilities: {
+      previewImage: { transport: "data-channel", channel: "screen.preview.v2", mediaType: "image/png" },
+      expandedVideo: { transport: "webrtc-video-track", codec: "video/H264", clockRate: 90000 },
+      control: { channel: "screen.control.v2" },
+      input: { channel: "screen.input.v2" },
+      snapshotFallback: { transport: "http", mediaType: "image/png" },
+    },
+  });
+  expect(offer.sdp).toContain("a=recvonly");
+  expect(offer.sdp).toContain("H264/90000");
   const surfaceId = url.searchParams.get("surfaceId") ?? "";
   await route.fulfill({
     status: 201,
     contentType: "application/json",
     body: JSON.stringify({
+      version: 2,
       type: "answer",
       sdp: `fake-answer:${surfaceId}`,
       sessionId: `session-${surfaceId}`,
@@ -231,8 +287,18 @@ async function fulfillProjection(route: Route): Promise<boolean> {
       videoHeight: 1000,
       scale: 2,
       state: "connecting",
-      transport: "webrtc-data-channel-frames-v1",
-      channels: { frames: "screen.frames.v1", control: "screen.control.v1", input: "screen.input.v1" },
+      capabilities: {
+        previewImage: { transport: "data-channel", channel: "screen.preview.v2", mediaType: "image/png" },
+        expandedVideo: {
+          transport: "webrtc-video-track",
+          codec: "video/H264",
+          profileLevelId: "42e01f",
+          clockRate: 90000,
+        },
+        control: { transport: "data-channel", channel: "screen.control.v2" },
+        input: { transport: "data-channel", channel: "screen.input.v2" },
+        snapshotFallback: { transport: "http", mediaType: "image/png" },
+      },
       security: { authentication: "none", httpsRequired: false },
       candidates: [],
     }),
@@ -316,6 +382,12 @@ test.describe("contextual computer sheet", () => {
     await sheet.getByRole("button", { name: "Open Web Control" }).click();
     const expandedControl = page.getByTestId("expanded-web-control");
     await expect(expandedControl).toBeVisible();
+    const expandedVideo = page.getByTestId("computer-expanded-video");
+    await expect(expandedVideo).toBeVisible();
+    await expect.poll(() => expandedVideo.evaluate((video: HTMLVideoElement) => ({
+      width: video.videoWidth,
+      height: video.videoHeight,
+    }))).toEqual({ width: 2000, height: 1000 });
     expect(takeoverCalls).toBe(1);
     await expect.poll(() => page.evaluate(
       () => (window as typeof window & {
@@ -383,10 +455,14 @@ test.describe("contextual computer sheet", () => {
     await page.getByRole("button", { name: "Open Computer Surface", exact: true }).click();
     const computer = page.getByRole("complementary", { name: "Computer Surface", exact: true });
     await expect(computer.getByAltText("First Screen Bot screen")).toBeVisible();
+    await computer.getByRole("button", { name: "Open Web Control" }).click();
+    await expect(page.getByTestId("computer-expanded-video")).toBeVisible();
 
     await page.getByRole("button", { name: "Other Bot", exact: true }).click();
     await expect.poll(() => closedProjectionCount).toBeGreaterThan(0);
     await expect(computer.getByAltText("First Screen Bot screen")).toHaveCount(0);
+    await expect(page.getByTestId("expanded-web-control")).toHaveCount(0);
+    await expect(page.getByTestId("computer-expanded-video")).toHaveCount(0);
     await expect(computer.getByAltText("Other Bot screen")).toBeVisible();
   });
 
@@ -809,11 +885,15 @@ test.describe("contextual computer sheet", () => {
     expect(takeoverCalls).toBe(0);
   });
 
-  test("reports a connected projection that never delivers a screen image", async ({ page }) => {
+  test("falls back to an explicit read-only snapshot when live projection has no frame", async ({ page }) => {
     await installProjectionPeer(page, { frameAvailable: false });
     await page.route("**/api/computer/**", async (route) => {
       if (await fulfillProjection(route)) return;
       const url = new URL(route.request().url());
+      if (url.pathname === "/api/computer/snapshot") {
+        await route.fulfill({ status: 200, contentType: "image/png", body: PNG });
+        return;
+      }
       await fulfillJson(route, {
         botId: url.searchParams.get("botId"),
         surfaceId: url.searchParams.get("surfaceId"),
@@ -827,16 +907,11 @@ test.describe("contextual computer sheet", () => {
     await createBot(page, "No Frame Bot");
     await page.getByRole("button", { name: "Open Computer Surface", exact: true }).click();
     const panel = page.getByRole("complementary", { name: "Computer Surface", exact: true });
-    await expect(panel.getByRole("heading", { name: "Screen didn’t load", exact: true })).toBeVisible({
-      timeout: 7_000,
-    });
+    await expect(panel.getByAltText("No Frame Bot screen")).toBeVisible({ timeout: 7_000 });
+    await expect(panel).toContainText("Read-only snapshot");
     await expect(panel).toContainText("No image arrived from the Bot Screen.");
-    const retry = panel.getByRole("button", { name: "Retry", exact: true });
-    await expect(retry).toBeVisible();
-    await expect(panel).not.toContainText("Screen ready");
+    await expect(panel.getByRole("button", { name: "Open Web Control" })).toHaveCount(0);
     await expect(panel).not.toContainText("WebRTC");
-    await retry.click();
-    await expect(panel.getByRole("heading", { name: "Opening screen", exact: true })).toBeVisible();
   });
 
   test("retries an interrupted Bot Screen through projection activation", async ({ page }) => {

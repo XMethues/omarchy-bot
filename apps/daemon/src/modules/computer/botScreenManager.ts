@@ -10,8 +10,12 @@ export interface BotScreenCapture {
   bytes: Uint8Array;
 }
 
-/** A lossless source frame timestamped when capture completed. */
-export interface BotScreenCaptureFrame extends BotScreenCapture {
+/** A lossless RGBA source frame timestamped when capture completed. */
+export interface BotScreenCaptureFrame {
+  pixelFormat: "rgba";
+  width: number;
+  height: number;
+  bytes: Uint8Array;
   capturedAt: Date;
 }
 

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import path from "node:path";
 import { mkdirSync, rmSync } from "node:fs";
-import rtc, { type DataChannel, type PeerConnection } from "node-datachannel";
+import rtc, { type DataChannel, type PeerConnection, type Track } from "node-datachannel";
 import type { ComputerSurfaceOwner } from "../../apps/daemon/src/modules/computer/broker.ts";
 import { FakeBotScreenRuntimeAdapter } from "../../apps/daemon/src/modules/computer/fakeBotScreenRuntime.ts";
 import type {
@@ -10,13 +10,49 @@ import type {
   BotScreenRuntime,
   BotScreenRuntimeAdapter,
 } from "../../apps/daemon/src/modules/computer/botScreenManager.ts";
+import {
+  SCREEN_CONTROL_CHANNEL,
+  SCREEN_H264_CLOCK_RATE,
+  SCREEN_H264_FMTP,
+  SCREEN_H264_PROFILE,
+  SCREEN_INPUT_CHANNEL,
+  SCREEN_PREVIEW_CHANNEL,
+  SCREEN_PROJECTION_PROTOCOL_VERSION,
+} from "../../packages/protocol/src/api.ts";
 import { api, makeBot, sendToBot, startDaemon, waitThreadIdle, type Harness } from "./helpers/harness.ts";
 
-const EXPECTED_PNG_BASE64 =
-  "iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAYAAAD0In+KAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAADklEQVQImWMQMgn7D8IAC5MDN627upEAAAAASUVORK5CYII=";
 const DATA_CHANNEL_OPEN_TIMEOUT_MS = 15_000;
 
+const PROJECTION_CAPABILITIES = {
+  previewImage: { transport: "data-channel", channel: SCREEN_PREVIEW_CHANNEL, mediaType: "image/png" },
+  expandedVideo: {
+    transport: "webrtc-video-track",
+    codec: "video/H264",
+    profileLevelId: SCREEN_H264_PROFILE,
+    clockRate: SCREEN_H264_CLOCK_RATE,
+  },
+  control: { transport: "data-channel", channel: SCREEN_CONTROL_CHANNEL },
+  input: { transport: "data-channel", channel: SCREEN_INPUT_CHANNEL },
+  snapshotFallback: { transport: "http", mediaType: "image/png" },
+} as const;
+
+function projectionOffer(sdp: string): object {
+  return {
+    version: SCREEN_PROJECTION_PROTOCOL_VERSION,
+    type: "offer",
+    sdp,
+    capabilities: PROJECTION_CAPABILITIES,
+  };
+}
+
+function receiveH264(peer: PeerConnection): Track {
+  const video = new rtc.Video("screen", "RecvOnly");
+  video.addH264Codec(96, SCREEN_H264_FMTP);
+  return peer.addTrack(video);
+}
+
 interface ProjectionAnswer {
+  version: typeof SCREEN_PROJECTION_PROTOCOL_VERSION;
   type: "answer";
   sdp: string;
   sessionId: string;
@@ -28,6 +64,7 @@ interface ProjectionAnswer {
   videoWidth: number;
   videoHeight: number;
   scale: number;
+  capabilities: typeof PROJECTION_CAPABILITIES;
   security: {
     authentication: "none";
     httpsRequired: false;
@@ -105,9 +142,10 @@ async function createOffer(peer: PeerConnection): Promise<string> {
     queueMicrotask(resolveIfComplete);
   });
   const described = waitFor<void>("offer local description", (resolve) => peer.onLocalDescription(() => resolve()));
-  peer.createDataChannel("screen.frames.v1", { unordered: false });
-  peer.createDataChannel("screen.control.v1", { unordered: false });
-  peer.createDataChannel("screen.input.v1", { unordered: false });
+  receiveH264(peer);
+  peer.createDataChannel(SCREEN_PREVIEW_CHANNEL, { unordered: false });
+  peer.createDataChannel(SCREEN_CONTROL_CHANNEL, { unordered: false });
+  peer.createDataChannel(SCREEN_INPUT_CHANNEL, { unordered: false });
   peer.setLocalDescription("offer");
   await described;
   await gathered;
@@ -172,6 +210,7 @@ async function connectProjection(
   name: string,
 ): Promise<{
   peer: PeerConnection;
+  video: Track;
   frames: DataChannel;
   control: DataChannel;
   input: DataChannel;
@@ -186,9 +225,10 @@ async function connectProjection(
     queueMicrotask(resolveIfComplete);
   });
   const described = waitFor<void>(`${name} local description`, (resolve) => peer.onLocalDescription(() => resolve()));
-  const frames = peer.createDataChannel("screen.frames.v1", { unordered: false });
-  const control = peer.createDataChannel("screen.control.v1", { unordered: false });
-  const input = peer.createDataChannel("screen.input.v1", { unordered: false });
+  const video = receiveH264(peer);
+  const frames = peer.createDataChannel(SCREEN_PREVIEW_CHANNEL, { unordered: false });
+  const control = peer.createDataChannel(SCREEN_CONTROL_CHANNEL, { unordered: false });
+  const input = peer.createDataChannel(SCREEN_INPUT_CHANNEL, { unordered: false });
   peer.setLocalDescription("offer");
   await described;
   await gathered;
@@ -199,15 +239,15 @@ async function connectProjection(
     {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ type: "offer", sdp: offer.sdp }),
+      body: JSON.stringify(projectionOffer(offer.sdp)),
     },
   );
-  expect(response.status).toBe(201);
+  if (response.status !== 201) throw new Error(`projection signaling failed: ${response.status} ${await response.text()}`);
   const answer = await response.json() as ProjectionAnswer;
   peer.setRemoteDescription(answer.sdp, "answer");
   for (const candidate of answer.candidates) peer.addRemoteCandidate(candidate.candidate, candidate.sdpMid);
   await Promise.all([openChannel(frames), openChannel(control), openChannel(input)]);
-  return { peer, frames, control, input, answer };
+  return { peer, video, frames, control, input, answer };
 }
 
 function authority(input: DataChannel, active = true): Promise<{
@@ -300,9 +340,10 @@ describe("WebRTC Screen Projection signaling", () => {
       "direct projection local description",
       (resolve) => peer!.onLocalDescription(() => resolve()),
     );
-    const frames = peer.createDataChannel("screen.frames.v1", { unordered: false });
-    const control = peer.createDataChannel("screen.control.v1", { unordered: false });
-    const input = peer.createDataChannel("screen.input.v1", { unordered: false });
+    receiveH264(peer);
+    const frames = peer.createDataChannel(SCREEN_PREVIEW_CHANNEL, { unordered: false });
+    const control = peer.createDataChannel(SCREEN_CONTROL_CHANNEL, { unordered: false });
+    const input = peer.createDataChannel(SCREEN_INPUT_CHANNEL, { unordered: false });
     peer.setLocalDescription("offer");
     await described;
     await gathered;
@@ -314,14 +355,15 @@ describe("WebRTC Screen Projection signaling", () => {
       {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ type: "offer", sdp: offer.sdp }),
+        body: JSON.stringify(projectionOffer(offer.sdp)),
       },
     );
-    expect(response.status).toBe(201);
+    if (response.status !== 201) throw new Error(`projection signaling failed: ${response.status} ${await response.text()}`);
     const answer = await response.json() as ProjectionAnswer;
     const sessionId = answer.sessionId;
     expect(typeof sessionId).toBe("string");
     expect(answer).toMatchObject({
+      version: SCREEN_PROJECTION_PROTOCOL_VERSION,
       type: "answer",
       surfaceId: owner.surfaceId,
       runtimeGeneration: 1,
@@ -332,6 +374,7 @@ describe("WebRTC Screen Projection signaling", () => {
       videoHeight: 1080,
       scale: 1,
       security: { authentication: "none", httpsRequired: false },
+      capabilities: PROJECTION_CAPABILITIES,
     });
     expect(answer.sdp).toContain("a=fingerprint:");
 
@@ -375,19 +418,16 @@ describe("WebRTC Screen Projection signaling", () => {
         if (messages.length === 2) resolve();
       });
     });
-    expect(control.sendMessage(JSON.stringify({
-      version: 1,
-      type: "view",
-      surfaceId: owner.surfaceId,
-      runtimeGeneration: 1,
-      mode: "preview",
-    }))).toBeTrue();
+    expect(control.sendMessage(JSON.stringify({ version: SCREEN_PROJECTION_PROTOCOL_VERSION, type: "view",
+    surfaceId: owner.surfaceId,
+    runtimeGeneration: 1,
+    mode: "preview", }))).toBeTrue();
     await receivedFrame;
 
-    const frameHeader = JSON.parse(String(messages[0])) as { capturedAt: string };
+    const frameHeader = JSON.parse(String(messages[0])) as { capturedAt: string; byteLength: number };
     expect(frameHeader).toMatchObject({
-      version: 1,
-      type: "frame",
+      version: SCREEN_PROJECTION_PROTOCOL_VERSION,
+      type: "preview-frame",
       surfaceId: owner.surfaceId,
       runtimeGeneration: 1,
       geometryGeneration: 1,
@@ -398,10 +438,11 @@ describe("WebRTC Screen Projection signaling", () => {
       scale: 1,
       sequence: 1,
       mediaType: "image/png",
-      mode: "preview",
     });
     expect(Number.isNaN(Date.parse(frameHeader.capturedAt))).toBeFalse();
-    expect(Buffer.from(messages[1] as Buffer).toString("base64")).toBe(EXPECTED_PNG_BASE64);
+    const projectedPng = Buffer.from(messages[1] as Buffer);
+    expect(projectedPng.subarray(0, 8)).toEqual(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+    expect(projectedPng.byteLength).toBe(frameHeader.byteLength);
     const activeStatus = await fetch(statusUrl);
     expect(activeStatus.status).toBe(200);
     expect(await activeStatus.json()).toMatchObject({ state: "preview", mode: "preview", framesSent: 1 });
@@ -409,7 +450,7 @@ describe("WebRTC Screen Projection signaling", () => {
       sequence: 1,
       captureAttempts: 1,
       sourceFrames: 1,
-      encodedFrames: 1,
+      encodedFrames: 0,
       framesSent: 1,
       encodedBackpressureDrops: 0,
       invalidFrameDrops: 0,
@@ -430,30 +471,54 @@ describe("WebRTC Screen Projection signaling", () => {
     expect(adapter.captureStreamsClosed).toBe(1);
   }, 15_000);
 
-  test("expanded Screen Projection targets at least 15 delivered frames per second", async () => {
+  test("streams expanded Screen Projection as H.264 without delivering expanded preview images", async () => {
     const owner = await ownerFor(h, await makeBot(h, "Expanded frame rate"));
     const connection = await connectProjection(h, owner, "expanded-frame-rate-browser");
     peer = connection.peer;
-    const eighthFrame = Promise.withResolvers<void>();
-    let frames = 0;
+    const firstFrame = Promise.withResolvers<void>();
+    const ninthFrame = Promise.withResolvers<void>();
+    let videoFrames = 0;
+    let expandedPreviewFrames = 0;
+    connection.video.onMessage(() => {
+      videoFrames += 1;
+      if (videoFrames === 1) firstFrame.resolve();
+      if (videoFrames === 9) ninthFrame.resolve();
+    });
     connection.frames.onMessage((raw) => {
       if (typeof raw !== "string") return;
       const message = JSON.parse(raw) as { type?: string };
-      if (message.type !== "frame") return;
-      frames += 1;
-      if (frames === 8) eighthFrame.resolve();
+      if (message.type === "preview-frame") expandedPreviewFrames += 1;
     });
 
-    const startedAt = performance.now();
     expect(connection.control.sendMessage(JSON.stringify({
-      version: 1,
+      version: SCREEN_PROJECTION_PROTOCOL_VERSION,
       type: "view",
       surfaceId: owner.surfaceId,
       runtimeGeneration: connection.answer.runtimeGeneration,
       mode: "expanded",
     }))).toBeTrue();
-    await eighthFrame.promise;
-    expect(performance.now() - startedAt).toBeLessThanOrEqual(550);
+    const diagnostics = (): string => JSON.stringify({
+      status: h.svc.projections.status(owner, connection.answer.sessionId),
+      metrics: h.svc.projections.loadMetrics(owner, connection.answer.sessionId),
+      failure: h.svc.projections.failureDiagnostic(owner, connection.answer.sessionId),
+      peerState: connection.peer.state(),
+      trackOpen: connection.video.isOpen(),
+      trackClosed: connection.video.isClosed(),
+      receivedTrackMessages: videoFrames,
+    });
+    try {
+      await within("first expanded H.264 track message", firstFrame.promise, 3_000);
+    } catch (error) {
+      throw new Error(`${error instanceof Error ? error.message : String(error)}; ${diagnostics()}`);
+    }
+    const startedAt = performance.now();
+    try {
+      await within("ninth expanded H.264 track message", ninthFrame.promise, 2_000);
+    } catch (error) {
+      throw new Error(`${error instanceof Error ? error.message : String(error)}; ${diagnostics()}`);
+    }
+    expect(performance.now() - startedAt).toBeLessThanOrEqual(700);
+    expect(expandedPreviewFrames).toBe(0);
   }, 15_000);
 
 
@@ -466,13 +531,10 @@ describe("WebRTC Screen Projection signaling", () => {
       connection.frames.onClosed(resolve);
     });
 
-    expect(connection.control.sendMessage(JSON.stringify({
-      version: 1,
-      type: "view",
-      surfaceId: owner.surfaceId,
-      runtimeGeneration: connection.answer.runtimeGeneration,
-      mode: "preview",
-    }))).toBeTrue();
+    expect(connection.control.sendMessage(JSON.stringify({ version: SCREEN_PROJECTION_PROTOCOL_VERSION, type: "view",
+    surfaceId: owner.surfaceId,
+    runtimeGeneration: connection.answer.runtimeGeneration,
+    mode: "preview", }))).toBeTrue();
     await streamClosed;
 
     const snapshot = await fetch(
@@ -494,7 +556,7 @@ describe("WebRTC Screen Projection signaling", () => {
       {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ type: "offer", sdp }),
+        body: JSON.stringify(projectionOffer(sdp)),
       },
     );
 
@@ -514,7 +576,7 @@ describe("WebRTC Screen Projection signaling", () => {
         {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ type: "offer", sdp: "not-a-valid-sdp" }),
+          body: JSON.stringify(projectionOffer("not-a-valid-sdp")),
         },
       );
       expect(response.status).toBe(503);
@@ -583,13 +645,10 @@ describe("expanded pointer Web Control", () => {
 
     try {
       const granted = authority(projection.input);
-      projection.control.sendMessage(JSON.stringify({
-        version: 1,
-        type: "view",
-        surfaceId: owner.surfaceId,
-        runtimeGeneration: projection.answer.runtimeGeneration,
-        mode: "expanded",
-      }));
+      projection.control.sendMessage(JSON.stringify({ version: SCREEN_PROJECTION_PROTOCOL_VERSION, type: "view",
+      surfaceId: owner.surfaceId,
+      runtimeGeneration: projection.answer.runtimeGeneration,
+      mode: "expanded", }));
       await granted;
       const query = `botId=${encodeURIComponent(owner.botId)}&surfaceId=${encodeURIComponent(owner.surfaceId)}`;
       expect(await fetch(`${h.baseUrl}/api/computer/state?${query}`).then((response) => response.json()))
@@ -597,13 +656,10 @@ describe("expanded pointer Web Control", () => {
       expect(coordination(h, owner.surfaceId)).toMatchObject({ authority_kind: "web" });
 
       const revoked = authority(projection.input, false);
-      projection.control.sendMessage(JSON.stringify({
-        version: 1,
-        type: "view",
-        surfaceId: owner.surfaceId,
-        runtimeGeneration: projection.answer.runtimeGeneration,
-        mode: "preview",
-      }));
+      projection.control.sendMessage(JSON.stringify({ version: SCREEN_PROJECTION_PROTOCOL_VERSION, type: "view",
+      surfaceId: owner.surfaceId,
+      runtimeGeneration: projection.answer.runtimeGeneration,
+      mode: "preview", }));
       await revoked;
       await released.promise;
       expect(await fetch(`${h.baseUrl}/api/computer/state?${query}`).then((response) => response.json()))
@@ -637,13 +693,10 @@ describe("expanded pointer Web Control", () => {
     await expect(takeover).resolves.toEqual({ ok: true });
 
     const initialGrant = authority(projection.input);
-    projection.control.sendMessage(JSON.stringify({
-      version: 1,
-      type: "view",
-      surfaceId: owner.surfaceId,
-      runtimeGeneration: projection.answer.runtimeGeneration,
-      mode: "expanded",
-    }));
+    projection.control.sendMessage(JSON.stringify({ version: SCREEN_PROJECTION_PROTOCOL_VERSION, type: "view",
+    surfaceId: owner.surfaceId,
+    runtimeGeneration: projection.answer.runtimeGeneration,
+    mode: "expanded", }));
     await initialGrant;
     rmSync(path.join(h.home, "artifacts"), { recursive: true, force: true });
     const cycle = authorityCycle(projection.input);
@@ -661,17 +714,14 @@ describe("expanded pointer Web Control", () => {
     expect(coordination(h, owner.surfaceId)).toMatchObject({ authority_kind: "takeover" });
 
     const inputReceived = adapter.inner.waitForInputEvents(1);
-    projection.input.sendMessage(JSON.stringify({
-      version: 1,
-      type: "pointer-motion",
-      surfaceId: owner.surfaceId,
-      runtimeGeneration: restored.runtimeGeneration,
-      geometryGeneration: restored.geometryGeneration,
-      controllerEpoch: restored.controllerEpoch,
-      sequence: 1,
-      x: 100,
-      y: 200,
-    }));
+    projection.input.sendMessage(JSON.stringify({ version: SCREEN_PROJECTION_PROTOCOL_VERSION, type: "pointer-motion",
+    surfaceId: owner.surfaceId,
+    runtimeGeneration: restored.runtimeGeneration,
+    geometryGeneration: restored.geometryGeneration,
+    controllerEpoch: restored.controllerEpoch,
+    sequence: 1,
+    x: 100,
+    y: 200, }));
     await within("restored controller input", inputReceived);
 
     mkdirSync(path.join(h.home, "artifacts"), { recursive: true });
@@ -704,13 +754,10 @@ describe("expanded pointer Web Control", () => {
     await expect(takeover).resolves.toEqual({ ok: true });
 
     const initialGrant = authority(projection.input);
-    projection.control.sendMessage(JSON.stringify({
-      version: 1,
-      type: "view",
-      surfaceId: owner.surfaceId,
-      runtimeGeneration: projection.answer.runtimeGeneration,
-      mode: "expanded",
-    }));
+    projection.control.sendMessage(JSON.stringify({ version: SCREEN_PROJECTION_PROTOCOL_VERSION, type: "view",
+    surfaceId: owner.surfaceId,
+    runtimeGeneration: projection.answer.runtimeGeneration,
+    mode: "expanded", }));
     await initialGrant;
     adapter.onObserve = () => {
       adapter.onObserve = undefined;
@@ -737,13 +784,10 @@ describe("expanded pointer Web Control", () => {
     const replacement = await connectProjection(h, owner, "replacement-takeover-browser");
     peers.push(replacement.peer);
     const replacementGrant = authority(replacement.input);
-    replacement.control.sendMessage(JSON.stringify({
-      version: 1,
-      type: "view",
-      surfaceId: owner.surfaceId,
-      runtimeGeneration: replacement.answer.runtimeGeneration,
-      mode: "expanded",
-    }));
+    replacement.control.sendMessage(JSON.stringify({ version: SCREEN_PROJECTION_PROTOCOL_VERSION, type: "view",
+    surfaceId: owner.surfaceId,
+    runtimeGeneration: replacement.answer.runtimeGeneration,
+    mode: "expanded", }));
     await replacementGrant;
     expect(await fetch(`${h.baseUrl}/api/computer/state?${query}`).then((response) => response.json()))
       .toMatchObject({ state: "user-control", takeover: "active" });
@@ -766,13 +810,10 @@ describe("expanded pointer Web Control", () => {
     peers.push(projection.peer);
 
     const standaloneAuthority = authority(projection.input);
-    projection.control.sendMessage(JSON.stringify({
-      version: 1,
-      type: "view",
-      surfaceId: owner.surfaceId,
-      runtimeGeneration: 1,
-      mode: "expanded",
-    }));
+    projection.control.sendMessage(JSON.stringify({ version: SCREEN_PROJECTION_PROTOCOL_VERSION, type: "view",
+    surfaceId: owner.surfaceId,
+    runtimeGeneration: 1,
+    mode: "expanded", }));
     await standaloneAuthority;
 
     const revokedForBot = authority(projection.input, false);
@@ -793,25 +834,19 @@ describe("expanded pointer Web Control", () => {
     expect(await taken.json()).toMatchObject({ takeover: "active", state: "user-control" });
 
     const takeoverAuthority = authority(projection.input);
-    projection.control.sendMessage(JSON.stringify({
-      version: 1,
-      type: "view",
-      surfaceId: owner.surfaceId,
-      runtimeGeneration: 1,
-      mode: "expanded",
-    }));
+    projection.control.sendMessage(JSON.stringify({ version: SCREEN_PROJECTION_PROTOCOL_VERSION, type: "view",
+    surfaceId: owner.surfaceId,
+    runtimeGeneration: 1,
+    mode: "expanded", }));
     const grant = await takeoverAuthority;
-    projection.input.sendMessage(JSON.stringify({
-      version: 1,
-      type: "pointer-motion",
-      surfaceId: owner.surfaceId,
-      runtimeGeneration: 1,
-      geometryGeneration: 1,
-      controllerEpoch: grant.controllerEpoch,
-      sequence: 1,
-      x: 100,
-      y: 120,
-    }));
+    projection.input.sendMessage(JSON.stringify({ version: SCREEN_PROJECTION_PROTOCOL_VERSION, type: "pointer-motion",
+    surfaceId: owner.surfaceId,
+    runtimeGeneration: 1,
+    geometryGeneration: 1,
+    controllerEpoch: grant.controllerEpoch,
+    sequence: 1,
+    x: 100,
+    y: 120, }));
     await runtime.waitForInputEvents(1);
 
     const revokedWhenDone = authority(projection.input, false);
@@ -831,13 +866,10 @@ describe("expanded pointer Web Control", () => {
     const first = await connectProjection(h, owner, "pointer-browser-one");
     peers.push(first.peer);
     const firstAuthority = authority(first.input);
-    first.control.sendMessage(JSON.stringify({
-      version: 1,
-      type: "view",
-      surfaceId: owner.surfaceId,
-      runtimeGeneration: 1,
-      mode: "expanded",
-    }));
+    first.control.sendMessage(JSON.stringify({ version: SCREEN_PROJECTION_PROTOCOL_VERSION, type: "view",
+    surfaceId: owner.surfaceId,
+    runtimeGeneration: 1,
+    mode: "expanded", }));
     const firstGrant = await firstAuthority;
     expect(firstGrant).toMatchObject({
       surfaceId: owner.surfaceId,
@@ -846,7 +878,7 @@ describe("expanded pointer Web Control", () => {
     });
 
     const envelope = {
-      version: 1,
+      version: SCREEN_PROJECTION_PROTOCOL_VERSION,
       surfaceId: owner.surfaceId,
       runtimeGeneration: 1,
       geometryGeneration: 1,
@@ -922,13 +954,10 @@ describe("expanded pointer Web Control", () => {
     const second = await connectProjection(h, owner, "pointer-browser-two");
     peers.push(second.peer);
     const secondAuthority = authority(second.input);
-    second.control.sendMessage(JSON.stringify({
-      version: 1,
-      type: "view",
-      surfaceId: owner.surfaceId,
-      runtimeGeneration: 1,
-      mode: "expanded",
-    }));
+    second.control.sendMessage(JSON.stringify({ version: SCREEN_PROJECTION_PROTOCOL_VERSION, type: "view",
+    surfaceId: owner.surfaceId,
+    runtimeGeneration: 1,
+    mode: "expanded", }));
     const secondGrant = await secondAuthority;
     expect(secondGrant.controllerEpoch).toBeGreaterThan(firstGrant.controllerEpoch);
     try {
@@ -976,17 +1005,14 @@ describe("expanded pointer Web Control", () => {
       const projection = await connectProjection(h, owner, name);
       peers.push(projection.peer);
       const granted = authority(projection.input);
-      projection.control.sendMessage(JSON.stringify({
-        version: 1,
-        type: "view",
-        surfaceId: owner.surfaceId,
-        runtimeGeneration: 1,
-        mode: "expanded",
-      }));
+      projection.control.sendMessage(JSON.stringify({ version: SCREEN_PROJECTION_PROTOCOL_VERSION, type: "view",
+      surfaceId: owner.surfaceId,
+      runtimeGeneration: 1,
+      mode: "expanded", }));
       return { ...projection, epoch: (await granted).controllerEpoch };
     };
     const envelope = (epoch: number) => ({
-      version: 1,
+      version: SCREEN_PROJECTION_PROTOCOL_VERSION,
       surfaceId: owner.surfaceId,
       runtimeGeneration: 1,
       geometryGeneration: 1,
@@ -1057,13 +1083,10 @@ describe("expanded pointer Web Control", () => {
     await runtime.waitForReleases(3);
 
     const rearmed = authority(suspended.input);
-    suspended.control.sendMessage(JSON.stringify({
-      version: 1,
-      type: "view",
-      surfaceId: owner.surfaceId,
-      runtimeGeneration: 1,
-      mode: "expanded",
-    }));
+    suspended.control.sendMessage(JSON.stringify({ version: SCREEN_PROJECTION_PROTOCOL_VERSION, type: "view",
+    surfaceId: owner.surfaceId,
+    runtimeGeneration: 1,
+    mode: "expanded", }));
     const rearmedEpoch = (await rearmed).controllerEpoch;
     expect(rearmedEpoch).toBeGreaterThan(suspended.epoch);
     suspended.input.sendMessage(JSON.stringify({
@@ -1114,16 +1137,13 @@ describe("expanded pointer Web Control", () => {
     const projection = await connectProjection(h, owner, "keyboard-browser");
     peers.push(projection.peer);
     const granted = authority(projection.input);
-    projection.control.sendMessage(JSON.stringify({
-      version: 1,
-      type: "view",
-      surfaceId: owner.surfaceId,
-      runtimeGeneration: 1,
-      mode: "expanded",
-    }));
+    projection.control.sendMessage(JSON.stringify({ version: SCREEN_PROJECTION_PROTOCOL_VERSION, type: "view",
+    surfaceId: owner.surfaceId,
+    runtimeGeneration: 1,
+    mode: "expanded", }));
     const grant = await granted;
     const envelope = {
-      version: 1,
+      version: SCREEN_PROJECTION_PROTOCOL_VERSION,
       surfaceId: owner.surfaceId,
       runtimeGeneration: 1,
       geometryGeneration: 1,
@@ -1160,16 +1180,13 @@ describe("expanded pointer Web Control", () => {
     const first = await connectProjection(h, owner, "held-input-browser-one");
     peers.push(first.peer);
     const firstGranted = authority(first.input);
-    first.control.sendMessage(JSON.stringify({
-      version: 1,
-      type: "view",
-      surfaceId: owner.surfaceId,
-      runtimeGeneration: 1,
-      mode: "expanded",
-    }));
+    first.control.sendMessage(JSON.stringify({ version: SCREEN_PROJECTION_PROTOCOL_VERSION, type: "view",
+    surfaceId: owner.surfaceId,
+    runtimeGeneration: 1,
+    mode: "expanded", }));
     const firstGrant = await firstGranted;
     const firstEnvelope = {
-      version: 1,
+      version: SCREEN_PROJECTION_PROTOCOL_VERSION,
       surfaceId: owner.surfaceId,
       runtimeGeneration: 1,
       geometryGeneration: 1,
@@ -1198,13 +1215,10 @@ describe("expanded pointer Web Control", () => {
     peers.push(second.peer);
     const secondGranted = authority(second.input);
     const replacementStarted = Date.now();
-    second.control.sendMessage(JSON.stringify({
-      version: 1,
-      type: "view",
-      surfaceId: owner.surfaceId,
-      runtimeGeneration: 1,
-      mode: "expanded",
-    }));
+    second.control.sendMessage(JSON.stringify({ version: SCREEN_PROJECTION_PROTOCOL_VERSION, type: "view",
+    surfaceId: owner.surfaceId,
+    runtimeGeneration: 1,
+    mode: "expanded", }));
     const secondGrant = await secondGranted;
     expect(runtime.releaseCount).toBe(1);
     expect(Date.now() - replacementStarted).toBeGreaterThanOrEqual(80);
@@ -1247,16 +1261,13 @@ describe("expanded pointer Web Control", () => {
     const projection = await connectProjection(h, owner, "diagnostic-browser");
     peers.push(projection.peer);
     const granted = authority(projection.input);
-    projection.control.sendMessage(JSON.stringify({
-      version: 1,
-      type: "view",
-      surfaceId: owner.surfaceId,
-      runtimeGeneration: 1,
-      mode: "expanded",
-    }));
+    projection.control.sendMessage(JSON.stringify({ version: SCREEN_PROJECTION_PROTOCOL_VERSION, type: "view",
+    surfaceId: owner.surfaceId,
+    runtimeGeneration: 1,
+    mode: "expanded", }));
     const grant = await granted;
     const envelope = {
-      version: 1,
+      version: SCREEN_PROJECTION_PROTOCOL_VERSION,
       surfaceId: owner.surfaceId,
       runtimeGeneration: 1,
       geometryGeneration: 1,
@@ -1338,30 +1349,33 @@ describe("expanded pointer Web Control", () => {
     const other = await ownerFor(h, await makeBot(h, "Other pointer screen"));
     let releaseCount = 0;
 
-    const grant = async (name: string): Promise<{ peer: PeerConnection; input: DataChannel; epoch: number }> => {
+    const grant = async (name: string): Promise<{
+      peer: PeerConnection;
+      input: DataChannel;
+      epoch: number;
+      sessionId: string;
+    }> => {
       const projection = await connectProjection(h, owner, name);
       peers.push(projection.peer);
       const granted = authority(projection.input);
-      projection.control.sendMessage(JSON.stringify({
-        version: 1,
-        type: "view",
-        surfaceId: owner.surfaceId,
-        runtimeGeneration: 1,
-        mode: "expanded",
-      }));
+      projection.control.sendMessage(JSON.stringify({ version: SCREEN_PROJECTION_PROTOCOL_VERSION, type: "view",
+      surfaceId: owner.surfaceId,
+      runtimeGeneration: 1,
+      mode: "expanded", }));
       return {
         peer: projection.peer,
         input: projection.input,
         epoch: (await granted).controllerEpoch,
+        sessionId: projection.answer.sessionId,
       };
     };
     const reject = async (
       name: string,
       change: (message: Record<string, unknown>, epoch: number) => void,
     ): Promise<void> => {
-      const { peer, input, epoch } = await grant(name);
+      const { peer, input, epoch, sessionId } = await grant(name);
       const message: Record<string, unknown> = {
-        version: 1,
+        version: SCREEN_PROJECTION_PROTOCOL_VERSION,
         type: "pointer-motion",
         surfaceId: owner.surfaceId,
         runtimeGeneration: 1,
@@ -1376,6 +1390,7 @@ describe("expanded pointer Web Control", () => {
       releaseCount += 1;
       await runtime.waitForReleases(releaseCount);
       await closePeer(peer);
+      await h.svc.projections.close(owner, sessionId);
       peers.splice(peers.indexOf(peer), 1);
     };
 
@@ -1396,31 +1411,26 @@ describe("expanded pointer Web Control", () => {
     });
 
     const duplicate = await grant("duplicate-pointer");
-    duplicate.input.sendMessage(JSON.stringify({
-      version: 1,
-      type: "pointer-motion",
-      surfaceId: owner.surfaceId,
-      runtimeGeneration: 1,
-      geometryGeneration: 1,
-      controllerEpoch: duplicate.epoch,
-      sequence: 1,
-      x: 40,
-      y: 50,
-    }));
+    duplicate.input.sendMessage(JSON.stringify({ version: SCREEN_PROJECTION_PROTOCOL_VERSION, type: "pointer-motion",
+    surfaceId: owner.surfaceId,
+    runtimeGeneration: 1,
+    geometryGeneration: 1,
+    controllerEpoch: duplicate.epoch,
+    sequence: 1,
+    x: 40,
+    y: 50, }));
     await runtime.waitForPointerEvents(1);
-    duplicate.input.sendMessage(JSON.stringify({
-      version: 1,
-      type: "pointer-motion",
-      surfaceId: owner.surfaceId,
-      runtimeGeneration: 1,
-      geometryGeneration: 1,
-      controllerEpoch: duplicate.epoch,
-      sequence: 1,
-      x: 60,
-      y: 70,
-    }));
+    duplicate.input.sendMessage(JSON.stringify({ version: SCREEN_PROJECTION_PROTOCOL_VERSION, type: "pointer-motion",
+    surfaceId: owner.surfaceId,
+    runtimeGeneration: 1,
+    geometryGeneration: 1,
+    controllerEpoch: duplicate.epoch,
+    sequence: 1,
+    x: 60,
+    y: 70, }));
     await runtime.waitForReleases(++releaseCount);
     await closePeer(duplicate.peer);
+    await h.svc.projections.close(owner, duplicate.sessionId);
     peers.splice(peers.indexOf(duplicate.peer), 1);
     expect(runtime.pointerEvents.map(({ event }) => event)).toMatchObject([{ type: "motion", x: 40, y: 50 }]);
   }, 35_000);
@@ -1431,16 +1441,13 @@ describe("expanded pointer Web Control", () => {
     const projection = await connectProjection(h, owner, "cleanup-browser");
     peers.push(projection.peer);
     const firstGranted = authority(projection.input);
-    projection.control.sendMessage(JSON.stringify({
-      version: 1,
-      type: "view",
-      surfaceId: owner.surfaceId,
-      runtimeGeneration: 1,
-      mode: "expanded",
-    }));
+    projection.control.sendMessage(JSON.stringify({ version: SCREEN_PROJECTION_PROTOCOL_VERSION, type: "view",
+    surfaceId: owner.surfaceId,
+    runtimeGeneration: 1,
+    mode: "expanded", }));
     const firstGrant = await firstGranted;
     const envelope = {
-      version: 1,
+      version: SCREEN_PROJECTION_PROTOCOL_VERSION,
       surfaceId: owner.surfaceId,
       runtimeGeneration: 1,
       geometryGeneration: 1,
@@ -1463,13 +1470,10 @@ describe("expanded pointer Web Control", () => {
     await runtime.waitForReleases(1);
 
     const secondGranted = authority(projection.input);
-    projection.control.sendMessage(JSON.stringify({
-      version: 1,
-      type: "view",
-      surfaceId: owner.surfaceId,
-      runtimeGeneration: 1,
-      mode: "expanded",
-    }));
+    projection.control.sendMessage(JSON.stringify({ version: SCREEN_PROJECTION_PROTOCOL_VERSION, type: "view",
+    surfaceId: owner.surfaceId,
+    runtimeGeneration: 1,
+    mode: "expanded", }));
     const secondGrant = await secondGranted;
     expect(secondGrant.controllerEpoch).toBeGreaterThan(firstGrant.controllerEpoch);
     projection.input.sendMessage(JSON.stringify({

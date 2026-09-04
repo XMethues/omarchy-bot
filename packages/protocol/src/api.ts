@@ -217,10 +217,14 @@ export const ComputerViewDto = z.object({
 });
 export type ComputerViewDto = z.infer<typeof ComputerViewDto>;
 
-export const SCREEN_PROJECTION_PROTOCOL_VERSION = 1 as const;
-export const SCREEN_FRAME_CHANNEL = "screen.frames.v1" as const;
-export const SCREEN_CONTROL_CHANNEL = "screen.control.v1" as const;
-export const SCREEN_INPUT_CHANNEL = "screen.input.v1" as const;
+export const SCREEN_PROJECTION_PROTOCOL_VERSION = 2 as const;
+export const SCREEN_PREVIEW_CHANNEL = "screen.preview.v2" as const;
+export const SCREEN_CONTROL_CHANNEL = "screen.control.v2" as const;
+export const SCREEN_INPUT_CHANNEL = "screen.input.v2" as const;
+export const SCREEN_H264_CLOCK_RATE = 90_000 as const;
+export const SCREEN_H264_PROFILE = "42e01f" as const;
+export const SCREEN_H264_FMTP =
+  `level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=${SCREEN_H264_PROFILE}` as const;
 
 export const ScreenProjectionModeDto = z.enum(["idle", "preview", "expanded"]);
 export type ScreenProjectionModeDto = z.infer<typeof ScreenProjectionModeDto>;
@@ -244,12 +248,7 @@ export const ScreenProjectionAnswerDto = z.object({
   videoHeight: z.number().int().positive(),
   scale: z.number().positive(),
   state: z.literal("connecting"),
-  transport: z.literal("webrtc-data-channel-frames-v1"),
-  channels: z.object({
-    frames: z.literal(SCREEN_FRAME_CHANNEL),
-    control: z.literal(SCREEN_CONTROL_CHANNEL),
-    input: z.literal(SCREEN_INPUT_CHANNEL),
-  }),
+  capabilities: ScreenProjectionCapabilitiesDto,
   security: z.object({
     authentication: z.literal("none"),
     httpsRequired: z.literal(false),
@@ -348,16 +347,46 @@ export const ScreenInputAuthorityMessageDto = z.object({
   geometryGeneration: z.number().int().positive(),
   controllerEpoch: z.number().int().positive(),
   logicalWidth: z.number().int().positive(),
+export const ScreenProjectionCapabilitiesDto = z.object({
+  previewImage: z.object({
+    transport: z.literal("data-channel"),
+    channel: z.literal(SCREEN_PREVIEW_CHANNEL),
+    mediaType: z.literal("image/png"),
+  }),
+  expandedVideo: z.object({
+    transport: z.literal("webrtc-video-track"),
+    codec: z.literal("video/H264"),
+    profileLevelId: z.literal(SCREEN_H264_PROFILE),
+    clockRate: z.literal(SCREEN_H264_CLOCK_RATE),
+  }),
+  control: z.object({
+    transport: z.literal("data-channel"),
+    channel: z.literal(SCREEN_CONTROL_CHANNEL),
+  }),
+  input: z.object({
+    transport: z.literal("data-channel"),
+    channel: z.literal(SCREEN_INPUT_CHANNEL),
+  }),
+  snapshotFallback: z.object({
+    transport: z.literal("http"),
+    mediaType: z.literal("image/png"),
+  }),
+});
+export type ScreenProjectionCapabilitiesDto = z.infer<typeof ScreenProjectionCapabilitiesDto>;
+
   logicalHeight: z.number().int().positive(),
+  version: z.literal(SCREEN_PROJECTION_PROTOCOL_VERSION),
   videoWidth: z.number().int().positive(),
   videoHeight: z.number().int().positive(),
+  capabilities: ScreenProjectionCapabilitiesDto,
   scale: z.number().positive(),
 });
 export type ScreenInputAuthorityMessageDto = z.infer<typeof ScreenInputAuthorityMessageDto>;
 
-export const ScreenProjectionFrameHeaderDto = z.object({
   version: z.literal(SCREEN_PROJECTION_PROTOCOL_VERSION),
-  type: z.literal("frame"),
+export const ScreenProjectionPreviewFrameHeaderDto = z.object({
+  version: z.literal(SCREEN_PROJECTION_PROTOCOL_VERSION),
+  type: z.literal("preview-frame"),
   surfaceId: SurfaceIdDto,
   runtimeGeneration: z.number().int().positive(),
   geometryGeneration: z.number().int().positive(),
@@ -367,13 +396,12 @@ export const ScreenProjectionFrameHeaderDto = z.object({
   videoHeight: z.number().int().positive(),
   scale: z.number().positive(),
   sequence: z.number().int().positive(),
-  mediaType: z.enum(["image/png", "image/jpeg"]),
+  mediaType: z.literal("image/png"),
   capturedAt: z.string().optional(),
-  mode: z.enum(["preview", "expanded"]),
   byteLength: z.number().int().positive(),
   chunkCount: z.number().int().positive(),
 });
-export type ScreenProjectionFrameHeaderDto = z.infer<typeof ScreenProjectionFrameHeaderDto>;
+export type ScreenProjectionPreviewFrameHeaderDto = z.infer<typeof ScreenProjectionPreviewFrameHeaderDto>;
 
 // ----- command bodies -----
 

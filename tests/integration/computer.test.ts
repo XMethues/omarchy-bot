@@ -133,6 +133,9 @@ class ControlledRuntimeAdapter implements BotScreenRuntimeAdapter {
   async start(provision: BotScreenProvision): Promise<BotScreenRuntime> {
     let stopped = false;
     const outcome = Promise.withResolvers<BotScreenRuntimeOutcome>();
+    const videoWidth = Math.round(provision.logicalWidth * provision.scale);
+    const videoHeight = Math.round(provision.logicalHeight * provision.scale);
+    const rawFrame = new Uint8Array(videoWidth * videoHeight * 4);
     this.#failRuntime.set(provision.surfaceId, (error) => {
       outcome.resolve({ type: "computer-worker-exited", error });
     });
@@ -174,8 +177,10 @@ class ControlledRuntimeAdapter implements BotScreenRuntimeAdapter {
       },
       openCaptureStream: async () => ({
         next: async () => ({
-          mediaType: "image/png",
-          bytes: CONCURRENCY_TEST_PNG,
+          pixelFormat: "rgba",
+          width: videoWidth,
+          height: videoHeight,
+          bytes: rawFrame,
           capturedAt: new Date(),
         }),
         close: async () => {},

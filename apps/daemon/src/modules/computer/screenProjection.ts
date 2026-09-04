@@ -1,10 +1,14 @@
 import { randomUUID } from "node:crypto";
-import rtc, { type DataChannel, type PeerConnection } from "node-datachannel";
+import rtc, { type DataChannel, type PeerConnection, type RtpPacketizationConfig, type Track } from "node-datachannel";
+import sharp from "sharp";
 import type { SurfaceId } from "@omarchy-bot/domain";
 import {
   SCREEN_CONTROL_CHANNEL,
-  SCREEN_FRAME_CHANNEL,
+  SCREEN_H264_CLOCK_RATE,
+  SCREEN_H264_FMTP,
+  SCREEN_H264_PROFILE,
   SCREEN_INPUT_CHANNEL,
+  SCREEN_PREVIEW_CHANNEL,
   SCREEN_PROJECTION_PROTOCOL_VERSION,
   ScreenInputMessageDto,
   type ScreenInputAuthorityMessageDto,
@@ -21,6 +25,12 @@ import type {
   BotScreenProjectionSource,
 } from "./botScreenManager.ts";
 import { InputDiagnostics, type InputDiagnosticCategory } from "./inputDiagnostics.ts";
+import {
+  h264Timestamp,
+  parseH264ReceiveOffer,
+  startH264Encoder,
+  type H264EncoderProcess,
+} from "./h264Encoder.ts";
 
 const PREVIEW_INTERVAL_MS = 1_000;
 const MAX_BUFFERED_BYTES = 8 * 1024 * 1024;
@@ -55,6 +65,11 @@ export interface ProjectionLoadMetrics {
   readonly sendFailures: number;
 }
 
+export interface ProjectionFailureDiagnostic {
+  readonly error: string;
+  readonly metrics: Readonly<ProjectionLoadMetrics>;
+}
+
 
 interface ProjectionSession {
   id: string;
@@ -65,9 +80,13 @@ interface ProjectionSession {
   peerClosed: Promise<void>;
   resolvePeerClosed(): void;
   mode: ProjectionViewMode;
-  frames?: DataChannel;
+  preview?: DataChannel;
   control?: DataChannel;
   input?: DataChannel;
+  videoTrack: Track;
+  rtpConfig: RtpPacketizationConfig;
+  encoder?: H264EncoderProcess | undefined;
+  videoSequence: number;
   sequence: number;
   timer?: Timer | undefined;
   captureStream?: BotScreenCaptureStream | undefined;
@@ -171,6 +190,17 @@ function deadline<T>(message: string): Deadline<T> {
  */
 export class ScreenProjectionService {
   #sessions = new Map<string, ProjectionSession>();
+  #failures = new Map<string, {
+    botId: string;
+    surfaceId: SurfaceId;
+    diagnostic: ProjectionFailureDiagnostic;
+  }>();
+  #terminalCleanups = new Set<Promise<void>>();
+  #terminations = new Map<string, {
+    botId: string;
+    surfaceId: SurfaceId;
+    promise: Promise<void>;
+  }>();
   #controllers = new Map<SurfaceId, InputController>();
   #controllerEpochs = new Map<SurfaceId, number>();
   #releaseBarriers = new Map<SurfaceId, Promise<void>>();
@@ -199,6 +229,7 @@ export class ScreenProjectionService {
 
   async answer(owner: ComputerSurfaceOwner, offer: ScreenProjectionOfferDto): Promise<ScreenProjectionAnswerDto> {
     if (offer.type !== "offer" || offer.sdp.trim() === "") throw new Error("a WebRTC SDP offer is required");
+    const codec = parseH264ReceiveOffer(offer.sdp);
     const source = await this.screens.projectionSource(owner);
     if (source === undefined) throw new Error("Bot Screen is unavailable");
 
@@ -212,6 +243,17 @@ export class ScreenProjectionService {
         ? {}
         : { portRangeBegin: this.webRtcPort, portRangeEnd: this.webRtcPort }),
     });
+    const video = new rtc.Video(codec.mid, "SendOnly");
+    video.addH264Codec(codec.payloadType, SCREEN_H264_FMTP);
+    video.setBitrate(6_000);
+    const rtpConfig = new rtc.RtpPacketizationConfig(
+      Number.parseInt(id.replaceAll("-", "").slice(0, 8), 16),
+      "screen-projection",
+      codec.payloadType,
+      SCREEN_H264_CLOCK_RATE,
+    );
+    const videoTrack = peer.addTrack(video);
+    videoTrack.setMediaHandler(new rtc.H264RtpPacketizer("StartSequence", rtpConfig));
     const peerClosed = Promise.withResolvers<void>();
     const session: ProjectionSession = {
       id,
@@ -221,8 +263,11 @@ export class ScreenProjectionService {
       state: "connecting",
       peerClosed: peerClosed.promise,
       resolvePeerClosed: peerClosed.resolve,
+      videoTrack,
+      rtpConfig,
       mode: "idle",
       sequence: 0,
+      videoSequence: 0,
       inputSuspended: false,
       captureCleanups: new Set(),
       captureInFlight: false,
@@ -237,6 +282,8 @@ export class ScreenProjectionService {
       sendFailures: 0,
     };
     this.#sessions.set(id, session);
+    this.#terminalCleanups.add(session.peerClosed);
+    void session.peerClosed.finally(() => this.#terminalCleanups.delete(session.peerClosed));
 
     const localDescription = deadline<{ sdp: string; type: string }>("WebRTC answer creation timed out");
     const gathering = deadline<void>("WebRTC ICE gathering timed out");
@@ -253,6 +300,11 @@ export class ScreenProjectionService {
         this.#close(session, state === "failed");
       }
     });
+    videoTrack.onOpen(() => {
+      if (session.mode === "expanded") this.#startVideo(session);
+    });
+    videoTrack.onClosed(() => this.#close(session, false));
+    videoTrack.onError(() => this.#close(session, true));
 
     try {
       peer.setRemoteDescription(offer.sdp, "offer");
@@ -261,6 +313,7 @@ export class ScreenProjectionService {
       await gathering.promise;
       const finalDescription = peer.localDescription();
       return {
+        version: SCREEN_PROJECTION_PROTOCOL_VERSION,
         type: "answer",
         sdp: finalDescription?.sdp ?? description.sdp,
         sessionId: id,
@@ -273,11 +326,21 @@ export class ScreenProjectionService {
         videoHeight: source.videoHeight,
         scale: source.scale,
         state: "connecting",
-        transport: "webrtc-data-channel-frames-v1",
-        channels: {
-          frames: SCREEN_FRAME_CHANNEL,
-          control: SCREEN_CONTROL_CHANNEL,
-          input: SCREEN_INPUT_CHANNEL,
+        capabilities: {
+          previewImage: {
+            transport: "data-channel",
+            channel: SCREEN_PREVIEW_CHANNEL,
+            mediaType: "image/png",
+          },
+          expandedVideo: {
+            transport: "webrtc-video-track",
+            codec: "video/H264",
+            profileLevelId: SCREEN_H264_PROFILE,
+            clockRate: SCREEN_H264_CLOCK_RATE,
+          },
+          control: { transport: "data-channel", channel: SCREEN_CONTROL_CHANNEL },
+          input: { transport: "data-channel", channel: SCREEN_INPUT_CHANNEL },
+          snapshotFallback: { transport: "http", mediaType: "image/png" },
         },
         security: { authentication: "none", httpsRequired: false },
         candidates,
@@ -332,17 +395,25 @@ export class ScreenProjectionService {
     });
   }
 
+  /** Internal terminal failure snapshot for focused integration diagnostics. */
+  failureDiagnostic(owner: ComputerSurfaceOwner, sessionId: string): ProjectionFailureDiagnostic | undefined {
+    const failure = this.#failures.get(sessionId);
+    if (failure === undefined || failure.botId !== owner.botId || failure.surfaceId !== owner.surfaceId) return undefined;
+    return failure.diagnostic;
+  }
+
   async close(owner: ComputerSurfaceOwner, sessionId: string): Promise<boolean> {
     const session = this.#sessions.get(sessionId);
     if (session === undefined || session.owner.botId !== owner.botId || session.owner.surfaceId !== owner.surfaceId) {
+      const termination = this.#terminations.get(sessionId);
+      if (termination !== undefined && termination.botId === owner.botId && termination.surfaceId === owner.surfaceId) {
+        await termination.promise;
+      }
       return false;
     }
     this.#close(session, false);
-    await Promise.allSettled([
-      ...(session.captureTask === undefined ? [] : [session.captureTask]),
-      ...session.captureCleanups,
-      session.peerClosed,
-    ]);
+    const termination = this.#terminations.get(sessionId);
+    if (termination !== undefined) await termination.promise;
     return true;
   }
 
@@ -378,19 +449,22 @@ export class ScreenProjectionService {
     this.#unsubscribeScreens();
     const sessions = [...this.#sessions.values()];
     for (const session of sessions) this.#close(session, false);
-    await Promise.allSettled(sessions.flatMap((session) => [
-      ...(session.captureTask === undefined ? [] : [session.captureTask]),
-      ...session.captureCleanups,
-      session.peerClosed,
-    ]));
+    await Promise.allSettled([
+      ...sessions.flatMap((session) => [
+        ...(session.captureTask === undefined ? [] : [session.captureTask]),
+        ...session.captureCleanups,
+        session.peerClosed,
+      ]),
+      ...this.#terminalCleanups,
+    ]);
     await Promise.allSettled(this.#releaseBarriers.values());
     this.diagnostics.shutdown();
   }
 
   #acceptChannel(session: ProjectionSession, channel: DataChannel): void {
-    if (session.frames === channel || session.control === channel || session.input === channel) return;
+    if (session.preview === channel || session.control === channel || session.input === channel) return;
     const label = channel.getLabel();
-    if (label === SCREEN_FRAME_CHANNEL) session.frames = channel;
+    if (label === SCREEN_PREVIEW_CHANNEL) session.preview = channel;
     else if (label === SCREEN_CONTROL_CHANNEL) {
       session.control = channel;
       channel.onMessage((raw) => this.#control(session, raw));
@@ -435,15 +509,75 @@ export class ScreenProjectionService {
     session.timer = undefined;
     if (session.mode === "expanded" && mode !== "expanded") this.#revokeInputFor(session);
     const changed = session.mode !== mode;
-    if (changed) this.#stopCaptureStream(session);
+    if (changed) {
+      this.#stopCaptureStream(session);
+      this.#stopEncoder(session);
+    }
     session.inputSuspended = false;
     session.mode = mode;
     session.nextFrameAt = mode === "idle" ? undefined : performance.now();
     session.state = mode;
-    if (mode === "expanded" && (changed || !this.#isInputController(session))) {
-      void this.#claimInput(session).catch(() => {});
+    if (mode === "expanded") {
+      this.#startVideo(session);
+      if (changed || !this.#isInputController(session)) void this.#claimInput(session).catch(() => {});
+    } else if (mode === "preview") {
+      this.#schedule(session, 0);
     }
-    if (mode !== "idle") this.#schedule(session, 0);
+  }
+
+  #startVideo(session: ProjectionSession): void {
+    if (
+      session.mode !== "expanded"
+      || session.encoder !== undefined
+      || !session.videoTrack.isOpen()
+      || this.#sessions.get(session.id) !== session
+    ) return;
+    let encoder!: H264EncoderProcess;
+    try {
+      encoder = startH264Encoder({
+        width: session.source.videoWidth,
+        height: session.source.videoHeight,
+        frameRate: this.expandedFrameRate,
+        onAccessUnit: (unit) => {
+          if (
+            session.encoder !== encoder
+            || session.mode !== "expanded"
+            || this.#sessions.get(session.id) !== session
+          ) return;
+          session.encodedFrames += 1;
+          if (!session.videoTrack.isOpen()) {
+            session.transportUnavailableSkips += 1;
+            return;
+          }
+          session.rtpConfig.timestamp = h264Timestamp(session.videoSequence, this.expandedFrameRate);
+          session.videoSequence += 1;
+          if (session.videoTrack.sendMessageBinary(unit.bytes)) {
+            session.sequence += 1;
+            session.framesSent += 1;
+          } else {
+            session.sendFailures += 1;
+          }
+        },
+      });
+    } catch (error) {
+      this.#recordFailure(session, error);
+      this.#close(session, true);
+      return;
+    }
+    session.encoder = encoder;
+    void encoder.done.then(
+      () => {
+        if (session.encoder !== encoder) return;
+        this.#recordFailure(session, new Error("H.264 encoder exited unexpectedly"));
+        this.#close(session, true);
+      },
+      (error) => {
+        if (session.encoder !== encoder) return;
+        this.#recordFailure(session, error);
+        this.#close(session, true);
+      },
+    );
+    this.#schedule(session, 0);
   }
 
   #schedule(session: ProjectionSession, delay: number): void {
@@ -460,14 +594,19 @@ export class ScreenProjectionService {
   }
 
   async #projectFrame(session: ProjectionSession): Promise<void> {
-    if (session.captureInFlight || this.#captureStopped(session)) return;
-    const channel = session.frames;
-    if (channel === undefined || !channel.isOpen()) {
+    const mode = session.mode;
+    if (session.captureInFlight || mode === "idle" || this.#captureStopped(session, mode)) return;
+    const preview = session.preview;
+    const encoder = session.encoder;
+    if (
+      (mode === "preview" && (preview === undefined || !preview.isOpen()))
+      || (mode === "expanded" && (encoder === undefined || !session.videoTrack.isOpen()))
+    ) {
       session.transportUnavailableSkips += 1;
       this.#scheduleNext(session);
       return;
     }
-    if (channel.bufferedAmount() > 0) {
+    if (mode === "preview" && preview!.bufferedAmount() > 0) {
       session.preCaptureBackpressureSkips += 1;
       this.#scheduleNext(session);
       return;
@@ -479,31 +618,50 @@ export class ScreenProjectionService {
       let captureStream = session.captureStream;
       if (captureStream === undefined) {
         await Promise.allSettled(session.captureCleanups);
-        if (this.#captureStopped(session)) return;
+        if (this.#captureStopped(session, mode)) return;
         captureStream = await session.source.openCaptureStream();
       }
-      if (this.#captureStopped(session)) {
+      if (this.#captureStopped(session, mode)) {
         await captureStream.close().catch(() => {});
         return;
       }
       session.captureStream = captureStream;
       const frame = await captureStream.next();
-      if (session.captureStream !== captureStream || this.#captureStopped(session)) return;
+      if (session.captureStream !== captureStream || this.#captureStopped(session, mode)) return;
       session.sourceFrames += 1;
-      if (frame.bytes.byteLength === 0 || frame.bytes.byteLength > MAX_FRAME_BYTES) {
+      const expectedByteLength = session.source.videoWidth * session.source.videoHeight * 4;
+      if (
+        frame.pixelFormat !== "rgba"
+        || frame.width !== session.source.videoWidth
+        || frame.height !== session.source.videoHeight
+        || frame.bytes.byteLength !== expectedByteLength
+      ) {
         session.invalidFrameDrops += 1;
         return;
       }
-      session.encodedFrames += 1;
-      const byteLength = frame.bytes.byteLength;
-      if (channel.bufferedAmount() + byteLength > MAX_BUFFERED_BYTES) {
+      if (mode === "expanded") {
+        await encoder!.writeFrame(frame.bytes);
+        return;
+      }
+      const encoded = await sharp(frame.bytes, {
+        raw: { width: frame.width, height: frame.height, channels: 4 },
+        failOn: "error",
+        limitInputPixels: frame.width * frame.height,
+      }).png().toBuffer();
+      const bytes = new Uint8Array(encoded.buffer, encoded.byteOffset, encoded.byteLength);
+      if (bytes.byteLength === 0 || bytes.byteLength > MAX_FRAME_BYTES) {
+        session.invalidFrameDrops += 1;
+        return;
+      }
+      const byteLength = bytes.byteLength;
+      if (preview!.bufferedAmount() + byteLength > MAX_BUFFERED_BYTES) {
         session.encodedBackpressureDrops += 1;
         return;
       }
       const chunkCount = Math.ceil(byteLength / CHUNK_BYTES);
       const header = JSON.stringify({
         version: SCREEN_PROJECTION_PROTOCOL_VERSION,
-        type: "frame",
+        type: "preview-frame",
         surfaceId: session.source.surfaceId,
         runtimeGeneration: session.source.runtimeGeneration,
         geometryGeneration: session.source.geometryGeneration,
@@ -513,24 +671,24 @@ export class ScreenProjectionService {
         videoHeight: session.source.videoHeight,
         scale: session.source.scale,
         sequence: ++session.sequence,
-        mediaType: frame.mediaType,
+        mediaType: "image/png" as const,
         capturedAt: frame.capturedAt.toISOString(),
-        mode: session.mode,
         byteLength,
         chunkCount,
       });
-      if (!channel.sendMessage(header)) {
+      if (!preview!.sendMessage(header)) {
         session.sendFailures += 1;
         return;
       }
       for (let offset = 0; offset < byteLength; offset += CHUNK_BYTES) {
-        if (!channel.sendMessageBinary(frame.bytes.subarray(offset, Math.min(offset + CHUNK_BYTES, byteLength)))) {
+        if (!preview!.sendMessageBinary(bytes.subarray(offset, Math.min(offset + CHUNK_BYTES, byteLength)))) {
           session.sendFailures += 1;
           return;
         }
       }
       session.framesSent += 1;
-    } catch {
+    } catch (error) {
+      this.#recordFailure(session, error);
       this.#close(session, true);
       return;
     } finally {
@@ -932,8 +1090,8 @@ export class ScreenProjectionService {
     }
   }
 
-  #captureStopped(session: ProjectionSession): boolean {
-    return session.mode === "idle" || this.#sessions.get(session.id) !== session;
+  #captureStopped(session: ProjectionSession, mode = session.mode): boolean {
+    return session.mode !== mode || mode === "idle" || this.#sessions.get(session.id) !== session;
   }
 
   #stopCaptureStream(session: ProjectionSession): void {
@@ -942,9 +1100,51 @@ export class ScreenProjectionService {
     if (stream === undefined) return;
     const cleanup = stream.close();
     session.captureCleanups.add(cleanup);
+    this.#terminalCleanups.add(cleanup);
     void cleanup.finally(() => {
       session.captureCleanups.delete(cleanup);
+      this.#terminalCleanups.delete(cleanup);
     }).catch(() => {});
+  }
+
+  #stopEncoder(session: ProjectionSession): void {
+    const encoder = session.encoder;
+    session.encoder = undefined;
+    if (encoder === undefined) return;
+    const cleanup = encoder.close();
+    session.captureCleanups.add(cleanup);
+    this.#terminalCleanups.add(cleanup);
+    void cleanup.finally(() => {
+      session.captureCleanups.delete(cleanup);
+      this.#terminalCleanups.delete(cleanup);
+    }).catch(() => {});
+  }
+
+  #recordFailure(session: ProjectionSession, cause: unknown): void {
+    const metrics = Object.freeze({
+      sessionId: session.id,
+      surfaceId: session.source.surfaceId,
+      sequence: session.sequence,
+      captureAttempts: session.captureAttempts,
+      sourceFrames: session.sourceFrames,
+      encodedFrames: session.encodedFrames,
+      framesSent: session.framesSent,
+      preCaptureBackpressureSkips: session.preCaptureBackpressureSkips,
+      encodedBackpressureDrops: session.encodedBackpressureDrops,
+      transportUnavailableSkips: session.transportUnavailableSkips,
+      invalidFrameDrops: session.invalidFrameDrops,
+      sendFailures: session.sendFailures,
+    });
+    this.#failures.set(session.id, {
+      botId: session.owner.botId,
+      surfaceId: session.owner.surfaceId,
+      diagnostic: Object.freeze({
+        error: cause instanceof Error ? cause.message : String(cause),
+        metrics,
+      }),
+    });
+    const oldest = this.#failures.keys().next();
+    if (this.#failures.size > 64 && !oldest.done) this.#failures.delete(oldest.value);
   }
 
   #close(session: ProjectionSession, failed: boolean): void {
@@ -954,15 +1154,30 @@ export class ScreenProjectionService {
     if (session.timer !== undefined) clearTimeout(session.timer);
     session.timer = undefined;
     this.#stopCaptureStream(session);
+    this.#stopEncoder(session);
     session.mode = "idle";
     session.state = failed ? "failed" : "closed";
-    for (const channel of [session.frames, session.control, session.input]) {
+    for (const channel of [session.preview, session.control, session.input]) {
       try {
         channel?.close();
       } catch {
         // Peer teardown is best-effort after the session has been made unreachable.
       }
     }
+    const termination = Promise.allSettled([
+      ...(session.captureTask === undefined ? [] : [session.captureTask]),
+      ...session.captureCleanups,
+      session.peerClosed,
+    ]).then(() => {});
+    const terminal = {
+      botId: session.owner.botId,
+      surfaceId: session.owner.surfaceId,
+      promise: termination,
+    };
+    this.#terminations.set(session.id, terminal);
+    void termination.finally(() => {
+      if (this.#terminations.get(session.id) === terminal) this.#terminations.delete(session.id);
+    });
     try {
       session.peer.close();
     } catch {

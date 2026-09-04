@@ -1,13 +1,15 @@
 import {
   SCREEN_CONTROL_CHANNEL,
-  SCREEN_FRAME_CHANNEL,
+  SCREEN_H264_CLOCK_RATE,
+  SCREEN_H264_PROFILE,
   SCREEN_INPUT_CHANNEL,
+  SCREEN_PREVIEW_CHANNEL,
   SCREEN_PROJECTION_PROTOCOL_VERSION,
   ScreenInputAuthorityMessageDto,
   ScreenKeyCodeDto,
   ScreenProjectionAnswerDto,
-  ScreenProjectionFrameHeaderDto,
-  type ScreenProjectionFrameHeaderDto as FrameHeader,
+  ScreenProjectionPreviewFrameHeaderDto,
+  type ScreenProjectionPreviewFrameHeaderDto as PreviewFrameHeader,
   type ScreenInputAuthorityMessageDto as InputAuthority,
   type ScreenProjectionModeDto,
 } from "@omarchy-bot/protocol";
@@ -27,6 +29,7 @@ export interface ScreenProjectionOwner {
 export interface ScreenProjectionCallbacks {
   onState(state: ScreenProjectionState): void;
   onFrame(frame: Blob | undefined): void;
+  onVideo(stream: MediaStream | undefined): void;
   onError(error: string): void;
   onControlStateChange?(active: boolean): void;
   onControlRevoked?(): void;
@@ -34,7 +37,7 @@ export interface ScreenProjectionCallbacks {
 
 
 interface PendingFrame {
-  header: FrameHeader;
+  header: PreviewFrameHeader;
   chunks: ArrayBuffer[];
   receivedBytes: number;
 }
@@ -61,7 +64,7 @@ interface ProjectionGeometry {
 /** Browser-side deep module for SDP exchange, frame reassembly, and stale peer teardown. */
 export class ScreenProjectionConnection {
   readonly #peer = new RTCPeerConnection({ iceServers: [] });
-  readonly #frames: RTCDataChannel;
+  readonly #preview: RTCDataChannel;
   readonly #control: RTCDataChannel;
   readonly #input: RTCDataChannel;
   readonly #abort = new AbortController();
@@ -72,8 +75,12 @@ export class ScreenProjectionConnection {
   #closed = false;
   #connectionTimer: number | undefined;
   #firstFrameTimer: number | undefined;
-  #receivedFrame = false;
+  #receivedPreview = false;
   #inputAuthority: InputAuthority | undefined;
+  #offeredInputAuthority: InputAuthority | undefined;
+  #videoStream: MediaStream | undefined;
+  #videoReady = false;
+  readonly #h264Available: boolean;
   #inputSequence = 0;
   #releasingEpoch: number | undefined;
   #resumeAfterRelease = false;
@@ -85,13 +92,27 @@ export class ScreenProjectionConnection {
     private readonly owner: ScreenProjectionOwner,
     private readonly callbacks: ScreenProjectionCallbacks,
   ) {
-    this.#frames = this.#peer.createDataChannel(SCREEN_FRAME_CHANNEL, { ordered: true });
-    this.#frames.binaryType = "arraybuffer";
+    this.#preview = this.#peer.createDataChannel(SCREEN_PREVIEW_CHANNEL, { ordered: true });
+    this.#preview.binaryType = "arraybuffer";
     this.#control = this.#peer.createDataChannel(SCREEN_CONTROL_CHANNEL, { ordered: true });
     this.#input = this.#peer.createDataChannel(SCREEN_INPUT_CHANNEL, { ordered: true });
-    this.#frames.addEventListener("message", (event) => this.#receive(event.data));
+    this.#preview.addEventListener("message", (event) => this.#receive(event.data));
     this.#input.addEventListener("message", (event) => this.#receiveInputAuthority(event.data));
     this.#control.addEventListener("open", () => this.#activate());
+    const transceiver = this.#peer.addTransceiver("video", { direction: "recvonly" });
+    const h264Codecs = RTCRtpReceiver.getCapabilities("video")?.codecs.filter((codec) =>
+      codec.mimeType.toLowerCase() === "video/h264"
+      && new RegExp(`profile-level-id=${SCREEN_H264_PROFILE}(?:;|$)`, "i").test(codec.sdpFmtpLine ?? "")
+      && /(?:^|;)packetization-mode=1(?:;|$)/i.test(codec.sdpFmtpLine ?? "")
+    ) ?? [];
+    this.#h264Available = h264Codecs.length > 0;
+    if (this.#h264Available) transceiver.setCodecPreferences(h264Codecs);
+    this.#peer.addEventListener("track", (event) => {
+      if (this.#closed || event.track.kind !== "video") return;
+      this.#videoStream = event.streams[0] ?? new MediaStream([event.track]);
+      this.#videoReady = false;
+      this.callbacks.onVideo(this.#videoStream);
+    });
     this.#peer.addEventListener("connectionstatechange", () => {
       if (this.#closed) return;
       if (this.#peer.connectionState === "disconnected") {
@@ -111,6 +132,10 @@ export class ScreenProjectionConnection {
   async connect(): Promise<void> {
     this.callbacks.onState("connecting");
     this.#armConnectionDeadline("Couldn’t connect to the Bot Screen.");
+    if (!this.#h264Available) {
+      this.#fail("This browser does not support H.264 Web Control.");
+      return;
+    }
     try {
       const offer = await this.#peer.createOffer();
       await this.#peer.setLocalDescription(offer);
@@ -130,7 +155,27 @@ export class ScreenProjectionConnection {
       const response = await fetch(this.endpoint, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ type: "offer", sdp: localDescription.sdp }),
+        body: JSON.stringify({
+          version: SCREEN_PROJECTION_PROTOCOL_VERSION,
+          type: "offer",
+          sdp: localDescription.sdp,
+          capabilities: {
+            previewImage: {
+              transport: "data-channel",
+              channel: SCREEN_PREVIEW_CHANNEL,
+              mediaType: "image/png",
+            },
+            expandedVideo: {
+              transport: "webrtc-video-track",
+              codec: "video/H264",
+              profileLevelId: SCREEN_H264_PROFILE,
+              clockRate: SCREEN_H264_CLOCK_RATE,
+            },
+            control: { transport: "data-channel", channel: SCREEN_CONTROL_CHANNEL },
+            input: { transport: "data-channel", channel: SCREEN_INPUT_CHANNEL },
+            snapshotFallback: { transport: "http", mediaType: "image/png" },
+          },
+        }),
         signal: this.#abort.signal,
       });
       const rawAnswer: unknown = await response.json().catch(() => undefined);
@@ -174,12 +219,33 @@ export class ScreenProjectionConnection {
     if (this.#desiredMode !== mode) {
       if (this.#inputAuthority !== undefined) this.callbacks.onControlStateChange?.(false);
       this.#inputAuthority = undefined;
+      this.#offeredInputAuthority = undefined;
       this.#releasingEpoch = undefined;
       this.#resumeAfterRelease = false;
+      this.#videoReady = false;
       this.#clearHeldInput();
     }
     this.#desiredMode = mode;
     this.#activate();
+  }
+
+  /** Makes input interactive only after a correctly sized H.264 frame was browser-painted. */
+  videoFramePainted(videoWidth: number, videoHeight: number): boolean {
+    const geometry = this.#geometry;
+    if (
+      this.#closed
+      || this.#desiredMode !== "expanded"
+      || this.#videoStream === undefined
+      || geometry === undefined
+      || videoWidth !== geometry.videoWidth
+      || videoHeight !== geometry.videoHeight
+    ) return false;
+    this.#videoReady = true;
+    clearTimeout(this.#firstFrameTimer);
+    this.#firstFrameTimer = undefined;
+    this.callbacks.onState("expanded");
+    this.#publishInputAuthority();
+    return true;
   }
 
   pointerMotion(clientX: number, clientY: number, renderedVideo: Element, clampToContent = false): void {
@@ -272,11 +338,15 @@ export class ScreenProjectionConnection {
     this.#pending = undefined;
     if (this.#inputAuthority !== undefined) this.callbacks.onControlStateChange?.(false);
     this.#inputAuthority = undefined;
+    this.#offeredInputAuthority = undefined;
     this.#clearHeldInput();
     this.#geometry = undefined;
+    this.#videoStream = undefined;
+    this.#videoReady = false;
     this.#releasingEpoch = undefined;
     this.#resumeAfterRelease = false;
     this.callbacks.onFrame(undefined);
+    this.callbacks.onVideo(undefined);
     this.callbacks.onState("closed");
     if (this.#control.readyState === "open" && this.#runtimeGeneration !== undefined) {
       this.#control.send(JSON.stringify({
@@ -287,7 +357,7 @@ export class ScreenProjectionConnection {
         mode: "idle",
       }));
     }
-    this.#frames.close();
+    this.#preview.close();
     this.#control.close();
     this.#input.close();
     this.#peer.close();
@@ -318,10 +388,20 @@ export class ScreenProjectionConnection {
       runtimeGeneration: this.#runtimeGeneration,
       mode: this.#desiredMode,
     }));
-    this.callbacks.onState(this.#desiredMode);
-    if (!this.#receivedFrame && this.#firstFrameTimer === undefined) {
+    if (this.#desiredMode === "preview") {
+      this.callbacks.onState("preview");
+      if (this.#receivedPreview) return;
+    } else if (this.#videoReady) {
+      this.callbacks.onState("expanded");
+      return;
+    } else {
+      this.callbacks.onState("connecting");
+    }
+    if (this.#firstFrameTimer === undefined) {
       this.#firstFrameTimer = window.setTimeout(
-        () => this.#fail("No image arrived from the Bot Screen."),
+        () => this.#fail(this.#desiredMode === "expanded"
+          ? "No H.264 video arrived from the Bot Screen."
+          : "No image arrived from the Bot Screen."),
         FIRST_FRAME_TIMEOUT_MS,
       );
     }
@@ -345,10 +425,12 @@ export class ScreenProjectionConnection {
     if (!authority.data.active) {
       if (
         this.#inputAuthority?.controllerEpoch === authority.data.controllerEpoch
+        || this.#offeredInputAuthority?.controllerEpoch === authority.data.controllerEpoch
         || this.#releasingEpoch === authority.data.controllerEpoch
       ) {
         if (this.#inputAuthority !== undefined) this.callbacks.onControlStateChange?.(false);
         this.#inputAuthority = undefined;
+        this.#offeredInputAuthority = undefined;
         this.#releasingEpoch = undefined;
         this.#clearHeldInput();
         if (this.#resumeAfterRelease) {
@@ -358,12 +440,19 @@ export class ScreenProjectionConnection {
       }
       return;
     }
+    this.#offeredInputAuthority = authority.data;
+    this.#publishInputAuthority();
+  }
+
+  #publishInputAuthority(): void {
+    const authority = this.#offeredInputAuthority;
+    if (authority === undefined || this.#desiredMode !== "expanded" || !this.#videoReady) return;
     if (
       this.#inputAuthority !== undefined
-      && this.#inputAuthority.controllerEpoch !== authority.data.controllerEpoch
+      && this.#inputAuthority.controllerEpoch !== authority.controllerEpoch
     ) this.#clearHeldInput();
     this.callbacks.onControlStateChange?.(true);
-    this.#inputAuthority = authority.data;
+    this.#inputAuthority = authority;
     this.#inputSequence = 0;
     this.#releasingEpoch = undefined;
     this.#resumeAfterRelease = false;
@@ -445,7 +534,7 @@ export class ScreenProjectionConnection {
   }
 
   #receive(raw: unknown): void {
-    if (this.#closed) return;
+    if (this.#closed || this.#desiredMode !== "preview") return;
     if (typeof raw === "string") {
       let parsed: unknown;
       try {
@@ -454,7 +543,7 @@ export class ScreenProjectionConnection {
         this.#pending = undefined;
         return;
       }
-      const header = ScreenProjectionFrameHeaderDto.safeParse(parsed);
+      const header = ScreenProjectionPreviewFrameHeaderDto.safeParse(parsed);
       if (
         !header.success
         || header.data.byteLength > MAX_FRAME_BYTES
@@ -479,7 +568,7 @@ export class ScreenProjectionConnection {
     if (pending.chunks.length !== pending.header.chunkCount) return;
     this.#pending = undefined;
     if (pending.receivedBytes !== pending.header.byteLength) return;
-    this.#receivedFrame = true;
+    this.#receivedPreview = true;
     clearTimeout(this.#firstFrameTimer);
     this.#firstFrameTimer = undefined;
     this.callbacks.onFrame(new Blob(pending.chunks, { type: pending.header.mediaType }));
@@ -494,6 +583,19 @@ export class ScreenProjectionConnection {
     if (this.#closed) return;
     this.callbacks.onError(message);
     this.close();
+    void this.#loadSnapshotFallback();
+  }
+
+  async #loadSnapshotFallback(): Promise<void> {
+    const snapshot = new URL(this.endpoint, window.location.href);
+    snapshot.pathname = snapshot.pathname.replace(/\/projection$/, "/snapshot");
+    try {
+      const response = await fetch(snapshot);
+      if (!response.ok || response.headers.get("content-type") !== "image/png") throw new Error();
+      this.callbacks.onFrame(await response.blob());
+    } catch {
+      this.callbacks.onFrame(undefined);
+    }
     this.callbacks.onState("unavailable");
   }
 

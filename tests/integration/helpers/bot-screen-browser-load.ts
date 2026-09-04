@@ -97,6 +97,8 @@ function installBrowserInstrumentation(): void {
   const awaitingBlob: InstrumentFrame[] = [];
   const frameByUrl = new Map<string, InstrumentFrame>();
   const processedUrls = new Set<string>();
+  const observedVideos = new WeakSet<HTMLVideoElement>();
+  let videoSequence = 0;
   let pendingHeader: { sequence: number; chunkCount: number; capturedAt?: string } | undefined;
   let chunks = 0;
 
@@ -126,12 +128,12 @@ function installBrowserInstrumentation(): void {
   const nativeCreateDataChannel = RTCPeerConnection.prototype.createDataChannel;
   RTCPeerConnection.prototype.createDataChannel = function(label, options): RTCDataChannel {
     const channel = nativeCreateDataChannel.call(this, label, options);
-    if (label === "screen.frames.v1") {
+    if (label === "screen.preview.v2") {
       channel.addEventListener("message", (event: MessageEvent<unknown>) => {
         if (typeof event.data === "string") {
           try {
             const header = JSON.parse(event.data) as { type?: string; sequence?: number; chunkCount?: number; capturedAt?: string };
-            pendingHeader = header.type === "frame"
+            pendingHeader = header.type === "preview-frame"
               && typeof header.sequence === "number"
               && typeof header.chunkCount === "number"
               ? { sequence: header.sequence, chunkCount: header.chunkCount, ...(header.capturedAt === undefined ? {} : { capturedAt: header.capturedAt }) }
@@ -158,7 +160,7 @@ function installBrowserInstrumentation(): void {
         chunks = 0;
       });
     }
-    if (label === "screen.input.v1") {
+    if (label === "screen.input.v2") {
       const nativeSend = channel.send.bind(channel);
       channel.send = (data: string | Blob | ArrayBuffer | ArrayBufferView<ArrayBuffer>): void => {
         const pendingInput = instrument.pendingInput;
@@ -224,11 +226,57 @@ function installBrowserInstrumentation(): void {
     }
   };
 
+  const observeVideo = (video: HTMLVideoElement): void => {
+    if (observedVideos.has(video)) return;
+    observedVideos.add(video);
+    const canvas = document.createElement("canvas");
+    canvas.width = 320;
+    canvas.height = 180;
+    const context = canvas.getContext("2d", { willReadFrequently: true });
+    if (context === null) return;
+    const paint = (_now: DOMHighResTimeStamp, metadata: VideoFrameCallbackMetadata): void => {
+      if (!video.isConnected || video.srcObject === null) return;
+      const decodedAtMs = performance.now();
+      const frame: InstrumentFrame = {
+        sequence: ++videoSequence,
+        signature: 0,
+        capturedAtEpochMs: null,
+        receivedAtMs: decodedAtMs,
+        decodedAtMs,
+      };
+      received.push(frame);
+      decoded.push(frame);
+      context.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+      let signature = 2166136261;
+      for (let index = 0; index < pixels.length; index += 16) {
+        signature ^= pixels[index]!;
+        signature = Math.imul(signature, 16777619);
+      }
+      frame.signature = signature >>> 0;
+      frame.displayedAtMs = performance.now();
+      const captureTime = "captureTime" in metadata ? metadata.captureTime : undefined;
+      if (typeof captureTime === "number" && Number.isFinite(captureTime)) {
+        frame.captureToBrowserMs = frame.displayedAtMs - captureTime;
+      }
+      displayed.push(frame);
+      const input = instrument.pendingInput;
+      if (
+        input?.sentAtMs !== undefined
+        && input.visibleAtMs === undefined
+        && frame.sequence > input.baselineSequence
+        && frame.signature !== input.baselineSignature
+      ) input.visibleAtMs = frame.displayedAtMs;
+      video.requestVideoFrameCallback(paint);
+    };
+    video.requestVideoFrameCallback(paint);
+  };
+
   const scan = (): void => {
-    const expanded = document.querySelector<HTMLImageElement>('[data-testid="expanded-web-control"] img');
+    const video = document.querySelector<HTMLVideoElement>('video[data-testid="computer-expanded-video"]');
     const preview = document.querySelector<HTMLImageElement>('img[data-testid="computer-preview"]');
-    const image = expanded ?? preview;
-    if (image !== null) void observeImage(image);
+    if (video !== null) observeVideo(video);
+    else if (preview !== null) void observeImage(preview);
   };
   addEventListener("DOMContentLoaded", () => {
     new MutationObserver(scan).observe(document.documentElement, {
@@ -248,6 +296,8 @@ export class BrowserSurfaceSession {
     readonly owner: BrowserOwner,
     readonly lanEndpoint: string,
     readonly projectionSessionId: string,
+    private readonly videoWidth: number,
+    private readonly videoHeight: number,
     private readonly page: Page,
     private readonly context: BrowserContext,
   ) {}
@@ -283,16 +333,43 @@ export class BrowserSurfaceSession {
         && response.status() === 201;
     });
     await page.getByTestId("header-computer").click();
-    const answer = await (await projectionResponse).json() as { sessionId?: unknown };
-    if (typeof answer.sessionId !== "string") throw new Error("final web client projection answer lacked a session id");
+    const answer = await (await projectionResponse).json() as {
+      sessionId?: unknown;
+      videoWidth?: unknown;
+      videoHeight?: unknown;
+    };
+    if (
+      typeof answer.sessionId !== "string"
+      || typeof answer.videoWidth !== "number"
+      || typeof answer.videoHeight !== "number"
+    ) throw new Error("final web client projection answer lacked its media contract");
     await page.getByTestId("computer-preview").waitFor({ state: "visible", timeout: 15_000 });
     await page.waitForFunction(() => window.__botScreenLoad.displayed.length > 0);
-    return new BrowserSurfaceSession(owner, lanEndpoint, answer.sessionId, page, context);
+    return new BrowserSurfaceSession(
+      owner,
+      lanEndpoint,
+      answer.sessionId,
+      answer.videoWidth,
+      answer.videoHeight,
+      page,
+      context,
+    );
   }
 
   async expand(): Promise<void> {
+    const previewPaints = await this.page.evaluate(() => window.__botScreenLoad.displayed.length);
     await this.page.getByTestId("computer-preview-expand").click();
     await this.page.getByTestId("expanded-web-control").waitFor({ state: "visible", timeout: 10_000 });
+    await this.page.waitForFunction(
+      ({ width, height, after }) => {
+        const video = document.querySelector<HTMLVideoElement>('video[data-testid="computer-expanded-video"]');
+        return video?.videoWidth === width
+          && video.videoHeight === height
+          && window.__botScreenLoad.displayed.length > after;
+      },
+      { width: this.videoWidth, height: this.videoHeight, after: previewPaints },
+      { timeout: 10_000 },
+    );
   }
 
   async measureInputToVisible(afterWebInputSent?: () => Promise<void>): Promise<number> {
@@ -374,22 +451,18 @@ export class BrowserSurfaceSession {
       const state = window.__botScreenLoad;
       const endedAtMs = performance.now();
       const durationMs = sequenceWindow?.durationMs ?? endedAtMs - start;
-      const received = sequenceWindow === undefined
-        ? state.received.filter((frame) => frame.receivedAtMs >= start && frame.receivedAtMs <= endedAtMs)
-        : state.received.filter((frame) =>
-          frame.sequence > sequenceWindow.afterSequence && frame.sequence <= sequenceWindow.throughSequence
-        );
-      const decoded = sequenceWindow === undefined
-        ? received.filter((frame) => (frame.decodedAtMs ?? -1) >= start && (frame.decodedAtMs ?? Infinity) <= endedAtMs)
-        : received.filter((frame) => frame.decodedAtMs !== undefined);
-      const displayed = sequenceWindow === undefined
-        ? received.filter((frame) => (frame.displayedAtMs ?? -1) >= start && (frame.displayedAtMs ?? Infinity) <= endedAtMs)
-        : received.filter((frame) => frame.displayedAtMs !== undefined);
+      const received = state.received.filter((frame) =>
+        frame.receivedAtMs >= start && frame.receivedAtMs <= endedAtMs
+      );
+      const decoded = state.decoded.filter((frame) =>
+        (frame.decodedAtMs ?? -1) >= start && (frame.decodedAtMs ?? Infinity) <= endedAtMs
+      );
+      const displayed = state.displayed.filter((frame) =>
+        (frame.displayedAtMs ?? -1) >= start && (frame.displayedAtMs ?? Infinity) <= endedAtMs
+      );
       const sequences = [...new Set(received.map((frame) => frame.sequence))].sort((left, right) => left - right);
-      const transportSequenceGaps = sequenceWindow === undefined
-        ? sequences.slice(1).reduce((gaps, sequence, index) =>
-          gaps + Math.max(0, sequence - sequences[index]! - 1), 0)
-        : Math.max(0, sequenceWindow.throughSequence - sequenceWindow.afterSequence - sequences.length);
+      const transportSequenceGaps = sequences.slice(1).reduce((gaps, sequence, index) =>
+        gaps + Math.max(0, sequence - sequences[index]! - 1), 0);
       const seconds = durationMs / 1_000;
       return {
         surfaceId,
