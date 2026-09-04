@@ -9,8 +9,16 @@ import { api, makeBot, startDaemon, type Harness } from "./helpers/harness.ts";
 
 const platformTest = process.env.OMARCHY_BOT_REAL_HYPRLAND_SMOKE === "1" ? test : test.skip;
 
-async function runBytes(argv: string[]): Promise<Uint8Array> {
-  const child = Bun.spawn(argv, { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+async function runBytes(
+  argv: string[],
+  env?: Record<string, string | undefined>,
+): Promise<Uint8Array> {
+  const child = Bun.spawn(argv, {
+    ...(env === undefined ? {} : { env }),
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
   const [status, stdout, stderr] = await Promise.all([
     child.exited,
     new Response(child.stdout).arrayBuffer(),
@@ -24,9 +32,56 @@ async function run(argv: string[]): Promise<string> {
   return new TextDecoder().decode(await runBytes(argv));
 }
 
+async function hostInstance(): Promise<{ instance: string; runtimeDir: string; waylandDisplay: string }> {
+  const runtimeDir = process.env.XDG_RUNTIME_DIR;
+  if (runtimeDir === undefined) throw new Error("real Hyprland smoke requires XDG_RUNTIME_DIR");
+  const parsed: unknown = JSON.parse(await run(["hyprctl", "instances", "-j"]));
+  if (!Array.isArray(parsed)) throw new Error("hyprctl returned an invalid instance list");
+  const instances = parsed.filter((candidate): candidate is { instance: string; wl_socket: string } => {
+    if (
+      candidate === null
+      || typeof candidate !== "object"
+      || !("instance" in candidate)
+      || typeof candidate.instance !== "string"
+      || !("wl_socket" in candidate)
+      || typeof candidate.wl_socket !== "string"
+    ) {
+      return false;
+    }
+    try {
+      return statSync(path.join(runtimeDir, candidate.wl_socket)).isSocket();
+    } catch {
+      return false;
+    }
+  });
+  if (instances.length !== 1) throw new Error("real Hyprland smoke requires one active host instance");
+  return {
+    instance: instances[0]!.instance,
+    runtimeDir,
+    waylandDisplay: instances[0]!.wl_socket,
+  };
+}
+
 async function hostClientAddresses(): Promise<string[]> {
-  const parsed = JSON.parse(await run(["hyprctl", "-j", "clients"])) as Array<{ address: string }>;
+  const host = await hostInstance();
+  const parsed = JSON.parse(
+    await run(["hyprctl", "-j", "-i", host.instance, "clients"]),
+  ) as Array<{ address: string }>;
   return parsed.map((client) => client.address).sort();
+}
+
+async function hostCapture(): Promise<Uint8Array> {
+  const host = await hostInstance();
+  return runBytes(["grim", "-"], {
+    ...process.env,
+    XDG_RUNTIME_DIR: host.runtimeDir,
+    WAYLAND_DISPLAY: host.waylandDisplay,
+  });
+}
+
+async function hostHyprctl(args: string[]): Promise<string> {
+  const host = await hostInstance();
+  return run(["hyprctl", "-j", "-i", host.instance, ...args]);
 }
 
 function sha256(bytes: Uint8Array): string {
@@ -68,7 +123,18 @@ async function waitUntilReady(harness: Harness, botId: string, surfaceId: string
 
 platformTest("two real nested Hyprland Screens act and capture concurrently with distinct pixels", async () => {
   const beforeClients = await hostClientAddresses();
-  const harness = await startDaemon(undefined, { useProductionBotScreen: true, botScreenCapacity: 2 });
+  const inheritedWaylandDisplay = process.env.WAYLAND_DISPLAY;
+  delete process.env.WAYLAND_DISPLAY;
+  let harness: Harness;
+  try {
+    harness = await startDaemon(undefined, { useProductionBotScreen: true, botScreenCapacity: 2 });
+  } finally {
+    if (inheritedWaylandDisplay === undefined) {
+      delete process.env.WAYLAND_DISPLAY;
+    } else {
+      process.env.WAYLAND_DISPLAY = inheritedWaylandDisplay;
+    }
+  }
   const runtimeSurfaceDirs: string[] = [];
   const profileSurfaceDirs: string[] = [];
   try {
@@ -149,10 +215,10 @@ platformTest("two real nested Hyprland Screens act and capture concurrently with
     expect(previews[0]!.slice(0, 8)).toEqual(pngSignature);
     expect(previews[1]!.slice(0, 8)).toEqual(pngSignature);
     expect(sha256(previews[0]!)).not.toBe(sha256(previews[1]!));
-    const hostCapture = await runBytes(["grim", "-"]);
-    expect(previews.every((preview) => sha256(preview) !== sha256(hostCapture))).toBeTrue();
+    const hostPreview = await hostCapture();
+    expect(previews.every((preview) => sha256(preview) !== sha256(hostPreview))).toBeTrue();
 
-    const hostPointerBefore = await run(["hyprctl", "-j", "cursorpos"]);
+    const hostPointerBefore = await hostHyprctl(["cursorpos"]);
     const sources = await Promise.all(owners.map((owner) => harness.svc.screens.projectionSource(owner)));
     expect(sources.every((source) => source !== undefined)).toBeTrue();
     const firstSource = sources[0]!;
@@ -212,7 +278,7 @@ platformTest("two real nested Hyprland Screens act and capture concurrently with
     await firstInput({ type: "button", x: 600, y: 180, button: "left", state: "released" });
     await Promise.all([firstSource.releaseInput(firstEpoch), secondSource.releaseInput(1)]);
 
-    expect(await run(["hyprctl", "-j", "cursorpos"])).toBe(hostPointerBefore);
+    expect(await hostHyprctl(["cursorpos"])).toBe(hostPointerBefore);
 
     for (const [index, owner] of owners.entries()) {
       const deleted = await api<{ status: string }>(harness, "DELETE", `/api/bots/${owner.botId}`, {});
@@ -262,7 +328,6 @@ platformTest("deletion cleans an unresponsive real input helper without waiting 
     runtimeRoot: harness.svc.cfg.botScreenRuntimeDir,
     profileRoot: harness.svc.cfg.botScreenProfileDir,
     ...(process.env.XDG_RUNTIME_DIR === undefined ? {} : { hostRuntimeDir: process.env.XDG_RUNTIME_DIR }),
-    ...(process.env.WAYLAND_DISPLAY === undefined ? {} : { hostWaylandDisplay: process.env.WAYLAND_DISPLAY }),
     inputHelperBin: helperPath,
     computerWorkers: harness.svc.supervisor,
   });

@@ -315,6 +315,18 @@ function isSocket(candidate: string): boolean {
     return false;
   }
 }
+
+function discoverHostWaylandDisplay(runtimeDir: string): string | undefined {
+  try {
+    const displays = readdirSync(runtimeDir)
+      .filter((entry) => /^wayland-\d+$/.test(entry) && isSocket(path.join(runtimeDir, entry)))
+      .sort();
+    return displays.length === 1 ? displays[0] : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function socketRuntimeName(surfaceId: SurfaceId): string {
   const entropy = BigInt(`0x${surfaceId.slice(-11)}`).toString(36).padStart(9, "0");
   return `.b${entropy}`;
@@ -360,10 +372,9 @@ export class HyprlandBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter 
     }
 
     const hostRuntimeDir = this.options.hostRuntimeDir;
-    const hostDisplay = this.options.hostWaylandDisplay;
-    if (hostRuntimeDir === undefined || hostDisplay === undefined) {
-      throw new Error("a running host Wayland session is required");
-    }
+    if (hostRuntimeDir === undefined) throw new Error("a running host Wayland session is required");
+    const hostDisplay = this.options.hostWaylandDisplay ?? discoverHostWaylandDisplay(hostRuntimeDir);
+    if (hostDisplay === undefined) throw new Error("a unique running host Wayland session is required");
     const hostSocket = path.isAbsolute(hostDisplay) ? hostDisplay : path.join(hostRuntimeDir, hostDisplay);
     if (!isSocket(hostSocket)) throw new Error("the host Wayland socket is unavailable");
 
