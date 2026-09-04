@@ -189,6 +189,26 @@ describe("Bot Screen lifecycle", () => {
     ).toBe(200);
   });
 
+  test("a persistent Bot Desktop crash fails its Screen and reprovisions a fresh runtime generation", async () => {
+    const adapter = new FakeBotScreenRuntimeAdapter();
+    h = await startDaemon(undefined, { botScreenAdapter: adapter });
+    const owner = await bot(h, await makeBot(h, "Bot Desktop lifecycle"));
+    await activateScreen(h, owner);
+    const firstOutcome = adapter.runtimeOutcome(owner.surfaceId);
+
+    adapter.exitDesktop(owner.surfaceId);
+    expect((await firstOutcome).type).toBe("desktop-exited");
+    await waitForState(h, owner, "unavailable");
+    expect(h.svc.screens.status({ botId: owner.id, surfaceId: owner.surfaceId })).toEqual({
+      state: "failed",
+      failure: "fake Bot Desktop exited",
+    });
+
+    await activateScreen(h, owner);
+    expect(adapter.running(owner.surfaceId)).toEqual({ generation: 2 });
+    expect(await waitForState(h, owner, "ready")).toMatchObject({ surfaceId: owner.surfaceId });
+  });
+
   test("rejects a Bot Screen before provisioning when measured capacity is full", async () => {
     const adapter = new FakeBotScreenRuntimeAdapter();
     h = await startDaemon(undefined, { botScreenAdapter: adapter, botScreenCapacity: 1 });

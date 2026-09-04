@@ -141,6 +141,10 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     this.#finish(surfaceId, { type: "application-exited", error: new Error(message) });
   }
 
+  exitDesktop(surfaceId: string, message = "fake Bot Desktop exited"): void {
+    this.#finish(surfaceId, { type: "desktop-exited", error: new Error(message) });
+  }
+
   exitCompositor(surfaceId: string, message = "fake Bot Screen compositor exited"): void {
     this.#finish(surfaceId, { type: "compositor-exited", error: new Error(message) });
   }

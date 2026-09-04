@@ -9,6 +9,7 @@ import { TurnService } from "../modules/turns/turns.ts";
 import { ComputerBroker } from "../modules/computer/broker.ts";
 import { BotScreenManager, type BotScreenRuntimeAdapter } from "../modules/computer/botScreenManager.ts";
 import { HyprlandBotScreenRuntimeAdapter } from "../modules/computer/hyprlandBotScreenRuntime.ts";
+import { CageBotScreenRuntimeAdapter } from "../modules/computer/cageBotScreenRuntime.ts";
 import { ScreenProjectionService } from "../modules/computer/screenProjection.ts";
 import { InputDiagnostics } from "../modules/computer/inputDiagnostics.ts";
 import { AvatarService } from "../modules/avatars/avatarService.ts";
@@ -62,25 +63,50 @@ export async function main(options: MainOptions = {}): Promise<{
       computer: process.env.OMARCHY_BOT_COMPUTER_WORKER_DIR ?? path.resolve(agentsDir, "computer"),
     },
   );
-  const productionScreenAdapter = new HyprlandBotScreenRuntimeAdapter({
-    runtimeRoot: cfg.botScreenRuntimeDir,
-    profileRoot: cfg.botScreenProfileDir,
-    computerWorkers: supervisor,
-    ...(runtimeDir === undefined ? {} : { hostRuntimeDir: runtimeDir }),
-    ...(hostWaylandDisplay === undefined ? {} : { hostWaylandDisplay }),
-    ...(process.env.OMARCHY_BOT_HYPRLAND_BIN === undefined
-      ? {}
-      : { hyprlandBin: process.env.OMARCHY_BOT_HYPRLAND_BIN }),
-    ...(process.env.OMARCHY_BOT_HYPRCTL_BIN === undefined
-      ? {}
-      : { hyprctlBin: process.env.OMARCHY_BOT_HYPRCTL_BIN }),
-    ...(process.env.OMARCHY_BOT_GRIM_BIN === undefined
-      ? {}
-      : { grimBin: process.env.OMARCHY_BOT_GRIM_BIN }),
-    ...(process.env.OMARCHY_BOT_SCREEN_APP_BIN === undefined
-      ? {}
-      : { applicationBin: process.env.OMARCHY_BOT_SCREEN_APP_BIN }),
-  });
+  const productionScreenAdapter = cfg.botScreenRuntime === "cage"
+    ? new CageBotScreenRuntimeAdapter({
+        runtimeRoot: cfg.botScreenRuntimeDir,
+        profileRoot: cfg.botScreenProfileDir,
+        computerWorkers: supervisor,
+        ...(runtimeDir === undefined ? {} : { hostRuntimeDir: runtimeDir }),
+        ...(process.env.OMARCHY_BOT_CAGE_BIN === undefined
+          ? {}
+          : { cageBin: process.env.OMARCHY_BOT_CAGE_BIN }),
+        ...(process.env.OMARCHY_BOT_WLR_RANDR_BIN === undefined
+          ? {}
+          : { wlrRandrBin: process.env.OMARCHY_BOT_WLR_RANDR_BIN }),
+        ...(process.env.OMARCHY_BOT_GRIM_BIN === undefined
+          ? {}
+          : { grimBin: process.env.OMARCHY_BOT_GRIM_BIN }),
+        ...(process.env.OMARCHY_BOT_INPUT_HELPER_BIN === undefined
+          ? {}
+          : { inputHelperBin: process.env.OMARCHY_BOT_INPUT_HELPER_BIN }),
+        ...(process.env.OMARCHY_BOT_CAPTURE_HELPER_BIN === undefined
+          ? {}
+          : { captureHelperBin: process.env.OMARCHY_BOT_CAPTURE_HELPER_BIN }),
+        ...(process.env.OMARCHY_BOT_DESKTOP_BIN === undefined
+          ? {}
+          : { botDesktopBin: process.env.OMARCHY_BOT_DESKTOP_BIN }),
+      })
+    : new HyprlandBotScreenRuntimeAdapter({
+        runtimeRoot: cfg.botScreenRuntimeDir,
+        profileRoot: cfg.botScreenProfileDir,
+        computerWorkers: supervisor,
+        ...(runtimeDir === undefined ? {} : { hostRuntimeDir: runtimeDir }),
+        ...(hostWaylandDisplay === undefined ? {} : { hostWaylandDisplay }),
+        ...(process.env.OMARCHY_BOT_HYPRLAND_BIN === undefined
+          ? {}
+          : { hyprlandBin: process.env.OMARCHY_BOT_HYPRLAND_BIN }),
+        ...(process.env.OMARCHY_BOT_HYPRCTL_BIN === undefined
+          ? {}
+          : { hyprctlBin: process.env.OMARCHY_BOT_HYPRCTL_BIN }),
+        ...(process.env.OMARCHY_BOT_GRIM_BIN === undefined
+          ? {}
+          : { grimBin: process.env.OMARCHY_BOT_GRIM_BIN }),
+        ...(process.env.OMARCHY_BOT_SCREEN_APP_BIN === undefined
+          ? {}
+          : { applicationBin: process.env.OMARCHY_BOT_SCREEN_APP_BIN }),
+      });
   const screens = new BotScreenManager(
     db,
     options.botScreenAdapter ?? productionScreenAdapter,

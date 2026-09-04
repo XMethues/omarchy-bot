@@ -6,6 +6,7 @@ import { loadConfig } from "../../apps/daemon/src/bootstrap/config.ts";
 
 const original = {
   capacity: process.env.OMARCHY_BOT_SCREEN_CAPACITY,
+  runtime: process.env.OMARCHY_BOT_SCREEN_RUNTIME,
   profile: process.env.OMARCHY_BOT_SCREEN_PROFILE,
   frameRate: process.env.OMARCHY_BOT_SCREEN_FRAME_RATE,
   webRtcPort: process.env.OMARCHY_BOT_SCREEN_WEBRTC_PORT,
@@ -18,6 +19,7 @@ let temporaryRoot: string | undefined;
 
 afterEach(() => {
   for (const [name, value] of [
+    ["OMARCHY_BOT_SCREEN_RUNTIME", original.runtime],
     ["OMARCHY_BOT_SCREEN_CAPACITY", original.capacity],
     ["OMARCHY_BOT_SCREEN_PROFILE", original.profile],
     ["OMARCHY_BOT_SCREEN_FRAME_RATE", original.frameRate],
@@ -35,6 +37,7 @@ afterEach(() => {
 
 test("selects the measured 720p Bot Screen fallback from configuration", () => {
   process.env.OMARCHY_BOT_SCREEN_CAPACITY = "2";
+  process.env.OMARCHY_BOT_SCREEN_RUNTIME = "cage";
   process.env.OMARCHY_BOT_SCREEN_PROFILE = "720p";
   process.env.OMARCHY_BOT_SCREEN_FRAME_RATE = "15";
   process.env.OMARCHY_BOT_SCREEN_WEBRTC_PORT = "7433";
@@ -44,6 +47,7 @@ test("selects the measured 720p Bot Screen fallback from configuration", () => {
 
   expect(loadConfig()).toMatchObject({
     botScreenCapacity: 2,
+    botScreenRuntime: "cage",
     botScreenProfile: "720p",
     botScreenLogicalWidth: 1280,
     botScreenLogicalHeight: 720,
@@ -66,6 +70,7 @@ test("keeps HTTP loopback-only unless LAN binding is explicitly configured", () 
 
 test("uses the measured conservative Bot Screen default", () => {
   delete process.env.OMARCHY_BOT_SCREEN_CAPACITY;
+  delete process.env.OMARCHY_BOT_SCREEN_RUNTIME;
   delete process.env.OMARCHY_BOT_SCREEN_PROFILE;
   delete process.env.OMARCHY_BOT_SCREEN_FRAME_RATE;
   delete process.env.OMARCHY_BOT_SCREEN_WEBRTC_PORT;
@@ -74,6 +79,7 @@ test("uses the measured conservative Bot Screen default", () => {
   process.env.OMARCHY_BOT_STATE = path.join(temporaryRoot, "state");
 
   expect(loadConfig()).toMatchObject({
+    botScreenRuntime: "hyprland",
     botScreenCapacity: 4,
     botScreenProfile: "1080p",
     botScreenLogicalWidth: 1920,
@@ -81,4 +87,13 @@ test("uses the measured conservative Bot Screen default", () => {
     botScreenFrameRate: 16,
     botScreenWebRtcPort: 7323,
   });
+});
+
+test("rejects an unknown Bot Screen runtime without creating a silent fallback", () => {
+  temporaryRoot = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-screen-config-"));
+  process.env.OMARCHY_BOT_HOME = path.join(temporaryRoot, "data");
+  process.env.OMARCHY_BOT_STATE = path.join(temporaryRoot, "state");
+  process.env.OMARCHY_BOT_SCREEN_RUNTIME = "unknown";
+
+  expect(() => loadConfig()).toThrow("OMARCHY_BOT_SCREEN_RUNTIME must be hyprland or cage");
 });
