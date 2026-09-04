@@ -166,6 +166,9 @@ static int positive_int(const char *value) {
 }
 
 int main(int argc, char **argv) {
+  if (argc == 2 && strcmp(argv[1], "--host") == 0) {
+    for (;;) pause();
+  }
   if (argc != 4) {
     fprintf(stderr, "usage: %s <logical-width> <logical-height> <scale>\n", argv[0]);
     return 2;

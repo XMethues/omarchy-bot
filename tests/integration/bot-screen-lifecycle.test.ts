@@ -45,6 +45,12 @@ describe("Bot Screen lifecycle", () => {
   test("direct deletion destroys the owned runtime before removing Surface persistence", async () => {
     const adapter = new FakeBotScreenRuntimeAdapter();
     h = await startDaemon(undefined, { botScreenAdapter: adapter });
+    const projectionCleanup = h.svc.projections.closeSurface.bind(h.svc.projections);
+    const projectionClosures: string[] = [];
+    h.svc.projections.closeSurface = async (surfaceId) => {
+      projectionClosures.push(surfaceId);
+      await projectionCleanup(surfaceId);
+    };
     const owner = await bot(h, await makeBot(h, "Delete Screen"));
     await activateScreen(h, owner);
     const source = await h.svc.screens.projectionSource({ botId: owner.id, surfaceId: owner.surfaceId });
@@ -57,6 +63,7 @@ describe("Bot Screen lifecycle", () => {
     expect(adapter.destroyed.has(owner.surfaceId)).toBeTrue();
     expect(adapter.running(owner.surfaceId)).toBeUndefined();
     expect(adapter.captureStreamsClosed).toBe(1);
+    expect(projectionClosures).toContain(owner.surfaceId);
     expect((await apiStatus(h, "GET", `/api/bots/${owner.id}`)).status).toBe(404);
     expect(h.svc.db.query(`SELECT 1 FROM bot_surfaces WHERE surface_id = ?`).get(owner.surfaceId)).toBeNull();
   });
@@ -104,7 +111,7 @@ describe("Bot Screen lifecycle", () => {
     const unaffected = await bot(h, await makeBot(h, "Isolated Lifecycle"));
     await Promise.all([activateScreen(h, failed), activateScreen(h, unaffected)]);
 
-    adapter.crash(failed.surfaceId, "fake capture helper crashed");
+    adapter.exitComputerWorker(failed.surfaceId, "fake computer worker crashed");
     await waitForState(h, failed, "unavailable");
     const cleanupDeadline = Date.now() + 5_000;
     while (adapter.running(failed.surfaceId) !== undefined) {
@@ -149,64 +156,196 @@ describe("Bot Screen lifecycle", () => {
     }
   });
 
-  test("application and compositor exits are distinct fatal outcomes isolated to their owning Screens", async () => {
-    const adapter = new FakeBotScreenRuntimeAdapter();
+  test("an application launch failure is reported without failing its Bot Desktop or Screen", async () => {
+    const adapter = new FakeBotScreenRuntimeAdapter(undefined, { actionFailureAt: 1 });
     h = await startDaemon(undefined, { botScreenAdapter: adapter });
-    const application = await bot(h, await makeBot(h, "Application outcome"));
-    const compositor = await bot(h, await makeBot(h, "Compositor outcome"));
-    const unaffected = await bot(h, await makeBot(h, "Outcome isolation"));
-    await Promise.all([
-      activateScreen(h, application),
-      activateScreen(h, compositor),
-      activateScreen(h, unaffected),
-    ]);
+    const owner = await bot(h, await makeBot(h, "Application launch failure"));
+    await activateScreen(h, owner);
 
-    const applicationOutcome = adapter.runtimeOutcome(application.surfaceId);
-    const compositorOutcome = adapter.runtimeOutcome(compositor.surfaceId);
-
-    adapter.exitApplication(application.surfaceId);
-    expect((await applicationOutcome).type).toBe("application-exited");
-    await waitForState(h, application, "unavailable");
-    expect(h.svc.screens.status({ botId: application.id, surfaceId: application.surfaceId })).toEqual({
-      state: "failed",
-      failure: "fake Bot Screen application exited",
-    });
-    expect(await waitForState(h, compositor, "ready")).toMatchObject({ surfaceId: compositor.surfaceId });
-    expect(await waitForState(h, unaffected, "ready")).toMatchObject({ surfaceId: unaffected.surfaceId });
-
-    adapter.exitCompositor(compositor.surfaceId);
-    expect((await compositorOutcome).type).toBe("compositor-exited");
-    await waitForState(h, compositor, "unavailable");
-    expect(h.svc.screens.status({ botId: compositor.id, surfaceId: compositor.surfaceId })).toEqual({
-      state: "failed",
-      failure: "fake Bot Screen compositor exited",
-    });
-    expect(await waitForState(h, unaffected, "ready")).toMatchObject({ surfaceId: unaffected.surfaceId });
-    expect(
-      (await fetch(
-        `${h.baseUrl}/api/computer/snapshot?botId=${encodeURIComponent(unaffected.id)}&surfaceId=${encodeURIComponent(unaffected.surfaceId)}`,
-      )).status,
-    ).toBe(200);
+    await expect(h.svc.screens.act({ botId: owner.id, surfaceId: owner.surfaceId }, {
+      name: "open_app",
+      args: { app: "missing.desktop" },
+    })).rejects.toThrow("fake application launch failed");
+    expect(h.svc.screens.status({ botId: owner.id, surfaceId: owner.surfaceId })).toEqual({ state: "ready" });
+    expect((await fetch(
+      `${h.baseUrl}/api/computer/snapshot?botId=${encodeURIComponent(owner.id)}&surfaceId=${encodeURIComponent(owner.surfaceId)}`,
+    )).status).toBe(200);
   });
 
-  test("a persistent Bot Desktop crash fails its Screen and reprovisions a fresh runtime generation", async () => {
+  test("application exit stays ready while Desktop, helper, worker, and compositor failures remain Surface-scoped", async () => {
     const adapter = new FakeBotScreenRuntimeAdapter();
     h = await startDaemon(undefined, { botScreenAdapter: adapter });
-    const owner = await bot(h, await makeBot(h, "Bot Desktop lifecycle"));
-    await activateScreen(h, owner);
-    const firstOutcome = adapter.runtimeOutcome(owner.surfaceId);
+    const affected = await bot(h, await makeBot(h, "Component outcomes"));
+    const unaffected = await bot(h, await makeBot(h, "Outcome isolation"));
+    await Promise.all([activateScreen(h, affected), activateScreen(h, unaffected)]);
 
-    adapter.exitDesktop(owner.surfaceId);
-    expect((await firstOutcome).type).toBe("desktop-exited");
-    await waitForState(h, owner, "unavailable");
-    expect(h.svc.screens.status({ botId: owner.id, surfaceId: owner.surfaceId })).toEqual({
-      state: "failed",
-      failure: "fake Bot Desktop exited",
+    adapter.exitApplication(affected.surfaceId);
+    expect(h.svc.screens.status({ botId: affected.id, surfaceId: affected.surfaceId })).toEqual({
+      state: "ready",
     });
+    expect(adapter.applicationExits).toEqual([{ surfaceId: affected.surfaceId, runtimeGeneration: 1 }]);
+    expect((await fetch(
+      `${h.baseUrl}/api/computer/snapshot?botId=${encodeURIComponent(affected.id)}&surfaceId=${encodeURIComponent(affected.surfaceId)}`,
+    )).status).toBe(200);
+
+    const failures = [
+      {
+        type: "desktop-exited" as const,
+        fail: () => adapter.exitDesktop(affected.surfaceId),
+        message: "Bot Desktop failed: fake Bot Desktop exited",
+      },
+      {
+        type: "input-helper-exited" as const,
+        fail: () => adapter.exitInputHelper(affected.surfaceId),
+        message: "Bot Screen input helper failed: fake Bot Screen input helper exited",
+      },
+      {
+        type: "computer-worker-exited" as const,
+        fail: () => adapter.exitComputerWorker(affected.surfaceId),
+        message: "Bot Screen computer worker failed: fake Bot Screen computer worker exited",
+      },
+      {
+        type: "compositor-exited" as const,
+        fail: () => adapter.exitCompositor(affected.surfaceId),
+        message: "Bot Screen compositor failed: fake Bot Screen compositor exited",
+      },
+    ];
+
+    let generation = 1;
+    for (const failure of failures) {
+      const staleSource = await h.svc.screens.projectionSource({
+        botId: affected.id,
+        surfaceId: affected.surfaceId,
+      });
+      const staleStream = await staleSource!.openCaptureStream();
+      const outcome = adapter.runtimeOutcome(affected.surfaceId);
+      failure.fail();
+      expect((await outcome).type).toBe(failure.type);
+      await waitForState(h, affected, "unavailable");
+      expect(h.svc.screens.status({ botId: affected.id, surfaceId: affected.surfaceId })).toEqual({
+        state: "failed",
+        failure: failure.message,
+      });
+      await expect(staleSource!.capture()).rejects.toThrow("stale");
+      await expect(staleStream.next()).rejects.toThrow();
+      expect(await waitForState(h, unaffected, "ready")).toMatchObject({ surfaceId: unaffected.surfaceId });
+      expect((await fetch(
+        `${h.baseUrl}/api/computer/snapshot?botId=${encodeURIComponent(unaffected.id)}&surfaceId=${encodeURIComponent(unaffected.surfaceId)}`,
+      )).status).toBe(200);
+
+      await activateScreen(h, affected);
+      generation += 1;
+      const replacement = await h.svc.screens.projectionSource({
+        botId: affected.id,
+        surfaceId: affected.surfaceId,
+      });
+      expect(replacement).toMatchObject({
+        surfaceId: affected.surfaceId,
+        runtimeGeneration: generation,
+        geometryGeneration: 1,
+      });
+      expect(adapter.running(affected.surfaceId)).toEqual({ generation });
+    }
+    expect(adapter.running(unaffected.surfaceId)).toEqual({ generation: 1 });
+  });
+
+  test("reprovision invalidates queued input, controller authority, geometry, streams, and worker generation", async () => {
+    const adapter = new FakeBotScreenRuntimeAdapter();
+    h = await startDaemon(undefined, { botScreenAdapter: adapter });
+    const owner = await bot(h, await makeBot(h, "Stale runtime bindings"));
+    await activateScreen(h, owner);
+    const stale = await h.svc.screens.projectionSource({ botId: owner.id, surfaceId: owner.surfaceId });
+    const stream = await stale!.openCaptureStream();
+    await stale!.setInputAuthority(7);
+    adapter.blockInputs();
+    let inFlight!: Promise<void>;
+    let queued!: Promise<void>;
+    try {
+      inFlight = stale!.input({
+        surfaceId: stale!.surfaceId,
+        runtimeGeneration: stale!.runtimeGeneration,
+        geometryGeneration: stale!.geometryGeneration,
+        controllerEpoch: 7,
+        sequence: 1,
+        type: "motion",
+        x: 10,
+        y: 20,
+      });
+      void inFlight.catch(() => {});
+      await adapter.waitForInputAttempts(1);
+      queued = stale!.input({
+        surfaceId: stale!.surfaceId,
+        runtimeGeneration: stale!.runtimeGeneration,
+        geometryGeneration: stale!.geometryGeneration,
+        controllerEpoch: 7,
+        sequence: 2,
+        type: "key",
+        keyCode: 30,
+        state: "pressed",
+      });
+      void queued.catch(() => {});
+      adapter.exitDesktop(owner.surfaceId);
+      await waitForState(h, owner, "unavailable");
+    } finally {
+      adapter.releaseInputs();
+    }
+    await expect(inFlight).rejects.toThrow("stopped");
+    await expect(queued).rejects.toThrow("stale");
+    await expect(stream.next()).rejects.toThrow();
+    await expect(stale!.setInputAuthority(8)).rejects.toThrow("stale");
 
     await activateScreen(h, owner);
-    expect(adapter.running(owner.surfaceId)).toEqual({ generation: 2 });
-    expect(await waitForState(h, owner, "ready")).toMatchObject({ surfaceId: owner.surfaceId });
+    const replacement = await h.svc.screens.projectionSource({ botId: owner.id, surfaceId: owner.surfaceId });
+    expect(replacement).toMatchObject({
+      surfaceId: owner.surfaceId,
+      runtimeGeneration: 2,
+      geometryGeneration: 1,
+    });
+    await replacement!.setInputAuthority(1);
+    await replacement!.input({
+      surfaceId: replacement!.surfaceId,
+      runtimeGeneration: replacement!.runtimeGeneration,
+      geometryGeneration: replacement!.geometryGeneration,
+      controllerEpoch: 1,
+      sequence: 1,
+      type: "key",
+      keyCode: 30,
+      state: "released",
+    });
+    expect(adapter.inputEvents.at(-1)).toMatchObject({
+      surfaceId: owner.surfaceId,
+      runtimeGeneration: 2,
+    });
+  });
+
+  test("repeated provision and deletion cycles allocate fresh Surfaces and release every runtime binding", async () => {
+    const adapter = new FakeBotScreenRuntimeAdapter();
+    h = await startDaemon(undefined, { botScreenAdapter: adapter, botScreenCapacity: 1 });
+    const surfaceIds = new Set<string>();
+
+    for (let cycle = 0; cycle < 5; cycle += 1) {
+      const owner = await bot(h, await makeBot(h, `Lifecycle cycle ${cycle}`));
+      expect(surfaceIds.has(owner.surfaceId)).toBeFalse();
+      surfaceIds.add(owner.surfaceId);
+      await activateScreen(h, owner);
+      const source = await h.svc.screens.projectionSource({ botId: owner.id, surfaceId: owner.surfaceId });
+      const stream = await source!.openCaptureStream();
+      await stream.next();
+
+      const result = await api<DeleteBotResultDto>(h, "DELETE", `/api/bots/${owner.id}`, {});
+      expect(result).toMatchObject({ status: "deleted", removed: { surface: true } });
+      expect(adapter.running(owner.surfaceId)).toBeUndefined();
+      expect(adapter.destroyed.has(owner.surfaceId)).toBeTrue();
+      await expect(source!.capture()).rejects.toThrow("unknown Computer Surface");
+    }
+
+    expect(surfaceIds.size).toBe(5);
+    expect(adapter.starts).toHaveLength(5);
+    expect(adapter.stops).toHaveLength(5);
+    expect(adapter.destroyed.size).toBe(5);
+    expect(adapter.captureStreamsOpened).toBe(5);
+    expect(adapter.captureStreamsClosed).toBe(5);
+    expect(h.svc.db.query(`SELECT COUNT(*) AS count FROM bot_surfaces`).get()).toEqual({ count: 0 });
   });
 
   test("rejects a Bot Screen before provisioning when measured capacity is full", async () => {

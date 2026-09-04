@@ -711,8 +711,8 @@ export class HyprlandBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter 
           error: new Error(`nested Hyprland exited with status ${status}`),
         })),
         applicationProcess.exited.then((status) => ({
-          type: "application-exited",
-          error: new Error(`Bot Screen application exited with status ${status}`),
+          type: "desktop-exited",
+          error: new Error(`legacy Bot Screen desktop application exited with status ${status}`),
         })),
         startedComputerWorker.exited.then((error) => ({ type: "computer-worker-exited", error })),
         startedVirtualInput.exited.then((error) => ({ type: "input-helper-exited", error })),
@@ -995,13 +995,13 @@ class ProcessLineReader {
   }
 }
 
-async function terminateCage(child: CageProcess): Promise<void> {
-  if (child.exitCode !== null) return;
+async function terminateCageProcess(child: CageProcess): Promise<void> {
   try {
     process.kill(-child.pid, "SIGTERM");
   } catch {
-    child.kill("SIGTERM");
+    if (child.exitCode === null) child.kill("SIGTERM");
   }
+  if (child.exitCode !== null) return;
   const stopped = await Promise.race([
     child.exited.then(() => true),
     Bun.sleep(3_000).then(() => false),
@@ -1016,8 +1016,9 @@ async function terminateCage(child: CageProcess): Promise<void> {
 }
 
 /**
- * Pure-headless Cage adapter. Cage owns only the persistent neutral Bot Desktop;
- * real applications are launched by the Surface-bound computer worker.
+ * Pure-headless Cage adapter. A dormant Cage child keeps compositor lifetime
+ * independent from the separately supervised persistent Bot Desktop; real
+ * applications remain descendants of the Surface-bound computer worker.
  */
 export class CageBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
   #units: ApplicationUnits;
@@ -1091,9 +1092,7 @@ export class CageBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
       "-d",
       "--",
       botDesktop,
-      String(provision.logicalWidth),
-      String(provision.logicalHeight),
-      String(provision.scale),
+      "--host",
     ], {
       env: this.#units.launcherEnvironment(bootstrapEnv),
       stdin: "ignore",
@@ -1101,7 +1100,7 @@ export class CageBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
       stderr: "pipe",
       detached: true,
     });
-    const desktopReadiness = new ProcessLineReader(cageProcess.stdout);
+    let desktopProcess: CageProcess | undefined;
     let computerWorker: SurfaceComputerWorker | undefined;
     let virtualInput: WaylandVirtualInput | undefined;
     try {
@@ -1135,9 +1134,24 @@ export class CageBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
           `Cage output configuration failed${configured.stderr.trim() === "" ? "" : `: ${configured.stderr.trim()}`}`,
         );
       }
+      const startedDesktop = Bun.spawn([
+        ...this.#units.command(provision.surfaceId, provision.generation, "application", childEnv),
+        botDesktop,
+        String(provision.logicalWidth),
+        String(provision.logicalHeight),
+        String(provision.scale),
+      ], {
+        env: this.#units.launcherEnvironment(childEnv),
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+        detached: true,
+      });
+      desktopProcess = startedDesktop;
+      const desktopReadiness = new ProcessLineReader(startedDesktop.stdout);
       await this.#waitForDesktop(
         desktopReadiness,
-        cageProcess,
+        startedDesktop,
         provision.logicalWidth,
         provision.logicalHeight,
       );
@@ -1164,7 +1178,11 @@ export class CageBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
       const outcome = Promise.race<BotScreenRuntimeOutcome>([
         cageProcess.exited.then((status) => ({
           type: "compositor-exited",
-          error: new Error(`Cage or Bot Desktop exited with status ${status}`),
+          error: new Error(`Cage compositor exited with status ${status}`),
+        })),
+        startedDesktop.exited.then((status) => ({
+          type: "desktop-exited",
+          error: new Error(`Bot Desktop exited with status ${status}`),
         })),
         startedComputerWorker.exited.then((error) => ({ type: "computer-worker-exited", error })),
         startedVirtualInput.exited.then((error) => ({ type: "input-helper-exited", error })),
@@ -1177,10 +1195,12 @@ export class CageBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
       const captureStreamStarts = new Set<Promise<void>>();
       const capture = async (): Promise<BotScreenCapture> => {
         if (stopped || cageProcess.exitCode !== null) throw new Error("Cage Bot Screen compositor is not running");
+        if (startedDesktop.exitCode !== null) throw new Error("Bot Desktop is not running");
         return this.#capture(grim, childEnv, outputName, videoWidth, videoHeight);
       };
       const openCaptureStream = async (): Promise<BotScreenCaptureStream> => {
         if (stopped || cageProcess.exitCode !== null) throw new Error("Cage Bot Screen compositor is not running");
+        if (startedDesktop.exitCode !== null) throw new Error("Bot Desktop is not running");
         const opening = Promise.withResolvers<void>();
         captureStreamStarts.add(opening.promise);
         try {
@@ -1274,7 +1294,8 @@ export class CageBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
             await Promise.allSettled([...captureStreams].map((stream) => stream.close()));
             await Promise.allSettled([
               startedComputerWorker.stop(),
-              terminateCage(cageProcess),
+              terminateCageProcess(startedDesktop),
+              terminateCageProcess(cageProcess),
             ]);
             await this.#units.stop(provision.surfaceId, provision.generation);
             rmSync(runtimeSurfaceDir, { recursive: true, force: true });
@@ -1291,7 +1312,8 @@ export class CageBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     } catch (error) {
       await computerWorker?.stop().catch(() => {});
       await virtualInput?.stop().catch(() => {});
-      await terminateCage(cageProcess).catch(() => {});
+      if (desktopProcess !== undefined) await terminateCageProcess(desktopProcess).catch(() => {});
+      await terminateCageProcess(cageProcess).catch(() => {});
       await this.#units.stop(provision.surfaceId, provision.generation);
       rmSync(runtimeSurfaceDir, { recursive: true, force: true });
       throw error;
@@ -1328,7 +1350,7 @@ export class CageBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
 
   async #waitForDesktop(
     readiness: ProcessLineReader,
-    cageProcess: CageProcess,
+    desktopProcess: CageProcess,
     width: number,
     height: number,
   ): Promise<void> {
@@ -1337,8 +1359,8 @@ export class CageBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     while (Date.now() < deadline) {
       const line = await Promise.race([
         readiness.next(),
-        cageProcess.exited.then(() => {
-          throw new Error("Cage or Bot Desktop exited during startup");
+        desktopProcess.exited.then(() => {
+          throw new Error("Bot Desktop exited during startup");
         }),
         Bun.sleep(Math.max(1, deadline - Date.now())).then(() => {
           throw new Error("Bot Desktop did not commit the configured output surface");

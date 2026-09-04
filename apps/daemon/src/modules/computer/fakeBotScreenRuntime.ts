@@ -22,6 +22,7 @@ interface FakeBotScreenRuntimeOptions {
   pointerDelayMs?: number;
   inputFailureAt?: number;
   releaseDelayMs?: number;
+  actionFailureAt?: number;
 }
 
 interface FakeRuntimeRecord {
@@ -37,6 +38,7 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
   readonly starts: BotScreenProvision[] = [];
   readonly stops: Array<{ surfaceId: string; runtimeGeneration: number }> = [];
   readonly destroyed = new Set<string>();
+  readonly applicationExits: Array<{ surfaceId: string; runtimeGeneration: number }> = [];
   captureStreamsOpened = 0;
   captureStreamsClosed = 0;
   captureRequestsInFlight = 0;
@@ -57,6 +59,9 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
   #actionsStarted = 0;
   #actionWaiters: Array<{ count: number; resolve: () => void }> = [];
   #actionGate = Promise.withResolvers<void>();
+  #blockInputs = false;
+  #inputGate = Promise.withResolvers<void>();
+  #inputAttemptWaiters: Array<{ count: number; resolve: () => void }> = [];
 
   constructor(
     private readonly failure?: string,
@@ -78,6 +83,23 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
   releaseActions(): void {
     this.#blockActions = false;
     this.#actionGate.resolve();
+  }
+
+  blockInputs(): void {
+    this.#blockInputs = true;
+    this.#inputGate = Promise.withResolvers<void>();
+  }
+
+  waitForInputAttempts(count: number): Promise<void> {
+    if (this.#inputAttempts >= count) return Promise.resolve();
+    const { promise, resolve } = Promise.withResolvers<void>();
+    this.#inputAttemptWaiters.push({ count, resolve });
+    return promise;
+  }
+
+  releaseInputs(): void {
+    this.#blockInputs = false;
+    this.#inputGate.resolve();
   }
 
 
@@ -134,25 +156,41 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
   }
 
   crash(surfaceId: string, message: string): void {
-    this.#finish(surfaceId, { type: "computer-worker-exited", error: new Error(message) });
+    this.exitComputerWorker(surfaceId, message);
   }
 
-  exitApplication(surfaceId: string, message = "fake Bot Screen application exited"): void {
-    this.#finish(surfaceId, { type: "application-exited", error: new Error(message) });
+  exitApplication(surfaceId: string): void {
+    const record = this.#record(surfaceId);
+    this.applicationExits.push({
+      surfaceId,
+      runtimeGeneration: record.provision.generation,
+    });
   }
 
   exitDesktop(surfaceId: string, message = "fake Bot Desktop exited"): void {
     this.#finish(surfaceId, { type: "desktop-exited", error: new Error(message) });
   }
 
+  exitInputHelper(surfaceId: string, message = "fake Bot Screen input helper exited"): void {
+    this.#finish(surfaceId, { type: "input-helper-exited", error: new Error(message) });
+  }
+
+  exitComputerWorker(surfaceId: string, message = "fake Bot Screen computer worker exited"): void {
+    this.#finish(surfaceId, { type: "computer-worker-exited", error: new Error(message) });
+  }
+
   exitCompositor(surfaceId: string, message = "fake Bot Screen compositor exited"): void {
     this.#finish(surfaceId, { type: "compositor-exited", error: new Error(message) });
   }
 
-  #finish(surfaceId: string, outcome: BotScreenRuntimeOutcome): void {
+  #record(surfaceId: string): FakeRuntimeRecord {
     const record = this.#runtimes.get(surfaceId);
     if (record === undefined) throw new Error("fake Bot Screen is not running");
-    record.finish(outcome);
+    return record;
+  }
+
+  #finish(surfaceId: string, outcome: BotScreenRuntimeOutcome): void {
+    this.#record(surfaceId).finish(outcome);
   }
 
   rejectReconciliation(surfaceId: string): void {
@@ -258,6 +296,9 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
           if (this.#actionsStarted >= waiter.count) waiter.resolve();
           else this.#actionWaiters.push(waiter);
         }
+        if (this.options.actionFailureAt === actionCount) {
+          throw new Error("fake application launch failed");
+        }
         if (this.#blockActions) await this.#actionGate.promise;
         return {
           text: `fake-${action.name}#${actionCount}`,
@@ -277,6 +318,10 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
       },
       input: async (event): Promise<void> => {
         this.#inputAttempts += 1;
+        for (const waiter of this.#inputAttemptWaiters.splice(0)) {
+          if (this.#inputAttempts >= waiter.count) waiter.resolve();
+          else this.#inputAttemptWaiters.push(waiter);
+        }
         if (
           event.surfaceId !== provision.surfaceId
           || event.runtimeGeneration !== provision.generation
@@ -290,6 +335,7 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
         if (this.options.inputFailureAt === this.#inputAttempts) {
           throw new Error("fake Bot Screen input helper failed");
         }
+        if (this.#blockInputs) await this.#inputGate.promise;
         if (stopped) throw new Error("fake Bot Screen is stopped");
         lastInputSequence = event.sequence;
         if (this.options.pointerDelayMs !== undefined && event.type === "motion") {

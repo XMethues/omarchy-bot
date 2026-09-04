@@ -153,6 +153,7 @@ export async function main(options: MainOptions = {}): Promise<{
     threads,
     screens,
     cfg.botDeletionTerminalTimeoutMs,
+    projections,
   );
   await screens.recover();
 

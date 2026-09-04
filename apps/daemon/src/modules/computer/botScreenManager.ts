@@ -56,6 +56,7 @@ export class BotScreenInputRejectedError extends Error {
 }
 
 
+
 export interface BotScreenProvision {
   surfaceId: SurfaceId;
   generation: number;
@@ -89,7 +90,6 @@ export interface BotScreenRuntimeReadiness {
 export type BotScreenRuntimeOutcome =
   | { type: "compositor-exited"; error: Error }
   | { type: "desktop-exited"; error: Error }
-  | { type: "application-exited"; error: Error }
   | { type: "input-helper-exited"; error: Error }
   | { type: "computer-worker-exited"; error: Error };
 
@@ -389,14 +389,17 @@ export class BotScreenManager {
       if (runtime === undefined || entry?.runtime !== runtime) {
         throw new Error(this.status(owner).failure ?? "Bot Screen is unavailable");
       }
-      return this.#invoke(owner.surfaceId, entry, () => runtime.act(action, inputAuthority));
+      const result = await runtime.act(action, inputAuthority);
+      if (this.#entries.get(owner.surfaceId) !== entry || entry.runtime !== runtime) {
+        throw new Error(this.status(owner).failure ?? "Bot Screen is unavailable");
+      }
+      return result;
     });
   }
 
   async ensureReady(owner: ComputerSurfaceOwner): Promise<boolean> {
     return (await this.#readyRuntime(owner)) !== undefined;
   }
-
   async destroy(surfaceId: SurfaceId): Promise<void> {
     await this.#stop(surfaceId);
     try {
@@ -480,7 +483,9 @@ export class BotScreenManager {
     const entry: RuntimeEntry = { provision, start, runtime };
     this.#entries.set(surfaceId, entry);
     this.#transition(surfaceId, "ready", null);
-    void runtime.outcome.then((outcome) => this.#failRuntime(surfaceId, entry, outcome.error));
+    void runtime.outcome.then((outcome) =>
+      this.#failRuntime(surfaceId, entry, this.#outcomeFailure(outcome))
+    );
   }
 
   async #stop(surfaceId: SurfaceId): Promise<void> {
@@ -628,6 +633,16 @@ export class BotScreenManager {
     } finally {
       if (this.#operations.get(surfaceId) === settled) this.#operations.delete(surfaceId);
     }
+  }
+
+  #outcomeFailure(outcome: BotScreenRuntimeOutcome): Error {
+    const component = {
+      "compositor-exited": "Bot Screen compositor",
+      "desktop-exited": "Bot Desktop",
+      "input-helper-exited": "Bot Screen input helper",
+      "computer-worker-exited": "Bot Screen computer worker",
+    }[outcome.type];
+    return new Error(`${component} failed: ${this.#failure(outcome.error)}`);
   }
 
   #failure(error: unknown): string {

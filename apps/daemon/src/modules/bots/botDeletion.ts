@@ -31,6 +31,10 @@ interface BotThreadTurns {
   activeTurnIdsForBot(botId: string): string[];
 }
 
+
+interface BotScreenProjectionCleanup {
+  closeSurface(surfaceId: SurfaceId): Promise<void>;
+}
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -51,6 +55,7 @@ export class BotDeletionService {
     private readonly threads: BotThreadTurns,
     private readonly screens: BotScreenManager,
     private readonly terminalWaitTimeoutMs = 30_000,
+    private readonly projections?: BotScreenProjectionCleanup,
   ) {}
 
   async delete(botId: string): Promise<DeleteBotResultDto> {
@@ -126,6 +131,11 @@ export class BotDeletionService {
     let computerArtifactsRemoved = 0;
     const failures: DeleteBotFailureDto[] = [];
 
+    try {
+      await this.projections?.closeSurface(bot.surface_id as SurfaceId);
+    } catch (error) {
+      failures.push({ stage: "surface", resource: bot.surface_id, message: errorMessage(error) });
+    }
     try {
       await this.screens.destroy(bot.surface_id as SurfaceId);
     } catch (error) {

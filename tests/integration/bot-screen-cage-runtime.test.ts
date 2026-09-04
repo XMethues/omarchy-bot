@@ -28,6 +28,7 @@ test("Cage runtime becomes ready only with explicit private geometry, Desktop, c
   const profileRoot = path.join(root, "profiles");
   mkdirSync(bin);
   const outputInvocation = path.join(root, "wlr-randr-invocation");
+  const desktopPid = path.join(root, "bot-desktop-pid");
   const png = path.join(root, "screen.png");
   writeFileSync(
     png,
@@ -47,7 +48,14 @@ const status = await child.exited;
 server.stop(true);
 process.exit(status);
 `);
-  const desktop = executable(bin, "bot-desktop", "#!/bin/sh\nprintf 'READY %s %s\\n' \"$1\" \"$2\"\nwhile :; do sleep 60; done\n");
+  const desktop = executable(bin, "bot-desktop", [
+    "#!/bin/sh",
+    "if [ \"$1\" = \"--host\" ]; then while :; do sleep 60; done; fi",
+    `printf '%s' "$$" > ${JSON.stringify(desktopPid)}`,
+    "printf 'READY %s %s\\n' \"$1\" \"$2\"",
+    "while :; do sleep 60; done",
+    "",
+  ].join("\n"));
   const wlrRandr = executable(bin, "wlr-randr", `#!/bin/sh\nprintf '%s|%s|%s|%s' "$XDG_RUNTIME_DIR" "$WAYLAND_DISPLAY" "$XDG_CONFIG_HOME" "$*" > ${JSON.stringify(outputInvocation)}\n`);
   const grim = executable(bin, "grim", `#!/bin/sh\ncat ${JSON.stringify(png)}\n`);
   const input = executable(bin, "input", [
@@ -160,6 +168,12 @@ process.exit(status);
   await runtime.input({ ...context, sequence: 4, type: "key", keyCode: 28, state: "pressed" });
   await runtime.input({ ...context, sequence: 5, type: "paste", text: "Cage paste" });
   await runtime.releaseInput(1);
+  const outcome = runtime.outcome;
+  process.kill(Number(readFileSync(desktopPid, "utf8")), "SIGTERM");
+  await expect(outcome).resolves.toMatchObject({
+    type: "desktop-exited",
+    error: expect.objectContaining({ message: expect.stringContaining("Bot Desktop exited") }),
+  });
 
   await runtime.stop();
   expect(workerStopped).toBeTrue();
