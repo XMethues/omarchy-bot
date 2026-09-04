@@ -122,6 +122,58 @@ Every row passed an independent operational gate: a sustained static-preview pha
 
 The four-Screen 1080p row therefore justifies the checked-in default-capacity approval of four; the fifth admission fails explicitly without a partial runtime or impact on active Screens. Eight 1080p Screens are not supported, while the selectable 720p profile passed at eight. `nvidia-smi` exposed whole-GPU utilization and memory totals but did not expose attributable graphics-process VRAM for these children, so the report records per-Screen GPU and VRAM as unavailable rather than inferring them.
 
+## Transport and lightweight-compositor experiments
+
+Follow-up experiments on 2026-09-04 used the same live 1920×1080 child Wayland socket and the production browser projection harness. Reproducible probe code is committed on the throwaway branch `experiment/bot-screen-transports` at `c7d28bf`; none of the prototype transport switches are merged into production.
+
+### Frame transport A/B
+
+Thirty interleaved direct captures produced:
+
+| Fixture | Format | Capture p50 / p95 | Mean frame size |
+|---|---|---:|---:|
+| Static terminal | PNG | 45.94 / 52.51 ms | 12.88 KiB |
+| Static terminal | JPEG q80 | 15.76 / 20.01 ms | 70.89 KiB |
+| Static terminal | JPEG q60 | 17.68 / 25.44 ms | 68.58 KiB |
+| Rapidly changing terminal | PNG | 55.85 / 68.89 ms | 112.68 KiB |
+| Rapidly changing terminal | JPEG q80 | 20.29 / 36.18 ms | 157.26 KiB |
+| Rapidly changing terminal | JPEG q60 | 22.35 / 33.01 ms | 123.70 KiB |
+
+Against the static PNG reference, JPEG q80 and q60 measured SSIM 0.999527 and 0.999213 respectively. JPEG made `grim` capture/encode roughly 2.5–3× faster, but it did not reduce terminal-frame bytes: PNG remained dramatically smaller while static and JPEG q60 was about 10% larger under the changing-text fixture.
+
+A matched one-Screen, five-second, final-browser DataChannel run compared PNG with JPEG q60:
+
+| Format | Displayed FPS | Input-to-visible p50 / p95 | Capture-to-browser p50 / p95 | Drops |
+|---|---:|---:|---:|---:|
+| PNG | 16.17 | 56.1 / 67.6 ms | 22 / 31 ms | 0 |
+| JPEG q60 | 16.13 | 36.7 / 49.0 ms | 22 / 27 ms | 0 |
+
+Both rows passed the operational gate. The harness commands intentionally selected only the one-Screen matrix row, so each test process exited at the separate release gate because the approved four-Screen row was absent; `/tmp/codec-png.json` and `/tmp/codec-jpeg60.json` were written before that expected gate failure.
+
+The H.264 probe kept the existing WebRTC peer but sent Annex-B H.264 through a `node-datachannel` video track. A long-lived `ffmpeg`/libx264 process consumed 10 FPS PPM captures from the child socket. Under the changing-text fixture it sent 112 frames with zero send failures; Chromium rendered 111 frames at 9.94 FPS and 1920×1080. PPM capture p50/p95 was 18.04/31.46 ms. Encoded access units averaged 61,673 bytes (p50 50,164; p95 161,483), about half the per-frame bytes of PNG/JPEG in that fixture. The probe processes used about 23.5% of one CPU core combined and 221 MiB RSS during the sample. First frame arrived 443 ms after page startup and signaling; this is startup, not steady-state input-to-visible latency.
+
+Decision: keep the existing WebRTC signaling, control channel, and input channel. Do not require frame payloads to remain on a DataChannel. Keep lossless PNG for low-frequency static previews and snapshots. JPEG q60 is a viable low-risk latency switch but is not a good global default for terminal-heavy screens because it increases bytes. Treat a long-lived H.264 media track as the preferred expanded-control candidate, conditional on the production 4-Screen capacity and steady-state input-to-visible gates.
+
+### wayvnc against the child socket
+
+A locally extracted `wayvnc` 0.10.1 plus `neatvnc` 1.0.1 and `aml` 1.0.0 connected directly to the existing child `WAYLAND_DISPLAY`, selected output `BOT-9E7C343CBA25`, and listened only on `127.0.0.1:5901`. A minimal RFB 3.8 client completed its unauthenticated loopback handshake in 0.85 ms, received two 1920×1080 raw frames in 15.81 ms and 8.60 ms, and injected `echo WAYVNC_CHILD_OK`; the second captured frame visibly contained the command and output. Each requested raw frame was 8,294,400 bytes because the probe deliberately selected the uncompressed encoding, so these numbers do not estimate a normal VNC client's bandwidth.
+
+Decision: wayvnc is compatible with the isolated child socket and is a useful diagnostic/reference sidecar. It does not replace the primary path: adopting it would add a second input protocol, a VNC browser client, and a separate authentication/TLS boundary while discarding the working Broker and WebRTC control semantics.
+
+### cage and labwc sidecars
+
+Portable Cage 0.3.1 and labwc 0.20.2 builds, both on wlroots 0.20.2, launched with the pure headless backend and pixman renderer. Both rendered Alacritty, supported `grim`, and accepted the existing `omarchy-bot-wayland-input` helper: helper readiness, authority, and paste RPCs returned `READY`, `OK 1`, and `OK 2`, with the pasted text visible in the resulting captures.
+
+| Compositor | Compositor PSS | PNG capture p50 / p95 | Default presentation |
+|---|---:|---:|---|
+| Nested Hyprland 0.56.2 | 121.11 MiB | 45.94 / 52.51 ms at 1080p | tiled/full output |
+| Cage 0.3.1 | 8.52 MiB | 19.36 / 20.84 ms at 720p | application fills output |
+| labwc 0.20.2 | 17.22 MiB | 20.15 / 21.40 ms at 720p | 800×600 managed window |
+
+Idle CPU rounded to 0.0% for all three over a five-second `/proc` sample. The capture timings are not resolution-normalized, so they prove compatibility rather than a same-pixel performance win. Cage reached compositor readiness in 9 ms and created the Alacritty surface by 154 ms. Its kiosk semantics fit a single-application Bot Desktop better than labwc's general window-management policy.
+
+Decision: keep nested Hyprland as production until the runtime's `hyprctl`-specific provisioning, output geometry, application readiness, crash recovery, and 1080p lifecycle tests have a replacement. Promote Cage—not labwc—to the next compositor prototype because its full-output behavior, existing-helper compatibility, and roughly 14× lower compositor PSS offer the clearest payoff. This is a candidate for the lightweight Bot Desktop, not a sidecar to run alongside Hyprland in production.
+
 ## Unsupported topologies and blockers
 
 - **No:** multiple `uwsm start`/full Omarchy sessions for the same user. systemd and UWSM activation state are per user, and Omarchy autostart writes compositor variables globally.
