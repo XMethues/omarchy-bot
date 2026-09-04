@@ -41,6 +41,16 @@ export interface ApiError extends Error {
   body: unknown;
 }
 
+export function randomUuid(): string {
+  if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
+
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6]! & 0x0f) | 0x40;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
 /** Shared by apps/web today and the Tauri client after the MVP. */
 export class ApiClient {
   private readonly base: string;
@@ -60,7 +70,7 @@ export class ApiClient {
       ...init,
       headers: {
         "content-type": "application/json",
-        "x-command-id": crypto.randomUUID(),
+        "x-command-id": randomUuid(),
         ...(init?.headers ?? {}),
       },
     });
@@ -123,7 +133,7 @@ export class ApiClient {
   async uploadAvatar(id: string, file: Blob): Promise<BotDto> {
     const res = await this.f(`${this.base}/api/bots/${id}/avatar/upload`, {
       method: "POST",
-      headers: { "content-type": file.type || "application/octet-stream", "x-command-id": crypto.randomUUID() },
+      headers: { "content-type": file.type || "application/octet-stream", "x-command-id": randomUuid() },
       body: file,
     });
     if (!res.ok) {
@@ -175,7 +185,7 @@ export class ApiClient {
       headers: {
         "x-bot-id": botId,
         "x-attachment-draft-token": draftToken,
-        "x-command-id": crypto.randomUUID(),
+        "x-command-id": randomUuid(),
       },
       body: form,
     });

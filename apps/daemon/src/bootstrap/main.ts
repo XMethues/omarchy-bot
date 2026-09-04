@@ -116,6 +116,7 @@ export async function main(options: MainOptions = {}): Promise<{
     (owner) => computer.webControlClaimed(owner),
     (owner) => computer.webControlReleased(owner),
     cfg.botScreenFrameRate,
+    cfg.botScreenWebRtcPort,
   );
   const botDeletions = new BotDeletionService(
     db,
@@ -169,7 +170,7 @@ export async function main(options: MainOptions = {}): Promise<{
   }, 2000);
   statusTimer.unref?.();
 
-  console.log(`omarchy-bot daemon listening on http://127.0.0.1:${http.port}`);
+  console.log(`omarchy-bot daemon listening on http://${cfg.host}:${http.port}`);
 
   let stopping = false;
   const onInterrupt = (): void => void stop();

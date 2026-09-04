@@ -51,6 +51,22 @@ bun run dev
 
 Open <http://127.0.0.1:7322>.
 
+For access from another machine on a trusted LAN, opt in to non-loopback listeners:
+
+```bash
+OMARCHY_BOT_HOST=0.0.0.0 bun run dev
+```
+
+Screen Projection uses multiplexed WebRTC on `7323/UDP` by default. If a host firewall is active, allow that port only from the trusted LAN:
+
+```bash
+sudo ufw allow from <lan-cidr> to any port 7323 proto udp
+```
+
+Set `OMARCHY_BOT_SCREEN_WEBRTC_PORT` to use a different UDP port.
+
+Then open `http://<host-lan-ip>:7322`. This exposes the unauthenticated control API and desktop input on the network; do not use it on an untrusted network.
+
 Useful checks:
 
 ```bash
@@ -64,7 +80,7 @@ bun test tests/conformance/pi.test.ts  # real model calls
 
 Product data is stored under `~/.local/share/omarchy-bot/`; runtime state is under `~/.local/state/omarchy-bot/` and `$XDG_RUNTIME_DIR` where appropriate. Managed attachments, avatar uploads, and Voxtype transcript handoff remain local.
 
-The daemon binds to `127.0.0.1` for the current product. It does not expose Agent runtimes, raw desktop input sockets, or a public network listener.
+The daemon and Vite bind to `127.0.0.1` by default. Setting `OMARCHY_BOT_HOST` opts both listeners into another address, including `0.0.0.0` for trusted-LAN access. Agent runtimes and raw desktop input sockets remain private implementation details.
 
 ## Design sources
 

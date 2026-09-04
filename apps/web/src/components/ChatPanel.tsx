@@ -28,7 +28,7 @@ import { VisuallyHidden } from "@astryxdesign/core/VisuallyHidden";
 import type { AgentDto, AttachmentDto, BotViewDto, DictationDto, DictationResultDto, MessageDto, ThreadDto } from "@omarchy-bot/protocol";
 import { isTerminalTurn } from "@omarchy-bot/domain";
 import { getDelta, subscribeDeltas } from "../lib/live.ts";
-import { api, apiErrorMessage, trimSendText } from "../lib/api.ts";
+import { api, apiErrorMessage, randomUuid, trimSendText } from "../lib/api.ts";
 import { loadDraft, saveDraft, type ConversationDraft } from "../lib/drafts.ts";
 import { insertDictationTranscript } from "../lib/dictation.ts";
 import { WorkingAvatarView } from "./AvatarView.tsx";
@@ -304,7 +304,7 @@ export function ChatPanel({
     if (draftBotId === undefined || files.length === 0) return;
     const origin = { botId: draftBotId, threadId: draftThreadId };
     const storedDraft = loadDraft(origin.botId, origin.threadId);
-    const draftToken = storedDraft.attachmentDraftToken ?? crypto.randomUUID();
+    const draftToken = storedDraft.attachmentDraftToken ?? randomUuid();
     const ownedDraft = { ...storedDraft, attachmentDraftToken: draftToken };
     saveDraft(origin.botId, origin.threadId, ownedDraft);
     setDraft((current) => {
@@ -601,7 +601,7 @@ export function ChatPanel({
       const origin = { botId: bot.id, threadId: originThreadId };
       const body = {
         text: trimmed,
-        clientTag: crypto.randomUUID(),
+        clientTag: randomUuid(),
         ...(attachmentIds.length > 0
           ? { attachmentIds, attachmentDraftToken: draft.attachmentDraftToken }
           : {}),
@@ -652,7 +652,7 @@ export function ChatPanel({
     try {
       const response = await api.sendMessage(thread.id, {
         text: failedTurnMessage,
-        clientTag: crypto.randomUUID(),
+        clientTag: randomUuid(),
       });
       onMessageSent(response.threadId);
     } catch (error) {

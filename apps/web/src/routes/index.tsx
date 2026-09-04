@@ -13,7 +13,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import type { BotViewDto } from "@omarchy-bot/protocol";
-import { api, apiErrorMessage } from "../lib/api.ts";
+import { api, apiErrorMessage, randomUuid } from "../lib/api.ts";
 import { requestDesktopNotificationPermission, startEventPump, type QueryTag } from "../lib/events.ts";
 import { mostRecentlyActiveBot, Sidebar } from "../components/Sidebar.tsx";
 import { clearDraftsByBot, restoreDrafts, takeDraftsByBot } from "../lib/drafts.ts";
@@ -387,8 +387,8 @@ function HomeScreen(): JSX.Element {
               onVoiceAutoSend={async (target, text) => {
                 const response =
                   target.threadId !== undefined
-                    ? await api.sendMessage(target.threadId, { text, clientTag: crypto.randomUUID() })
-                    : await api.sendBotMessage(target.botId, { text, clientTag: crypto.randomUUID() });
+                    ? await api.sendMessage(target.threadId, { text, clientTag: randomUuid() })
+                    : await api.sendBotMessage(target.botId, { text, clientTag: randomUuid() });
                 invalidate("threads");
                 invalidate("bots");
                 invalidate("messages", target.threadId);
@@ -615,11 +615,6 @@ function HomeScreen(): JSX.Element {
           ? { botsError: apiErrorMessage(bots.error, "Bots could not be loaded.") }
           : {})}
         {...(bots.error !== null ? { onRetryBots: () => void bots.refetch() } : {})}
-        agents={agents.data ?? []}
-        {...(agents.isPending ? { agentsLoading: true } : {})}
-        {...(agents.error !== null
-          ? { agentsError: apiErrorMessage(agents.error, "Agent integrations could not be checked.") }
-          : {})}
         dictation={
           dictation.data
           ?? {

@@ -176,7 +176,11 @@ export class ScreenProjectionService {
     private readonly webControlClaimed: (owner: ComputerSurfaceOwner) => void,
     private readonly webControlReleased: (owner: ComputerSurfaceOwner) => void,
     private readonly expandedFrameRate = 15,
+    private readonly webRtcPort = 0,
   ) {
+    if (!Number.isSafeInteger(webRtcPort) || webRtcPort < 0 || webRtcPort > 65_535) {
+      throw new Error("Screen Projection WebRTC port must be an integer from 0 to 65535");
+    }
     if (!Number.isSafeInteger(expandedFrameRate) || expandedFrameRate < 1) {
       throw new Error("expanded Screen Projection frame rate must be a positive integer");
     }
@@ -197,6 +201,10 @@ export class ScreenProjectionService {
       iceServers: [],
       disableAutoNegotiation: true,
       maxMessageSize: MAX_FRAME_BYTES,
+      enableIceUdpMux: true,
+      ...(this.webRtcPort === 0
+        ? {}
+        : { portRangeBegin: this.webRtcPort, portRangeEnd: this.webRtcPort }),
     });
     const session: ProjectionSession = {
       id,

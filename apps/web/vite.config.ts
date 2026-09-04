@@ -17,6 +17,7 @@ export default defineConfig(({ command }) => ({
     },
   ],
   server: {
+    host: process.env.OMARCHY_BOT_HOST ?? "127.0.0.1",
     port: 7322,
     proxy: {
       "/api": {

@@ -71,10 +71,9 @@ function notFound(message: string): Response {
   return json({ error: message }, 404);
 }
 
-
 /**
- * Localhost REST + WS. Mutating commands are accepted -> completed-via-events.
- * Binds 127.0.0.1 only; the browser talks to nothing else.
+ * REST + WS listener. Loopback-only by default; non-loopback binding is an
+ * explicit deployment choice because the control API is unauthenticated.
  */
 export function startHttp(svc: DaemonServices): { stop: () => Promise<void>; port: number } {
   const route = async (req: Request): Promise<Response> => {
@@ -202,7 +201,7 @@ export function startHttp(svc: DaemonServices): { stop: () => Promise<void>; por
 
   const server = Bun.serve<WsData>({
     port: svc.cfg.port,
-    hostname: "127.0.0.1",
+    hostname: svc.cfg.host,
     fetch: handle,
     websocket: {
       open(_ws) {},

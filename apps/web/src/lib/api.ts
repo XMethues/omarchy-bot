@@ -1,4 +1,5 @@
-import { ApiClient } from "@omarchy-bot/api-client";
+import { ApiClient, randomUuid } from "@omarchy-bot/api-client";
+export { randomUuid };
 
 /**
  * The browser talks to the daemon it was served from — no hardcoded origin.

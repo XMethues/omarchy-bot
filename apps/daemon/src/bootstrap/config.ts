@@ -23,6 +23,8 @@ export interface Config {
   statusPath: string;
   /** Voxtype binary override (defaults to `voxtype` on PATH). */
   voxtypeBin?: string;
+  /** HTTP listener address. Non-loopback values expose unauthenticated control APIs. */
+  host: string;
   port: number;
   turnTimeoutMs: number;
   /** Maximum time deletion waits for a cancelled Turn to report a terminal state. */
@@ -30,6 +32,8 @@ export interface Config {
   botScreenCapacity: number;
   botScreenProfile: "1080p" | "720p";
   botScreenLogicalWidth: number;
+  /** Single UDP port used by multiplexed WebRTC Screen Projection peers. */
+  botScreenWebRtcPort: number;
   botScreenLogicalHeight: number;
   botScreenFrameRate: number;
 }
@@ -76,10 +80,12 @@ export function loadConfig(): Config {
     conformanceDir: path.join(dataDir, "conformance"),
     statusPath: path.join(stateDir, "status.json"),
     ...(voxtypeBin !== undefined ? { voxtypeBin } : {}),
+    host: process.env.OMARCHY_BOT_HOST ?? "127.0.0.1",
     port: Number(process.env.OMARCHY_BOT_PORT ?? 7321),
     turnTimeoutMs: Number(process.env.OMARCHY_BOT_TURN_TIMEOUT_MS ?? 600_000),
     botDeletionTerminalTimeoutMs: Number(process.env.OMARCHY_BOT_DELETION_TERMINAL_TIMEOUT_MS ?? 30_000),
     botScreenCapacity: positiveInteger("OMARCHY_BOT_SCREEN_CAPACITY", BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.defaultCapacity),
+    botScreenWebRtcPort: Number(process.env.OMARCHY_BOT_SCREEN_WEBRTC_PORT ?? 7323),
     botScreenProfile: screenProfile.name,
     botScreenLogicalWidth: screenProfile.logicalWidth,
     botScreenLogicalHeight: screenProfile.logicalHeight,
