@@ -54,14 +54,6 @@ const STATE_LABELS: Record<ComputerViewDto["state"], string> = {
   unavailable: "Screen unavailable",
 };
 
-const PROJECTION_LABELS: Record<ScreenProjectionState, string> = {
-  connecting: "Connecting Screen Projection",
-  preview: "Screen Projection live",
-  expanded: "Screen Projection live",
-  reconnecting: "Reconnecting Screen Projection",
-  unavailable: "Screen Projection unavailable",
-  closed: "Screen Projection idle",
-};
 
 const localStyles = stylex.create({
   preview: {
@@ -98,6 +90,7 @@ interface ComputerPanelContentProps extends Omit<
 > {
   previewOnly: boolean;
   projectionState: ScreenProjectionState;
+  projectionError?: string;
   frameUrl?: string;
   screenRetrying: boolean;
   onProjectionRetry: () => void;
@@ -118,6 +111,7 @@ function ComputerPanelContent({
   onContinueTakeover,
   previewOnly,
   projectionState,
+  projectionError,
   frameUrl,
   screenRetrying,
   onProjectionRetry,
@@ -131,47 +125,42 @@ function ComputerPanelContent({
 
   return (
     <VStack gap={4} padding={4} aria-busy={loading || busy || projectionWaiting || undefined} data-testid="computer-drawer">
-      {!loading && view.state !== "unavailable" ? (
-        <VStack gap={1}>
-          <Heading level={3}>{STATE_LABELS[view.state]}</Heading>
-          <Text color="secondary">{view.activity ?? `${bot.name}’s Bot Screen.`}</Text>
-        </VStack>
+      {!loading && view.state !== "unavailable" && view.state !== "ready" ? (
+        <Text color="secondary">{STATE_LABELS[view.state]}</Text>
       ) : null}
       {error !== undefined ? <Banner status="error" title={error} /> : null}
       {loading ? (
         <EmptyState
           icon={<Icon icon="clock" size="lg" />}
-          title="Checking the Bot Screen"
-          description="The latest Bot Screen state will appear here."
+          title="Opening screen"
+          description={`Connecting to ${bot.name}’s screen.`}
           isCompact
         />
       ) : view.state === "unavailable" ? (
         <EmptyState
           icon={<Icon icon={screenRetrying ? "clock" : "warning"} size="lg" />}
-          title={screenRetrying ? "Screen starting" : "Screen unavailable"}
+          title={screenRetrying ? "Opening screen" : "Screen unavailable"}
           description={
             screenRetrying
-              ? "Restarting this Bot Screen. Projection will appear when it is ready."
-              : view.activity ?? "This Bot Screen isn’t available right now."
+              ? `Starting ${bot.name}’s screen.`
+              : view.unavailableReason === "capacity"
+                ? view.activity ?? "Bot Screen capacity is full."
+                : `Couldn’t start ${bot.name}’s screen.`
           }
           {...(!screenRetrying && onRetry !== undefined
-            ? { actions: <Button label="Check again" variant="secondary" onClick={onRetry} /> }
+            ? { actions: <Button label="Retry" variant="secondary" onClick={onRetry} /> }
             : !screenRetrying && view.unavailableReason !== "capacity"
-              ? { actions: <Button label="Retry Bot Screen" variant="secondary" onClick={onRetryScreen} /> }
+              ? { actions: <Button label="Retry" variant="secondary" onClick={onRetryScreen} /> }
               : {})}
           isCompact
         />
       ) : (
         <>
-          <VStack gap={1}>
-            <Text>{PROJECTION_LABELS[projectionState]}</Text>
-            <Text color="secondary">Read-only WebRTC projection. Signaling is unauthenticated; HTTPS is not required.</Text>
-          </VStack>
           <AspectRatio ratio={16 / 9} fit="contain" xstyle={localStyles.preview}>
             {frameUrl === undefined ? null : (
               <img
                 src={frameUrl}
-                alt={`Computer Preview for ${bot.name}`}
+                alt={`${bot.name} screen`}
                 {...stylex.props(localStyles.image)}
                 data-testid="computer-preview"
               />
@@ -192,14 +181,14 @@ function ComputerPanelContent({
               <div {...stylex.props(localStyles.previewState)}>
                 <EmptyState
                   icon={<Icon icon={projectionUnavailable ? "warning" : "clock"} size="lg" />}
-                  title={projectionUnavailable ? "Screen Projection unavailable" : PROJECTION_LABELS[projectionState]}
+                  title={projectionUnavailable ? "Screen didn’t load" : "Opening screen"}
                   description={
                     projectionUnavailable
-                      ? "The Computer Surface may still be available. Try the Screen Projection again."
-                      : "Waiting for a direct frame from this Computer Surface."
+                      ? projectionError ?? "Couldn’t connect to the Bot Screen."
+                      : `Connecting to ${bot.name}’s screen.`
                   }
                   {...(projectionUnavailable
-                    ? { actions: <Button label="Try projection again" variant="secondary" onClick={onProjectionRetry} /> }
+                    ? { actions: <Button label="Retry" variant="secondary" onClick={onProjectionRetry} /> }
                     : {})}
                   isCompact
                 />
@@ -246,6 +235,7 @@ export function ComputerPanel({
   const { isMobile: isSmallScreen } = useAppShellMobile();
   const [previewExpanded, setPreviewExpanded] = useState(false);
   const [projectionState, setProjectionState] = useState<ScreenProjectionState>("closed");
+  const [projectionError, setProjectionError] = useState<string>();
   const [frameUrl, setFrameUrl] = useState<string>();
   const [projectionAttempt, setProjectionAttempt] = useState(0);
   const [screenRetrying, setScreenRetrying] = useState(false);
@@ -274,6 +264,7 @@ export function ComputerPanel({
     setPreviewExpanded(false);
     setScreenRetrying(false);
     onClose();
+    setProjectionError(undefined);
     requestAnimationFrame(() => returnFocusRef.current?.focus());
   }, [onClose, returnFocusRef]);
 
@@ -285,6 +276,7 @@ export function ComputerPanel({
       setProjectionState("closed");
       return;
     }
+    setProjectionError(undefined);
     const connection = new ScreenProjectionConnection(
       projectionUrl,
       { botId: bot.id, surfaceId: view.surfaceId },
@@ -293,6 +285,7 @@ export function ComputerPanel({
           setProjectionState(state);
           if (state === "unavailable") setScreenRetrying(false);
         },
+        onError: setProjectionError,
         onFrame: replaceFrame,
         onControlRevoked: clearBrowserHeldInput,
       },
@@ -471,6 +464,7 @@ export function ComputerPanel({
   }, [onReturnToBot]);
   const retryUnavailableScreen = useCallback((): void => {
     if (view.unavailableReason === "capacity") return;
+    setProjectionError(undefined);
     setProjectionState("connecting");
     setScreenRetrying(true);
     setProjectionAttempt((attempt) => attempt + 1);
@@ -485,13 +479,18 @@ export function ComputerPanel({
       onContinueTakeover={() => setPreviewExpanded(true)}
       previewOnly={isSmallScreen}
       projectionState={projectionState}
+      {...(projectionError === undefined ? {} : { projectionError })}
       {...(frameUrl === undefined ? {} : { frameUrl })}
       screenRetrying={
         screenRetrying
         && view.state === "unavailable"
         && view.unavailableReason !== "capacity"
       }
-      onProjectionRetry={() => setProjectionAttempt((attempt) => attempt + 1)}
+      onProjectionRetry={() => {
+        setProjectionError(undefined);
+        setProjectionState("connecting");
+        setProjectionAttempt((attempt) => attempt + 1);
+      }}
       onRetryScreen={retryUnavailableScreen}
       {...(!isSmallScreen && frameUrl !== undefined
         ? {
@@ -514,7 +513,7 @@ export function ComputerPanel({
         caption:
           view.takeover === "active" ? (
             <HStack gap={2} vAlign="center">
-              <Text>{bot.name} Bot Screen — Web Control</Text>
+              <Text>{bot.name}’s screen</Text>
               <Button
                 label="I'm done"
                 variant="primary"
@@ -524,7 +523,7 @@ export function ComputerPanel({
               />
             </HStack>
           ) : (
-            `${bot.name} Bot Screen — Web Control`
+            `${bot.name}’s screen`
           ),
       }}
       {...(previewExpanded
@@ -550,17 +549,17 @@ export function ComputerPanel({
   return (
     <>
       <LayoutPanel
-        width="min(440px, 100vw)"
+        width="min(560px, 100vw)"
         padding={0}
         hasDivider
         isScrollable
         label="Computer Surface"
         role="complementary"
-        style={{ width: "min(440px, 100vw)", minWidth: 0, maxWidth: "100vw" }}
+        style={{ width: "min(560px, 100vw)", minWidth: 0, maxWidth: "100vw" }}
       >
         <HStack gap={2} padding={4} vAlign="center">
           <StackItem size="fill">
-            <Heading level={2}>Computer Surface</Heading>
+            <Heading level={2}>{bot.name}’s screen</Heading>
           </StackItem>
           <IconButton
             label="Close Computer Surface"

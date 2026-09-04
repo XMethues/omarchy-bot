@@ -604,7 +604,7 @@ test.describe("ticket 13 responsive, accessible, and visual QA", () => {
     await page.getByRole("button", { name: "Open Computer Surface", exact: true }).click();
     const computer = page.getByRole("complementary", { name: "Computer Surface", exact: true });
     await expect(computer).toBeVisible();
-    await expect(computer.getByRole("heading", { name: "Bot using screen", exact: true })).toBeVisible();
+    await expect(computer.getByText("Bot using screen", { exact: true })).toBeVisible();
     await expect(page.getByRole("dialog", { name: "Computer Surface" })).toHaveCount(0);
     await captureWorkspace(page, "ticket-13-computer-drawer-dark.png");
   });

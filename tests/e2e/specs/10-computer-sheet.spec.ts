@@ -26,9 +26,9 @@ async function fulfillJson(route: Route, body: unknown): Promise<void> {
 
 async function installProjectionPeer(
   page: Page,
-  options: { inputAuthorityAvailable?: boolean } = {},
+  options: { inputAuthorityAvailable?: boolean; frameAvailable?: boolean } = {},
 ): Promise<void> {
-  await page.addInitScript(({ pngBase64, inputAuthorityAvailable }) => {
+  await page.addInitScript(({ pngBase64, inputAuthorityAvailable, frameAvailable }) => {
     const png = Uint8Array.from(atob(pngBase64), (character) => character.charCodeAt(0)).buffer;
     const inputMessages: unknown[] = [];
     Object.defineProperty(window, "__screenInputMessages", { configurable: true, value: inputMessages });
@@ -132,6 +132,7 @@ async function installProjectionPeer(
           const message = JSON.parse(raw) as { mode?: string };
           controlMessages.push(message);
           if (message.mode !== "preview" && message.mode !== "expanded") return;
+          if (!testControl.frameAvailable) return;
           const frames = this.channels.get("screen.frames.v1");
           if (frames === undefined) return;
           this.sequence += 1;
@@ -190,6 +191,7 @@ async function installProjectionPeer(
     const peers: FakePeerConnection[] = [];
     const testControl = {
       inputAuthorityAvailable,
+      frameAvailable,
       inputAuthorityActive: false,
       revokeInput(): void {
         testControl.inputAuthorityAvailable = false;
@@ -201,6 +203,7 @@ async function installProjectionPeer(
   }, {
     pngBase64: PNG.toString("base64"),
     inputAuthorityAvailable: options.inputAuthorityAvailable ?? true,
+    frameAvailable: options.frameAvailable ?? true,
   });
 }
 
@@ -303,10 +306,10 @@ test.describe("contextual computer sheet", () => {
     await expect(page.getByRole("dialog", { name: "Computer Surface" })).toHaveCount(0);
 
     const sheet = drawer;
-    await expect(sheet.getByAltText("Computer Preview for Computer Bot")).toBeVisible();
-    await expect(sheet).toContainText("Screen Projection live");
-    await expect(sheet).toContainText("Signaling is unauthenticated");
-    await expect(sheet).toContainText("Bot using screen.");
+    await expect(sheet.getByAltText("Computer Bot screen")).toBeVisible();
+    await expect(sheet).toContainText("Bot using screen");
+    await expect(sheet).not.toContainText("Screen Projection");
+    await expect(sheet).not.toContainText("WebRTC");
     await expect(sheet).not.toContainText(/lease|TTL|token|queue depth/i);
     await expect(sheet.getByRole("button", { name: "Take control" })).toBeVisible();
     await expect(sheet.getByRole("button", { name: "Continue takeover" })).toHaveCount(0);
@@ -340,7 +343,7 @@ test.describe("contextual computer sheet", () => {
     await sheet.getByRole("button", { name: "Continue takeover" }).click();
     await expect(page.getByRole("button", { name: "I'm done" })).toBeVisible();
     await page.getByRole("button", { name: "I'm done" }).click();
-    await expect(sheet).toContainText("Screen ready");
+    await expect(sheet).not.toContainText("Screen ready");
     expect(returnCalls).toBe(1);
     await expect(sheet.getByRole("button", { name: "Continue takeover" })).toHaveCount(0);
     await page.getByTestId("header-computer").click();
@@ -379,12 +382,12 @@ test.describe("contextual computer sheet", () => {
     await page.getByRole("button", { name: "First Screen Bot", exact: true }).click();
     await page.getByRole("button", { name: "Open Computer Surface", exact: true }).click();
     const computer = page.getByRole("complementary", { name: "Computer Surface", exact: true });
-    await expect(computer.getByAltText("Computer Preview for First Screen Bot")).toBeVisible();
+    await expect(computer.getByAltText("First Screen Bot screen")).toBeVisible();
 
     await page.getByRole("button", { name: "Other Bot", exact: true }).click();
     await expect.poll(() => closedProjectionCount).toBeGreaterThan(0);
-    await expect(computer.getByAltText("Computer Preview for First Screen Bot")).toHaveCount(0);
-    await expect(computer.getByAltText("Computer Preview for Other Bot")).toBeVisible();
+    await expect(computer.getByAltText("First Screen Bot screen")).toHaveCount(0);
+    await expect(computer.getByAltText("Other Bot screen")).toBeVisible();
   });
 
   test("maps expanded pointer input through resized letterboxed content while compact preview stays inert", async ({ page }) => {
@@ -404,7 +407,7 @@ test.describe("contextual computer sheet", () => {
     await page.goto("/");
     await createBot(page, "Pointer Bot");
     await page.getByRole("button", { name: "Open Computer Surface", exact: true }).click();
-    const preview = page.getByAltText("Computer Preview for Pointer Bot");
+    const preview = page.getByAltText("Pointer Bot screen");
     await expect(preview).toBeVisible();
     const previewBox = await preview.boundingBox();
     if (previewBox === null) throw new Error("preview has no rendered box");
@@ -774,7 +777,7 @@ test.describe("contextual computer sheet", () => {
     await expect(mobilePanel).toBeVisible();
     await expect(page.getByRole("dialog", { name: "Computer Surface" })).toHaveCount(0);
     await expect.poll(() => mobilePanel.evaluate((element) => element.getBoundingClientRect().right)).toBe(390);
-    await expect(mobilePanel.getByAltText("Computer Preview for Mobile Computer Bot")).toBeVisible();
+    await expect(mobilePanel.getByAltText("Mobile Computer Bot screen")).toBeVisible();
     await expect(mobilePanel.getByRole("button", { name: "Open Web Control" })).toHaveCount(0);
     await expect(mobilePanel.getByRole("button", { name: "Take control" })).toHaveCount(0);
     await expect(mobilePanel.getByRole("button", { name: "Continue takeover" })).toHaveCount(0);
@@ -795,10 +798,40 @@ test.describe("contextual computer sheet", () => {
     await page.reload();
     await page.getByRole("button", { name: "Open Computer Surface", exact: true }).click();
     const activeMobilePanel = page.getByRole("complementary", { name: "Computer Surface", exact: true });
-    await expect(activeMobilePanel.getByAltText("Computer Preview for Mobile Computer Bot")).toBeVisible();
+    await expect(activeMobilePanel.getByAltText("Mobile Computer Bot screen")).toBeVisible();
     await expect(activeMobilePanel.getByRole("button", { name: "Take control" })).toHaveCount(0);
     await expect(activeMobilePanel.getByRole("button", { name: "Continue takeover" })).toHaveCount(0);
     expect(takeoverCalls).toBe(0);
+  });
+
+  test("reports a connected projection that never delivers a screen image", async ({ page }) => {
+    await installProjectionPeer(page, { frameAvailable: false });
+    await page.route("**/api/computer/**", async (route) => {
+      if (await fulfillProjection(route)) return;
+      const url = new URL(route.request().url());
+      await fulfillJson(route, {
+        botId: url.searchParams.get("botId"),
+        surfaceId: url.searchParams.get("surfaceId"),
+        state: "ready",
+        takeover: "unavailable",
+        activity: "Screen ready.",
+      });
+    });
+
+    await page.goto("/");
+    await createBot(page, "No Frame Bot");
+    await page.getByRole("button", { name: "Open Computer Surface", exact: true }).click();
+    const panel = page.getByRole("complementary", { name: "Computer Surface", exact: true });
+    await expect(panel.getByRole("heading", { name: "Screen didn’t load", exact: true })).toBeVisible({
+      timeout: 7_000,
+    });
+    await expect(panel).toContainText("No image arrived from the Bot Screen.");
+    const retry = panel.getByRole("button", { name: "Retry", exact: true });
+    await expect(retry).toBeVisible();
+    await expect(panel).not.toContainText("Screen ready");
+    await expect(panel).not.toContainText("WebRTC");
+    await retry.click();
+    await expect(panel.getByRole("heading", { name: "Opening screen", exact: true })).toBeVisible();
   });
 
   test("retries an interrupted Bot Screen through projection activation", async ({ page }) => {
@@ -835,11 +868,11 @@ test.describe("contextual computer sheet", () => {
     await createBot(page, "Retry Screen Bot");
     await page.getByRole("button", { name: "Open Computer Surface", exact: true }).click();
     const panel = page.getByRole("complementary", { name: "Computer Surface", exact: true });
-    const retry = panel.getByRole("button", { name: "Retry Bot Screen" });
+    const retry = panel.getByRole("button", { name: "Retry", exact: true });
     await expect(panel.getByRole("heading", { name: "Screen unavailable", exact: true })).toBeVisible();
 
     await retry.click();
-    await expect(panel.getByRole("heading", { name: "Screen starting", exact: true })).toBeVisible();
+    await expect(panel.getByRole("heading", { name: "Opening screen", exact: true })).toBeVisible();
     expect(projectionAttempts).toBe(1);
     firstProjection.resolve();
     await expect(panel.getByRole("heading", { name: "Screen unavailable", exact: true })).toBeVisible();
@@ -850,8 +883,8 @@ test.describe("contextual computer sheet", () => {
     await expect.poll(() => projectionAttempts).toBe(2);
     await page.reload();
     await page.getByRole("button", { name: "Open Computer Surface", exact: true }).click();
-    await expect(panel.getByRole("heading", { name: "Screen ready", exact: true })).toBeVisible();
-    await expect(panel.getByAltText("Computer Preview for Retry Screen Bot")).toBeVisible();
+    await expect(panel).not.toContainText("Screen ready");
+    await expect(panel.getByAltText("Retry Screen Bot screen")).toBeVisible();
   });
 
   test("renders capacity-full state returned with an expected unavailable response", async ({ page }) => {
@@ -880,6 +913,6 @@ test.describe("contextual computer sheet", () => {
     const panel = page.getByRole("complementary", { name: "Computer Surface", exact: true });
     await expect(panel).toContainText("Bot Screen capacity is full (4/4).");
     await expect(panel).not.toContainText("Bot Screen status could not be loaded.");
-    await expect(panel.getByRole("button", { name: "Retry Bot Screen" })).toHaveCount(0);
+    await expect(panel.getByRole("button", { name: "Retry", exact: true })).toHaveCount(0);
   });
 });

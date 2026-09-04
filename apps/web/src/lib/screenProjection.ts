@@ -13,6 +13,8 @@ import {
 } from "@omarchy-bot/protocol";
 
 const MAX_FRAME_BYTES = 8 * 1024 * 1024;
+const CONNECTION_TIMEOUT_MS = 10_000;
+const FIRST_FRAME_TIMEOUT_MS = 5_000;
 
 export type ScreenProjectionMode = Exclude<ScreenProjectionModeDto, "idle">;
 export type ScreenProjectionState = "connecting" | "preview" | "expanded" | "reconnecting" | "unavailable" | "closed";
@@ -25,6 +27,7 @@ export interface ScreenProjectionOwner {
 export interface ScreenProjectionCallbacks {
   onState(state: ScreenProjectionState): void;
   onFrame(frame: Blob | undefined): void;
+  onError(error: string): void;
   onControlRevoked?(): void;
 }
 
@@ -66,6 +69,9 @@ export class ScreenProjectionConnection {
   #desiredMode: ScreenProjectionMode = "preview";
   #pending: PendingFrame | undefined;
   #closed = false;
+  #connectionTimer: number | undefined;
+  #firstFrameTimer: number | undefined;
+  #receivedFrame = false;
   #inputAuthority: InputAuthority | undefined;
   #inputSequence = 0;
   #releasingEpoch: number | undefined;
@@ -89,18 +95,21 @@ export class ScreenProjectionConnection {
       if (this.#closed) return;
       if (this.#peer.connectionState === "disconnected") {
         this.releaseControl("teardown");
+        clearTimeout(this.#firstFrameTimer);
+        this.#firstFrameTimer = undefined;
         this.callbacks.onState("reconnecting");
-      }
-      if (this.#peer.connectionState === "connected") this.#activate();
-      if (this.#peer.connectionState === "failed") {
-        this.close();
-        this.callbacks.onState("unavailable");
+        this.#armConnectionDeadline("The screen connection was lost.");
+      } else if (this.#peer.connectionState === "connected") {
+        this.#activate();
+      } else if (this.#peer.connectionState === "failed") {
+        this.#fail("Couldn’t connect to the Bot Screen.");
       }
     });
   }
 
   async connect(): Promise<void> {
     this.callbacks.onState("connecting");
+    this.#armConnectionDeadline("Couldn’t connect to the Bot Screen.");
     try {
       const offer = await this.#peer.createOffer();
       await this.#peer.setLocalDescription(offer);
@@ -116,7 +125,7 @@ export class ScreenProjectionConnection {
       }
       if (this.#closed) return;
       const localDescription = this.#peer.localDescription;
-      if (localDescription === null) throw new Error("WebRTC offer was not created");
+      if (localDescription === null) throw new Error("Couldn’t create the screen connection.");
       const response = await fetch(this.endpoint, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -124,9 +133,21 @@ export class ScreenProjectionConnection {
         signal: this.#abort.signal,
       });
       const rawAnswer: unknown = await response.json().catch(() => undefined);
+      if (!response.ok) {
+        const message =
+          rawAnswer !== null
+          && typeof rawAnswer === "object"
+          && "error" in rawAnswer
+          && typeof rawAnswer.error === "string"
+            ? rawAnswer.error
+            : "Couldn’t start the Bot Screen.";
+        throw new Error(message);
+      }
       const answer = ScreenProjectionAnswerDto.safeParse(rawAnswer);
-      if (!response.ok || !answer.success) throw new Error("Screen Projection signaling failed");
-      if (answer.data.surfaceId !== this.owner.surfaceId) throw new Error("Screen Projection Surface does not match");
+      if (!answer.success) throw new Error("The Bot Screen returned an invalid connection response.");
+      if (answer.data.surfaceId !== this.owner.surfaceId) {
+        throw new Error("The Bot Screen connection did not match this screen.");
+      }
       this.#sessionId = answer.data.sessionId;
       this.#runtimeGeneration = answer.data.runtimeGeneration;
       this.#geometry = {
@@ -144,8 +165,7 @@ export class ScreenProjectionConnection {
       this.#activate();
     } catch (error) {
       if (this.#closed || (error instanceof DOMException && error.name === "AbortError")) return;
-      this.close();
-      this.callbacks.onState("unavailable");
+      this.#fail(error instanceof Error ? error.message : "Couldn’t connect to the Bot Screen.");
     }
   }
 
@@ -240,6 +260,10 @@ export class ScreenProjectionConnection {
 
   close(): void {
     if (this.#closed) return;
+    clearTimeout(this.#connectionTimer);
+    clearTimeout(this.#firstFrameTimer);
+    this.#connectionTimer = undefined;
+    this.#firstFrameTimer = undefined;
     this.releaseControl("teardown");
     this.#closed = true;
     this.#abort.abort();
@@ -282,6 +306,8 @@ export class ScreenProjectionConnection {
       || this.#releasingEpoch !== undefined
       || this.#runtimeGeneration === undefined
     ) return;
+    clearTimeout(this.#connectionTimer);
+    this.#connectionTimer = undefined;
     this.#control.send(JSON.stringify({
       version: SCREEN_PROJECTION_PROTOCOL_VERSION,
       type: "view",
@@ -290,6 +316,12 @@ export class ScreenProjectionConnection {
       mode: this.#desiredMode,
     }));
     this.callbacks.onState(this.#desiredMode);
+    if (!this.#receivedFrame && this.#firstFrameTimer === undefined) {
+      this.#firstFrameTimer = window.setTimeout(
+        () => this.#fail("No image arrived from the Bot Screen."),
+        FIRST_FRAME_TIMEOUT_MS,
+      );
+    }
   }
 
   #receiveInputAuthority(raw: unknown): void {
@@ -442,7 +474,22 @@ export class ScreenProjectionConnection {
     if (pending.chunks.length !== pending.header.chunkCount) return;
     this.#pending = undefined;
     if (pending.receivedBytes !== pending.header.byteLength) return;
+    this.#receivedFrame = true;
+    clearTimeout(this.#firstFrameTimer);
+    this.#firstFrameTimer = undefined;
     this.callbacks.onFrame(new Blob(pending.chunks, { type: pending.header.mediaType }));
+  }
+
+  #armConnectionDeadline(message: string): void {
+    if (this.#connectionTimer !== undefined) return;
+    this.#connectionTimer = window.setTimeout(() => this.#fail(message), CONNECTION_TIMEOUT_MS);
+  }
+
+  #fail(message: string): void {
+    if (this.#closed) return;
+    this.callbacks.onError(message);
+    this.close();
+    this.callbacks.onState("unavailable");
   }
 
   #matchesGeometry(value: ProjectionGeometry): boolean {
