@@ -6,6 +6,7 @@ import type {
   BotScreenInputEvent,
   BotScreenProvision,
   BotScreenRuntime,
+  BotScreenRuntimeOutcome,
   BotScreenRuntimeAdapter,
 } from "./botScreenManager.ts";
 
@@ -26,7 +27,7 @@ interface FakeBotScreenRuntimeOptions {
 interface FakeRuntimeRecord {
   provision: BotScreenProvision;
   runtime: BotScreenRuntime;
-  fail(error: Error): void;
+  finish(outcome: BotScreenRuntimeOutcome): void;
 }
 /** Deterministic in-process platform adapter used by daemon integration tests. */
 export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
@@ -126,10 +127,28 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     return record === undefined ? undefined : { generation: record.provision.generation };
   }
 
-  crash(surfaceId: string, message: string): void {
+  runtimeOutcome(surfaceId: string): Promise<BotScreenRuntimeOutcome> {
     const record = this.#runtimes.get(surfaceId);
     if (record === undefined) throw new Error("fake Bot Screen is not running");
-    record.fail(new Error(message));
+    return record.runtime.outcome;
+  }
+
+  crash(surfaceId: string, message: string): void {
+    this.#finish(surfaceId, { type: "computer-worker-exited", error: new Error(message) });
+  }
+
+  exitApplication(surfaceId: string, message = "fake Bot Screen application exited"): void {
+    this.#finish(surfaceId, { type: "application-exited", error: new Error(message) });
+  }
+
+  exitCompositor(surfaceId: string, message = "fake Bot Screen compositor exited"): void {
+    this.#finish(surfaceId, { type: "compositor-exited", error: new Error(message) });
+  }
+
+  #finish(surfaceId: string, outcome: BotScreenRuntimeOutcome): void {
+    const record = this.#runtimes.get(surfaceId);
+    if (record === undefined) throw new Error("fake Bot Screen is not running");
+    record.finish(outcome);
   }
 
   rejectReconciliation(surfaceId: string): void {
@@ -159,10 +178,25 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     let highestControllerEpoch = 0;
     let lastInputSequence = 0;
     let actionCount = 0;
-    const failure = Promise.withResolvers<Error>();
+    const outcome = Promise.withResolvers<BotScreenRuntimeOutcome>();
     let record!: FakeRuntimeRecord;
     const captureStreams = new Set<BotScreenCaptureStream>();
     const runtime: BotScreenRuntime = {
+      readiness: {
+        compositor: "ready",
+        waylandSocket: "private",
+        output: {
+          geometryGeneration: provision.geometryGeneration,
+          logicalWidth: provision.logicalWidth,
+          logicalHeight: provision.logicalHeight,
+          scale: provision.scale,
+          refreshRate: provision.refreshRate,
+        },
+        desktopSurface: "ready",
+        capture: "ready",
+        input: "ready",
+        computerWorker: "ready",
+      },
       capture: async (): Promise<BotScreenCapture> => {
         if (stopped) throw new Error("fake Bot Screen is stopped");
         return { mediaType: "image/png", bytes: FAKE_SCREEN_PNG };
@@ -291,7 +325,7 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
           else this.#releaseWaiters.push(waiter);
         }
       },
-      exited: failure.promise,
+      outcome: outcome.promise,
       stop: async (): Promise<void> => {
         if (stopped) return;
         stopped = true;
@@ -300,7 +334,7 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
         if (this.#runtimes.get(provision.surfaceId) === record) this.#runtimes.delete(provision.surfaceId);
       },
     };
-    record = { provision, runtime, fail: failure.resolve };
+    record = { provision, runtime, finish: outcome.resolve };
     this.#runtimes.set(provision.surfaceId, record);
     return runtime;
   }

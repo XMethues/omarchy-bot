@@ -148,6 +148,47 @@ describe("Bot Screen lifecycle", () => {
       expect(h.svc.db.query(`SELECT COUNT(*) AS count FROM ${table}`).get()).toEqual({ count: 0 });
     }
   });
+
+  test("application and compositor exits are distinct fatal outcomes isolated to their owning Screens", async () => {
+    const adapter = new FakeBotScreenRuntimeAdapter();
+    h = await startDaemon(undefined, { botScreenAdapter: adapter });
+    const application = await bot(h, await makeBot(h, "Application outcome"));
+    const compositor = await bot(h, await makeBot(h, "Compositor outcome"));
+    const unaffected = await bot(h, await makeBot(h, "Outcome isolation"));
+    await Promise.all([
+      activateScreen(h, application),
+      activateScreen(h, compositor),
+      activateScreen(h, unaffected),
+    ]);
+
+    const applicationOutcome = adapter.runtimeOutcome(application.surfaceId);
+    const compositorOutcome = adapter.runtimeOutcome(compositor.surfaceId);
+
+    adapter.exitApplication(application.surfaceId);
+    expect((await applicationOutcome).type).toBe("application-exited");
+    await waitForState(h, application, "unavailable");
+    expect(h.svc.screens.status({ botId: application.id, surfaceId: application.surfaceId })).toEqual({
+      state: "failed",
+      failure: "fake Bot Screen application exited",
+    });
+    expect(await waitForState(h, compositor, "ready")).toMatchObject({ surfaceId: compositor.surfaceId });
+    expect(await waitForState(h, unaffected, "ready")).toMatchObject({ surfaceId: unaffected.surfaceId });
+
+    adapter.exitCompositor(compositor.surfaceId);
+    expect((await compositorOutcome).type).toBe("compositor-exited");
+    await waitForState(h, compositor, "unavailable");
+    expect(h.svc.screens.status({ botId: compositor.id, surfaceId: compositor.surfaceId })).toEqual({
+      state: "failed",
+      failure: "fake Bot Screen compositor exited",
+    });
+    expect(await waitForState(h, unaffected, "ready")).toMatchObject({ surfaceId: unaffected.surfaceId });
+    expect(
+      (await fetch(
+        `${h.baseUrl}/api/computer/snapshot?botId=${encodeURIComponent(unaffected.id)}&surfaceId=${encodeURIComponent(unaffected.surfaceId)}`,
+      )).status,
+    ).toBe(200);
+  });
+
   test("rejects a Bot Screen before provisioning when measured capacity is full", async () => {
     const adapter = new FakeBotScreenRuntimeAdapter();
     h = await startDaemon(undefined, { botScreenAdapter: adapter, botScreenCapacity: 1 });

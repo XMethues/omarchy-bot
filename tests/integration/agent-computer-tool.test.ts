@@ -80,6 +80,21 @@ class AgentToolRuntimeAdapter implements BotScreenRuntimeAdapter {
 
   async start(provision: BotScreenProvision): Promise<BotScreenRuntime> {
     return {
+      readiness: {
+        compositor: "ready",
+        waylandSocket: "private",
+        output: {
+          geometryGeneration: provision.geometryGeneration,
+          logicalWidth: provision.logicalWidth,
+          logicalHeight: provision.logicalHeight,
+          scale: provision.scale,
+          refreshRate: provision.refreshRate,
+        },
+        desktopSurface: "ready",
+        capture: "ready",
+        input: "ready",
+        computerWorker: "ready",
+      },
       capture: async () => ({ mediaType: "image/png", bytes: new Uint8Array([1]) }),
       openCaptureStream: async () => ({
         next: async () => ({
@@ -123,7 +138,7 @@ class AgentToolRuntimeAdapter implements BotScreenRuntimeAdapter {
       releaseInput: async () => {
         this.releases.push(provision.surfaceId);
       },
-      exited: new Promise<Error>(() => {}),
+      outcome: Promise.withResolvers<never>().promise,
       stop: async () => {},
     };
   }

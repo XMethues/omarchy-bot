@@ -7,6 +7,7 @@ import type {
   BotScreenCapture,
   BotScreenProvision,
   BotScreenRuntime,
+  BotScreenRuntimeOutcome,
   BotScreenRuntimeAdapter,
 } from "../../apps/daemon/src/modules/computer/botScreenManager.ts";
 import { FakeBotScreenRuntimeAdapter } from "../../apps/daemon/src/modules/computer/fakeBotScreenRuntime.ts";
@@ -131,10 +132,26 @@ class ControlledRuntimeAdapter implements BotScreenRuntimeAdapter {
 
   async start(provision: BotScreenProvision): Promise<BotScreenRuntime> {
     let stopped = false;
-    const exited = new Promise<Error>((resolve) => {
-      this.#failRuntime.set(provision.surfaceId, resolve);
+    const outcome = Promise.withResolvers<BotScreenRuntimeOutcome>();
+    this.#failRuntime.set(provision.surfaceId, (error) => {
+      outcome.resolve({ type: "computer-worker-exited", error });
     });
     return {
+      readiness: {
+        compositor: "ready",
+        waylandSocket: "private",
+        output: {
+          geometryGeneration: provision.geometryGeneration,
+          logicalWidth: provision.logicalWidth,
+          logicalHeight: provision.logicalHeight,
+          scale: provision.scale,
+          refreshRate: provision.refreshRate,
+        },
+        desktopSurface: "ready",
+        capture: "ready",
+        input: "ready",
+        computerWorker: "ready",
+      },
       capture: async (): Promise<BotScreenCapture> => {
         if (stopped) throw new Error("test Screen is stopped");
         const count = this.captureStarts(provision.surfaceId) + 1;
@@ -176,7 +193,7 @@ class ControlledRuntimeAdapter implements BotScreenRuntimeAdapter {
       releaseInput: async () => {
         if (stopped) throw new Error("test Screen is stopped");
       },
-      exited,
+      outcome: outcome.promise,
       stop: async () => {
         stopped = true;
       },

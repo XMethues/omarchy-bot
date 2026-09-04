@@ -61,6 +61,34 @@ export interface BotScreenProvision {
   scale: number;
   refreshRate: number;
 }
+/**
+ * Evidence returned only after every component required for a usable Bot Screen
+ * is ready. It deliberately exposes no socket name, process identifier, command,
+ * or compositor choice.
+ */
+export interface BotScreenRuntimeReadiness {
+  compositor: "ready";
+  waylandSocket: "private";
+  output: {
+    geometryGeneration: number;
+    logicalWidth: number;
+    logicalHeight: number;
+    scale: number;
+    refreshRate: number;
+  };
+  desktopSurface: "ready";
+  capture: "ready";
+  input: "ready";
+  computerWorker: "ready";
+}
+
+export type BotScreenRuntimeOutcome =
+  | { type: "compositor-exited"; error: Error }
+  | { type: "desktop-exited"; error: Error }
+  | { type: "application-exited"; error: Error }
+  | { type: "input-helper-exited"; error: Error }
+  | { type: "computer-worker-exited"; error: Error };
+
 
 export interface BotScreenProjectionSource {
   surfaceId: SurfaceId;
@@ -78,16 +106,21 @@ export interface BotScreenProjectionSource {
   releaseInput(controllerEpoch?: number): Promise<void>;
 }
 
-/** Internal platform seam. Runtime handles keep process and socket facts private. */
+/**
+ * Internal platform seam. A runtime is returned only after its readiness
+ * evidence is complete; process trees, sockets, and compositor commands remain
+ * private to the adapter.
+ */
 export interface BotScreenRuntime {
+  readonly readiness: BotScreenRuntimeReadiness;
   capture(): Promise<BotScreenCapture>;
   openCaptureStream(): Promise<BotScreenCaptureStream>;
   act(action: ComputerAction, inputAuthority?: ComputerInputAuthority): Promise<BotScreenActionResult>;
   setInputAuthority(controllerEpoch: number): Promise<void>;
   input(event: BotScreenInputEvent): Promise<void>;
   releaseInput(controllerEpoch?: number): Promise<void>;
-  /** Resolves only when the runtime exits; deliberate stops are ignored by the manager. */
-  exited: Promise<Error>;
+  /** Resolves only for an unexpected component exit; deliberate stops are ignored by the manager. */
+  outcome: Promise<BotScreenRuntimeOutcome>;
   stop(): Promise<void>;
 }
 
@@ -264,9 +297,8 @@ export class BotScreenManager {
       const runtime = await this.#readyRuntime(owner);
       const entry = this.#entries.get(owner.surfaceId);
       if (runtime === undefined || entry?.runtime !== runtime) return undefined;
-      const { geometryGeneration } = entry.provision;
+      const { geometryGeneration, logicalWidth, logicalHeight, scale } = runtime.readiness.output;
       const generation = this.#row(owner.surfaceId).runtime_generation;
-      const { logicalWidth, logicalHeight, scale } = entry.provision;
       const currentEntry = (): RuntimeEntry => {
         const row = this.#row(owner.surfaceId);
         if (
@@ -444,7 +476,7 @@ export class BotScreenManager {
     const entry: RuntimeEntry = { provision, start, runtime };
     this.#entries.set(surfaceId, entry);
     this.#transition(surfaceId, "ready", null);
-    void runtime.exited.then((error) => this.#failRuntime(surfaceId, entry, error));
+    void runtime.outcome.then((outcome) => this.#failRuntime(surfaceId, entry, outcome.error));
   }
 
   async #stop(surfaceId: SurfaceId): Promise<void> {

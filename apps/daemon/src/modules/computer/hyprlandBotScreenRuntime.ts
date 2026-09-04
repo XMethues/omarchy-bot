@@ -24,6 +24,7 @@ import {
   type BotScreenInputEvent,
   type BotScreenProvision,
   type BotScreenRuntime,
+  type BotScreenRuntimeOutcome,
   type BotScreenRuntimeAdapter,
 } from "./botScreenManager.ts";
 
@@ -691,11 +692,17 @@ export class HyprlandBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter 
         }),
       });
       computerWorker = startedComputerWorker;
-      const exited = Promise.race([
-        compositor.exited.then((status) => new Error(`nested Hyprland exited with status ${status}`)),
-        applicationProcess.exited.then((status) => new Error(`Bot Screen application exited with status ${status}`)),
-        startedComputerWorker.exited,
-        startedVirtualInput.exited,
+      const outcome = Promise.race<BotScreenRuntimeOutcome>([
+        compositor.exited.then((status) => ({
+          type: "compositor-exited",
+          error: new Error(`nested Hyprland exited with status ${status}`),
+        })),
+        applicationProcess.exited.then((status) => ({
+          type: "application-exited",
+          error: new Error(`Bot Screen application exited with status ${status}`),
+        })),
+        startedComputerWorker.exited.then((error) => ({ type: "computer-worker-exited", error })),
+        startedVirtualInput.exited.then((error) => ({ type: "input-helper-exited", error })),
       ]);
 
       let stopped = false;
@@ -785,13 +792,28 @@ export class HyprlandBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter 
         };
       };
       return {
+        readiness: {
+          compositor: "ready",
+          waylandSocket: "private",
+          output: {
+            geometryGeneration: provision.geometryGeneration,
+            logicalWidth: provision.logicalWidth,
+            logicalHeight: provision.logicalHeight,
+            scale: provision.scale,
+            refreshRate: provision.refreshRate,
+          },
+          desktopSurface: "ready",
+          capture: "ready",
+          input: "ready",
+          computerWorker: "ready",
+        },
         capture,
         openCaptureStream,
         act,
         setInputAuthority: (controllerEpoch) => startedVirtualInput.setInputAuthority(controllerEpoch),
         input: (event) => startedVirtualInput.input(event),
         releaseInput: (controllerEpoch) => startedVirtualInput.release(controllerEpoch),
-        exited,
+        outcome,
         stop: async () => {
           stopped = true;
           if (cleanupComplete) return;
