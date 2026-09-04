@@ -331,7 +331,7 @@ test.describe("contextual computer sheet", () => {
     )).toBe(2);
     await expect(page.getByTestId("expanded-web-control")).toBeVisible();
     await expect(page.getByRole("button", { name: "I'm done" })).toBeVisible();
-    await page.getByTestId("expanded-web-control").getByRole("button", { name: "Close", exact: true }).click();
+    await page.getByTestId("expanded-web-control").getByRole("button", { name: "Close Web Control" }).click();
     await expect(page.getByTestId("expanded-web-control")).toBeHidden();
     expect(returnCalls).toBe(0);
     await expect(sheet.getByRole("button", { name: "Continue takeover" })).toBeVisible();
@@ -408,20 +408,25 @@ test.describe("contextual computer sheet", () => {
     await createBot(page, "Pointer Bot");
     await page.getByRole("button", { name: "Open Computer Surface", exact: true }).click();
     const preview = page.getByAltText("Pointer Bot screen");
+    const expandPreview = page.getByRole("button", { name: "Open Web Control" });
     await expect(preview).toBeVisible();
+    await expect(expandPreview).toContainText("Open Web Control");
     const previewBox = await preview.boundingBox();
-    if (previewBox === null) throw new Error("preview has no rendered box");
+    const expandBox = await expandPreview.boundingBox();
+    if (previewBox === null || expandBox === null) throw new Error("preview has no rendered box");
+    expect(expandBox.width).toBeGreaterThanOrEqual(previewBox.width - 2);
+    expect(expandBox.height).toBeGreaterThanOrEqual(previewBox.height - 2);
     await page.mouse.move(previewBox.x + previewBox.width / 2, previewBox.y + previewBox.height / 2);
-    await page.mouse.click(previewBox.x + previewBox.width / 2, previewBox.y + previewBox.height / 2);
     await page.mouse.wheel(0, 30);
     expect(await page.evaluate(() => (window as typeof window & { __screenInputMessages: unknown[] }).__screenInputMessages)).toEqual([]);
 
-    await page.getByRole("button", { name: "Open Web Control" }).click();
+    await expandPreview.click();
+    const expandedControl = page.getByTestId("expanded-web-control");
     const expanded = page.getByAltText("Web Control for Pointer Bot");
     await expect(expanded).toBeVisible();
-    await expect.poll(() => page.evaluate(
-      () => (window as typeof window & { __screenInputMessages: unknown[] }).__screenInputMessages.length,
-    )).toBe(0);
+    await expect(expandedControl).toContainText("Click, scroll, or type to control");
+    await expandedControl.evaluate((dialog) => dialog.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    await expect(expandedControl).toBeVisible();
 
     await page.setViewportSize({ width: 900, height: 760 });
     await expanded.evaluate((image) => {
@@ -550,7 +555,7 @@ test.describe("contextual computer sheet", () => {
       () => (window as typeof window & { __screenInputMessages: unknown[] }).__screenInputMessages,
     )).toEqual([]);
     await expect(expanded).toBeVisible();
-    await page.getByTestId("expanded-web-control").getByRole("button", { name: "Close", exact: true }).click();
+    await page.getByTestId("expanded-web-control").getByRole("button", { name: "Close Web Control" }).click();
     await expect(expanded).toBeHidden();
     await expect(sheet.getByRole("button", { name: "Continue takeover" })).toBeVisible();
 

@@ -16,7 +16,6 @@ import { Banner } from "@astryxdesign/core/Banner";
 import { Button } from "@astryxdesign/core/Button";
 import { IconButton } from "@astryxdesign/core/IconButton";
 import { LayoutPanel } from "@astryxdesign/core/Layout";
-import { Lightbox } from "@astryxdesign/core/Lightbox";
 import { EmptyState } from "@astryxdesign/core/EmptyState";
 import { Heading } from "@astryxdesign/core/Heading";
 import { HStack } from "@astryxdesign/core/HStack";
@@ -78,10 +77,69 @@ const localStyles = stylex.create({
     justifyContent: "center",
     padding: "var(--spacing-4)",
   },
-  previewAction: {
+  previewExpand: {
     position: "absolute",
-    insetBlockStart: "var(--spacing-2)",
-    insetInlineEnd: "var(--spacing-2)",
+    inset: 0,
+    borderWidth: 0,
+    backgroundColor: "transparent",
+    color: "white",
+    cursor: "zoom-in",
+    display: "flex",
+    alignItems: "flex-end",
+    justifyContent: "center",
+    padding: "var(--spacing-3)",
+  },
+  previewExpandLabel: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: "var(--spacing-2)",
+    paddingBlock: "var(--spacing-2)",
+    paddingInline: "var(--spacing-3)",
+    borderRadius: "var(--radius-pill)",
+    backgroundColor: "rgba(0, 0, 0, 0.72)",
+    fontWeight: 600,
+  },
+  webControlDialog: {
+    width: "100vw",
+    height: "100vh",
+    maxWidth: "none",
+    maxHeight: "none",
+    margin: 0,
+    padding: 0,
+    borderWidth: 0,
+    backgroundColor: "#11131a",
+    color: "white",
+    overflow: "hidden",
+  },
+  webControlShell: {
+    display: "flex",
+    flexDirection: "column",
+    width: "100%",
+    height: "100%",
+  },
+  webControlViewport: {
+    minHeight: 0,
+    flexGrow: 1,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    overflow: "hidden",
+    padding: "var(--spacing-3)",
+  },
+  webControlImage: {
+    display: "block",
+    maxWidth: "100%",
+    maxHeight: "100%",
+    objectFit: "contain",
+    userSelect: "none",
+    touchAction: "none",
+  },
+  webControlToolbar: {
+    flexShrink: 0,
+    borderBlockStartWidth: 1,
+    borderBlockStartStyle: "solid",
+    borderBlockStartColor: "rgba(255, 255, 255, 0.18)",
+    backgroundColor: "rgba(0, 0, 0, 0.32)",
   },
 });
 interface ComputerPanelContentProps extends Omit<
@@ -166,16 +224,19 @@ function ComputerPanelContent({
               />
             )}
             {onExpandPreview !== undefined && frameUrl !== undefined ? (
-              <div {...stylex.props(localStyles.previewAction)}>
-                <IconButton
-                  label="Open Web Control"
-                  tooltip="Open Web Control"
-                  icon={<Icon icon={Maximize2} size="sm" />}
-                  variant="secondary"
-                  onClick={onExpandPreview}
-                  data-testid="computer-preview-expand"
-                />
-              </div>
+              <button
+                type="button"
+                aria-label="Open Web Control"
+                title="Open Web Control"
+                onClick={onExpandPreview}
+                {...stylex.props(localStyles.previewExpand)}
+                data-testid="computer-preview-expand"
+              >
+                <span {...stylex.props(localStyles.previewExpandLabel)}>
+                  <Icon icon={Maximize2} size="sm" color="inherit" />
+                  Open Web Control
+                </span>
+              </button>
             ) : null}
             {frameUrl === undefined ? (
               <div {...stylex.props(localStyles.previewState)}>
@@ -237,6 +298,7 @@ export function ComputerPanel({
   const [projectionState, setProjectionState] = useState<ScreenProjectionState>("closed");
   const [projectionError, setProjectionError] = useState<string>();
   const [frameUrl, setFrameUrl] = useState<string>();
+  const [controlReady, setControlReady] = useState(false);
   const [projectionAttempt, setProjectionAttempt] = useState(0);
   const [screenRetrying, setScreenRetrying] = useState(false);
   const connectionRef = useRef<ScreenProjectionConnection | undefined>(undefined);
@@ -262,6 +324,7 @@ export function ComputerPanel({
   }, []);
   const closePanel = useCallback((): void => {
     setPreviewExpanded(false);
+    setControlReady(false);
     setScreenRetrying(false);
     onClose();
     setProjectionError(undefined);
@@ -273,6 +336,7 @@ export function ComputerPanel({
       connectionRef.current?.close();
       connectionRef.current = undefined;
       replaceFrame(undefined);
+      setControlReady(false);
       setProjectionState("closed");
       return;
     }
@@ -288,6 +352,7 @@ export function ComputerPanel({
         onError: setProjectionError,
         onFrame: replaceFrame,
         onControlRevoked: clearBrowserHeldInput,
+        onControlStateChange: setControlReady,
       },
     );
     connectionRef.current = connection;
@@ -322,6 +387,14 @@ export function ComputerPanel({
     if (!previewExpanded || isSmallScreen) clearBrowserHeldInput();
     connectionRef.current?.setMode(previewExpanded && !isSmallScreen ? "expanded" : "preview");
   }, [clearBrowserHeldInput, isSmallScreen, previewExpanded]);
+
+  useEffect(() => {
+    const dialog = expandedRef.current;
+    if (dialog === null) return;
+    const shouldOpen = open && !isSmallScreen && previewExpanded && frameUrl !== undefined;
+    if (shouldOpen && !dialog.open) dialog.showModal();
+    else if (!shouldOpen && dialog.open) dialog.close();
+  }, [frameUrl, isSmallScreen, open, previewExpanded]);
 
   useEffect(() => {
     if (!open || isSmallScreen || !previewExpanded) return;
@@ -362,7 +435,11 @@ export function ComputerPanel({
   useEffect(() => {
     if (!open) return;
     const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === "Escape" && !previewExpanded) closePanel();
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (previewExpanded) setPreviewExpanded(false);
+      else closePanel();
     };
     window.addEventListener("keydown", onKeyDown, true);
     return () => window.removeEventListener("keydown", onKeyDown, true);
@@ -502,46 +579,64 @@ export function ComputerPanel({
         : {})}
     />
   );
-  const lightbox = frameUrl === undefined ? null : (
-    <Lightbox
+  const expandedDialog = frameUrl === undefined ? null : (
+    <dialog
       ref={expandedRef}
-      isOpen={!isSmallScreen && previewExpanded}
-      onOpenChange={setPreviewExpanded}
-      media={{
-        src: frameUrl,
-        alt: `Web Control for ${bot.name}`,
-        caption:
-          view.takeover === "active" ? (
-            <HStack gap={2} vAlign="center">
-              <Text>{bot.name}’s screen</Text>
-              <Button
-                label="I'm done"
-                variant="primary"
-                isLoading={contentProps.busy}
-                onClick={finishTakeover}
-                data-testid="computer-im-done"
-              />
-            </HStack>
-          ) : (
-            `${bot.name}’s screen`
-          ),
+      aria-label={`Web Control for ${bot.name}`}
+      onCancel={(event) => {
+        event.preventDefault();
+        setPreviewExpanded(false);
       }}
-      {...(previewExpanded
-        ? {
-            onPointerMove: sendExpandedMotion,
-            onPointerDown: pressExpandedPointer,
-            onPointerUp: releaseExpandedPointer,
-            onPointerCancel: releaseExpandedPointer,
-            onWheel: scrollExpandedPointer,
-            onContextMenu: suppressExpandedMenu,
-            onKeyDown: (event: ReactKeyboardEvent<HTMLDialogElement>) => sendExpandedKey(event, "pressed"),
-            onKeyUp: (event: ReactKeyboardEvent<HTMLDialogElement>) => sendExpandedKey(event, "released"),
-            onPaste: pasteExpandedText,
-            tabIndex: 0,
-            "data-testid": "expanded-web-control",
-          }
-        : {})}
-    />
+      onPointerMove={sendExpandedMotion}
+      onPointerDown={pressExpandedPointer}
+      onPointerUp={releaseExpandedPointer}
+      onPointerCancel={releaseExpandedPointer}
+      onWheel={scrollExpandedPointer}
+      onContextMenu={suppressExpandedMenu}
+      onKeyDown={(event) => sendExpandedKey(event, "pressed")}
+      onKeyUp={(event) => sendExpandedKey(event, "released")}
+      onPaste={pasteExpandedText}
+      tabIndex={0}
+      data-testid="expanded-web-control"
+      {...stylex.props(localStyles.webControlDialog)}
+    >
+      <div {...stylex.props(localStyles.webControlShell)}>
+        <div {...stylex.props(localStyles.webControlViewport)}>
+          <img
+            src={frameUrl}
+            alt={`Web Control for ${bot.name}`}
+            draggable={false}
+            {...stylex.props(localStyles.webControlImage)}
+          />
+        </div>
+        <HStack gap={2} padding={3} vAlign="center" wrap="wrap" xstyle={localStyles.webControlToolbar}>
+          <StackItem size="fill">
+            <HStack gap={2} vAlign="center" wrap="wrap">
+              <Text>{bot.name}’s screen</Text>
+              <Text color="secondary">
+                {controlReady ? "Click, scroll, or type to control" : "Connecting controls…"}
+              </Text>
+            </HStack>
+          </StackItem>
+          {view.takeover === "active" ? (
+            <Button
+              label="I'm done"
+              variant="primary"
+              isLoading={contentProps.busy}
+              onClick={finishTakeover}
+              data-testid="computer-im-done"
+            />
+          ) : null}
+          <IconButton
+            label="Close Web Control"
+            tooltip="Close Web Control"
+            icon={<Icon icon="close" size="md" color="inherit" />}
+            variant="ghost"
+            onClick={() => setPreviewExpanded(false)}
+          />
+        </HStack>
+      </div>
+    </dialog>
   );
 
   if (!open) return null;
@@ -572,7 +667,7 @@ export function ComputerPanel({
         </HStack>
         {content}
       </LayoutPanel>
-      {lightbox}
+      {expandedDialog}
     </>
   );
 }

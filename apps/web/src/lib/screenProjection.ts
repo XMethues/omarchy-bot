@@ -28,6 +28,7 @@ export interface ScreenProjectionCallbacks {
   onState(state: ScreenProjectionState): void;
   onFrame(frame: Blob | undefined): void;
   onError(error: string): void;
+  onControlStateChange?(active: boolean): void;
   onControlRevoked?(): void;
 }
 
@@ -171,6 +172,7 @@ export class ScreenProjectionConnection {
 
   setMode(mode: ScreenProjectionMode): void {
     if (this.#desiredMode !== mode) {
+      if (this.#inputAuthority !== undefined) this.callbacks.onControlStateChange?.(false);
       this.#inputAuthority = undefined;
       this.#releasingEpoch = undefined;
       this.#resumeAfterRelease = false;
@@ -268,6 +270,7 @@ export class ScreenProjectionConnection {
     this.#closed = true;
     this.#abort.abort();
     this.#pending = undefined;
+    if (this.#inputAuthority !== undefined) this.callbacks.onControlStateChange?.(false);
     this.#inputAuthority = undefined;
     this.#clearHeldInput();
     this.#geometry = undefined;
@@ -344,6 +347,7 @@ export class ScreenProjectionConnection {
         this.#inputAuthority?.controllerEpoch === authority.data.controllerEpoch
         || this.#releasingEpoch === authority.data.controllerEpoch
       ) {
+        if (this.#inputAuthority !== undefined) this.callbacks.onControlStateChange?.(false);
         this.#inputAuthority = undefined;
         this.#releasingEpoch = undefined;
         this.#clearHeldInput();
@@ -358,6 +362,7 @@ export class ScreenProjectionConnection {
       this.#inputAuthority !== undefined
       && this.#inputAuthority.controllerEpoch !== authority.data.controllerEpoch
     ) this.#clearHeldInput();
+    this.callbacks.onControlStateChange?.(true);
     this.#inputAuthority = authority.data;
     this.#inputSequence = 0;
     this.#releasingEpoch = undefined;
