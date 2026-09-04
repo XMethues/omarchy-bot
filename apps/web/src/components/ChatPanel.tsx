@@ -553,7 +553,8 @@ export function ChatPanel({
   const selectedThreadIsActive =
     thread?.latestTurn !== undefined && !isTerminalTurn(thread.latestTurn.status);
   const activeTurnCannotSteer = thread?.activeTurn !== undefined && !supportsSteering;
-  const composerIsDisabled = bot === undefined || !isAgentReady || activeTurnCannotSteer;
+  const isAgentNotReady = !isAgentReady && agentReadiness?.status !== "checking";
+  const composerIsDisabled = bot === undefined || isAgentNotReady || activeTurnCannotSteer;
   const workingSelectionKey = bot !== undefined && thread !== undefined ? `${bot.id}:${thread.id}` : undefined;
   useEffect(() => {
     if (workingSelectionKey === undefined || bot === undefined) {
@@ -719,19 +720,15 @@ export function ChatPanel({
 
 
   const readinessError: ContextualErrorCard | undefined =
-    agentReadiness !== undefined && agentReadiness.status !== "ready"
+    agentReadiness !== undefined && agentReadiness.status !== "ready" && agentReadiness.status !== "checking"
       ? {
           key: `agent:${agentReadiness.id}:${agentReadiness.status}:${agentReadiness.reason ?? ""}:${agentReadiness.guidance ?? ""}`,
-          title: agentReadiness.status === "checking"
-            ? `Checking ${agentReadiness.displayName}`
-            : `${agentReadiness.displayName} isn’t ready`,
-          description: agentReadiness.status === "checking"
-            ? `Checking whether ${agentReadiness.displayName} can accept new work.`
-            : [...new Set(
-                [agentReadiness.reason, agentReadiness.guidance].filter(
-                  (message): message is string => message !== undefined && message.trim().length > 0,
-                ),
-              )].join(" "),
+          title: `${agentReadiness.displayName} isn’t ready`,
+          description: [...new Set(
+            [agentReadiness.reason, agentReadiness.guidance].filter(
+              (message): message is string => message !== undefined && message.trim().length > 0,
+            ),
+          )].join(" "),
           ...(onRetryAgentReadiness !== undefined ? { retry: onRetryAgentReadiness } : {}),
         }
       : undefined;
@@ -786,7 +783,7 @@ export function ChatPanel({
       variant="ghost"
       size="md"
       isIconOnly
-      isDisabled={bot === undefined || !isAgentReady || activeTurnCannotSteer || voiceState.state === "transcribing" || voiceState.state === "unavailable"}
+      isDisabled={bot === undefined || isAgentNotReady || activeTurnCannotSteer || voiceState.state === "transcribing" || voiceState.state === "unavailable"}
       onClick={() => void (voiceState.state === "recording" ? stopDictation() : startDictation())}
       data-testid="dictation-button"
       data-state={voiceState.state}
@@ -920,7 +917,7 @@ export function ChatPanel({
               variant="ghost"
               size="sm"
               isIconOnly
-              isDisabled={bot === undefined || !isAgentReady || activeTurnCannotSteer}
+              isDisabled={bot === undefined || isAgentNotReady || activeTurnCannotSteer}
               onClick={() => fileInputRef.current?.click()}
               data-testid="attachment-picker"
             />
@@ -929,7 +926,7 @@ export function ChatPanel({
           placeholder={
             bot === undefined
               ? "Select or create a bot"
-              : !isAgentReady
+              : isAgentNotReady
                 ? "This bot’s agent isn’t ready"
                 : activeTurnCannotSteer
                   ? "Wait for this turn to finish"

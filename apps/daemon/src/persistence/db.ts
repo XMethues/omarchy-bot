@@ -802,4 +802,5 @@ export function recoverOnStartup(db: Database): void {
   db.query(`UPDATE turns SET status='failed', finished_at=?, outcome_reason='daemon restart' WHERE status NOT IN ('completed','cancelled','failed')`).run(now);
   db.query(`UPDATE bot_deletions SET state='failed', failure_json=?, updated_at=? WHERE state='cleaning'`)
     .run(JSON.stringify([{ stage: "database", resource: "daemon", message: "daemon restarted during permanent deletion" }]), now);
+  db.query(`UPDATE agents SET status='offline', reason='daemon restarted during check', updated_at=? WHERE status='checking'`).run(now);
 }

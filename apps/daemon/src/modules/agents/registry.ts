@@ -142,7 +142,10 @@ export class AgentsRegistry {
   async recheck(id: AgentId): Promise<AgentDto> {
     const generation = (this.#recheckGenerations.get(id) ?? 0) + 1;
     this.#recheckGenerations.set(id, generation);
-    this.#setStatus(id, "checking");
+    const wasReady = this.isReady(id);
+    if (!wasReady) {
+      this.#setStatus(id, "checking");
+    }
     const isCurrent = (): boolean => this.#recheckGenerations.get(id) === generation;
     if (!this.#adapterPresent(id)) {
       if (isCurrent()) this.#setStatus(id, "missing", "adapter not installed in this build");
