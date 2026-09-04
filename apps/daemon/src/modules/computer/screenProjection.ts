@@ -275,14 +275,14 @@ export class ScreenProjectionService {
     private readonly canAcceptWebControl: (owner: ComputerSurfaceOwner) => boolean,
     private readonly webControlClaimed: (owner: ComputerSurfaceOwner) => void,
     private readonly webControlReleased: (owner: ComputerSurfaceOwner) => void,
-    private readonly expandedFrameRate = 15,
+    private readonly videoFrameRate = 15,
     private readonly webRtcPort = 0,
   ) {
     if (!Number.isSafeInteger(webRtcPort) || webRtcPort < 0 || webRtcPort > 65_535) {
       throw new Error("Screen Projection WebRTC port must be an integer from 0 to 65535");
     }
-    if (!Number.isSafeInteger(expandedFrameRate) || expandedFrameRate < 1) {
-      throw new Error("expanded Screen Projection frame rate must be a positive integer");
+    if (!Number.isSafeInteger(videoFrameRate) || videoFrameRate < 1) {
+      throw new Error("H.264 Screen Projection frame rate must be a positive integer");
     }
     this.#unsubscribeScreens = screens.subscribe((transition) => {
       if (transition.state === "failed" || transition.state === "stopped") {
@@ -708,7 +708,7 @@ export class ScreenProjectionService {
         encoder = startH264Encoder({
           width: session.source.videoWidth,
           height: session.source.videoHeight,
-          frameRate: this.expandedFrameRate,
+          frameRate: this.videoFrameRate,
           onAccessUnit: (unit) => {
             if (
               session.encoder !== encoder
@@ -734,7 +734,7 @@ export class ScreenProjectionService {
               session.transportUnavailableSkips += 1;
               return;
             }
-            session.rtpConfig.timestamp = h264Timestamp(session.videoSequence, this.expandedFrameRate);
+            session.rtpConfig.timestamp = h264Timestamp(session.videoSequence, this.videoFrameRate);
             session.videoSequence += 1;
             try {
               if (session.videoTrack.sendMessageBinary(unit.bytes)) {
@@ -920,7 +920,7 @@ export class ScreenProjectionService {
 
   #scheduleNext(session: ProjectionSession): void {
     const now = performance.now();
-    const interval = session.mode === "expanded" ? 1_000 / this.expandedFrameRate : PREVIEW_INTERVAL_MS;
+    const interval = session.mode === "expanded" ? 1_000 / this.videoFrameRate : PREVIEW_INTERVAL_MS;
     session.nextFrameAt = Math.max((session.nextFrameAt ?? now) + interval, now);
     this.#schedule(session, session.nextFrameAt - now);
   }

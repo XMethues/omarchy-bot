@@ -3,8 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import capacityApproval from "./bot-screen-capacity-approval.json";
 
-
-/** Checked-in schema-v2 measurement that authorizes the shipped default. */
+/** Checked-in schema-v3 final-stack measurement that authorizes production capacity. */
 export const BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL = Object.freeze(capacityApproval);
 
 export interface Config {
@@ -30,7 +29,6 @@ export interface Config {
   /** Maximum time deletion waits for a cancelled Turn to report a terminal state. */
   botDeletionTerminalTimeoutMs: number;
   botScreenCapacity: number;
-  botScreenRuntime: "hyprland" | "cage";
   botScreenProfile: "1080p" | "720p";
   botScreenLogicalWidth: number;
   /** Single UDP port used by multiplexed WebRTC Screen Projection peers. */
@@ -60,11 +58,22 @@ function botScreenProfile(): {
   throw new Error("OMARCHY_BOT_SCREEN_PROFILE must be 1080p or 720p");
 }
 
-function botScreenRuntime(): "hyprland" | "cage" {
-  const runtime = process.env.OMARCHY_BOT_SCREEN_RUNTIME ?? "hyprland";
-  if (runtime === "hyprland" || runtime === "cage") return runtime;
-  throw new Error("OMARCHY_BOT_SCREEN_RUNTIME must be hyprland or cage");
+function botScreenCapacity(profile: "1080p" | "720p"): number {
+  const capacity = positiveInteger(
+    "OMARCHY_BOT_SCREEN_CAPACITY",
+    BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.defaultCapacity,
+  );
+  const supported = BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.capacityRows
+    .filter((row) => row.profile === profile && row.supportStatus === "supported")
+    .reduce((maximum, row) => Math.max(maximum, row.screens), 0);
+  if (capacity > supported) {
+    throw new Error(
+      `OMARCHY_BOT_SCREEN_CAPACITY=${capacity} exceeds the approved ${profile} capacity of ${supported}`,
+    );
+  }
+  return capacity;
 }
+
 
 export function loadConfig(): Config {
   const dataDir = process.env.OMARCHY_BOT_HOME ?? path.join(os.homedir(), ".local/share/omarchy-bot");
@@ -91,8 +100,7 @@ export function loadConfig(): Config {
     port: Number(process.env.OMARCHY_BOT_PORT ?? 7321),
     turnTimeoutMs: Number(process.env.OMARCHY_BOT_TURN_TIMEOUT_MS ?? 600_000),
     botDeletionTerminalTimeoutMs: Number(process.env.OMARCHY_BOT_DELETION_TERMINAL_TIMEOUT_MS ?? 30_000),
-    botScreenCapacity: positiveInteger("OMARCHY_BOT_SCREEN_CAPACITY", BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.defaultCapacity),
-    botScreenRuntime: botScreenRuntime(),
+    botScreenCapacity: botScreenCapacity(screenProfile.name),
     botScreenWebRtcPort: Number(process.env.OMARCHY_BOT_SCREEN_WEBRTC_PORT ?? 7323),
     botScreenProfile: screenProfile.name,
     botScreenLogicalWidth: screenProfile.logicalWidth,

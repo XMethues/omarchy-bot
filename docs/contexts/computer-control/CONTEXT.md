@@ -35,3 +35,7 @@ _Avoid_: Permanent human lease, general approval
 **Bot Screen**:
 A persistent independent visual and input surface assigned to one Bot while sharing intended machine resources. Different Bot Screens permit parallel desktop operation.
 _Avoid_: Agent Screen, Hyprland workspace, Shared Screen
+
+**Bot Desktop**:
+The persistent application surface hosted by a Bot Screen. It remains available between individual applications and is removed with its owning Bot.
+_Avoid_: Full Omarchy session, terminal placeholder, Shared Screen

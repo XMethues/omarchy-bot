@@ -1,0 +1,7 @@
+# Run one pure-headless Cage Bot Desktop per Bot
+
+Cage is the sole production compositor for Bot Screens. The daemon starts one pure-headless Cage process with one private Wayland socket, one headless output, and one persistent Bot Desktop per Bot; it does not select a runtime, fall back to another compositor, generate compositor configuration, or bootstrap through the user's Wayland session. Computer Preview is a low-frequency lossless PNG projection, Expanded Web Control is a WebRTC H.264 media track, and the HTTP PNG snapshot is a read-only fallback rather than a second live transport.
+
+This supersedes only the nested-Hyprland compositor and parent-Wayland mechanism in [ADR 0007](./0007-provision-nested-hyprland-per-bot.md). ADR 0007's decisions remain in force for Bot-owned Surface identity, private sockets, headless outputs, independent pixels/focus/input, per-Screen coordination, retained profiles, lifecycle cleanup, and the non-adversarial isolation boundary. The schema-v3 final-stack capacity report supports a default of four 1080p Screens and eight at the selectable 720p profile; eight 1080p Screens are explicitly unsupported.
+
+The processes still share the host Unix user, files, and permitted account resources. Private Wayland sockets prevent accidental routing but provide neither authentication nor an adversarial security boundary. Non-loopback HTTP and signaling remain explicitly unauthenticated and do not require HTTPS; H.264/WebRTC media encryption does not authenticate peer identity or make remote access secure.

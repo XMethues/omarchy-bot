@@ -3,6 +3,8 @@
 **Research date:** 2026-09-03<br>
 **Verdict:** **Conditional yes** for multiple concurrent independent Bot Screens under one Unix login, but **not** as multiple full Omarchy/UWSM graphical sessions. The supported shape is one real Omarchy/UWSM login session plus one nested compositor process per Bot. For strict separation from the Shared Screen, each nested Hyprland must bootstrap through Aquamarine’s Wayland backend, create its own headless output, remove its parent-visible `WAYLAND-*` output, and accept capture/input only through its own child Wayland socket. This strict headless transition is source-supported and locally verified. Two concurrent nested Hyprland instances with separate clients, input, and screenshots have been proven locally.
 
+> **Production update (2026-09-04):** The nested-Hyprland mechanism and the interim recommendation below are superseded by [Computer Control ADR 0008](../contexts/computer-control/adr/0008-run-cage-bot-desktops.md). The measurements remain historical evidence; production now provisions pure-headless Cage directly.
+
 A pure headless Hyprland launch is **not currently supported**: Hyprland 0.56.2 has no backend-selection option, Aquamarine’s headless backend supplies no DRM/render fd, and Aquamarine requires another implementation to provide an allocator. Old `WLR_BACKENDS=headless Hyprland` recipes do not apply because current Hyprland uses Aquamarine, not wlroots.
 
 ## Investigated versions

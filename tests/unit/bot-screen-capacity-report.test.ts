@@ -127,25 +127,36 @@ function passingDefaultRow(): TestCapacityRow {
 describe("Bot Screen default-capacity release gate", () => {
   test("ties default four to the checked final-client measurement", () => {
     expect(BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL).toMatchObject({
-      schemaVersion: 2,
+      schemaVersion: 3,
+      sourceReport: {
+        path: ".scratch/bot-screen-media-desktop/capacity-report.json",
+      },
+      runtime: "cage",
       defaultCapacity: 4,
       profile: "1080p",
       resolution: { width: 1920, height: 1080 },
+      capacityRows: [
+        { profile: "1080p", screens: 1, supportStatus: "supported" },
+        { profile: "1080p", screens: 2, supportStatus: "supported" },
+        { profile: "1080p", screens: 4, supportStatus: "supported" },
+        { profile: "1080p", screens: 8, supportStatus: "unsupported" },
+        { profile: "720p", screens: 8, supportStatus: "supported" },
+      ],
       finalClient: {
         built: true,
-        browser: "Brave Browser 152.1.94.119",
         mode: "headless",
-        lanEndpoint: "https://192.168.10.25:43245",
+        transport: "WebRTC H.264 video track",
+        lanEndpoint: "https://192.168.10.25:45039",
       },
       lifecycleProof: {
         strategy: "permanent-delete-and-fresh-provision",
         cyclesPerRow: 2,
       },
-      observedSourceFps: { minimum: 15.69, maximum: 15.76 },
-      observedEncodedFps: { minimum: 15.69, maximum: 15.76 },
-      observedDisplayedFps: { minimum: 15.69, maximum: 15.76 },
-      observedInputToVisibleP50Ms: 155,
-      observedInputToVisibleP95Ms: 480.4,
+      observedSourceFps: { minimum: 17.7, maximum: 18.16 },
+      observedEncodedFps: { minimum: 17.7, maximum: 18.16 },
+      observedDisplayedFps: { minimum: 17.57, maximum: 18.16 },
+      observedInputToVisibleP50Ms: 36,
+      observedInputToVisibleP95Ms: 93.9,
     });
     const row = passingDefaultRow();
     expect(requireApprovedDefaultRow([row], 4, BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL)).toBe(row);

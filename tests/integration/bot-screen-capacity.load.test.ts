@@ -741,7 +741,7 @@ async function runRow(profile: "1080p" | "720p", count: number, durationMs: numb
     );
     startupMs.push(...await Promise.all(owners.map((owner) => waitReady(harness, owner))));
     console.log(`Bot Screen load ${profile}/${count}: runtimes ready`);
-    const workloadApplication = process.env.OMARCHY_BOT_SCREEN_APP_BIN;
+    const workloadApplication = process.env.OMARCHY_BOT_LOAD_APP_BIN;
     if (workloadApplication === undefined) throw new Error("capacity workload application is unavailable");
     await Promise.all(owners.map((owner, index) =>
       harness.svc.screens.act(
@@ -1380,67 +1380,6 @@ async function runRow(profile: "1080p" | "720p", count: number, durationMs: numb
 }
 
 
-interface CompositorMeasurement {
-  runtime: "hyprland" | "cage";
-  resolution: { width: 1920; height: 1080 };
-  pssMiB: number;
-  rssMiB: number;
-  processes: ScreenResources["processes"];
-}
-
-async function measureCompositor(runtime: "hyprland" | "cage"): Promise<CompositorMeasurement> {
-  process.env.OMARCHY_BOT_SCREEN_RUNTIME = runtime;
-  process.env.OMARCHY_BOT_SCREEN_PROFILE = "1080p";
-  const harness = await startDaemon(undefined, { useProductionBotScreen: true, botScreenCapacity: 1 });
-  let owner: Owner | undefined;
-  try {
-    const botId = await makeBot(harness, `${runtime} compositor memory reference`);
-    const bot = await api<{ surfaceId: SurfaceId }>(harness, "GET", `/api/bots/${botId}`);
-    owner = { botId, surfaceId: bot.surfaceId };
-    await waitReady(harness, owner);
-    const generation = await currentGeneration(harness, owner);
-    const resources = await resourceWindow(
-      [owner],
-      new Map([[owner.surfaceId, generation]]),
-      1_000,
-    );
-    const processes = resources.screens[0]!.processes.filter((entry) => entry.role === "compositor");
-    if (processes.length === 0) throw new Error(`${runtime} compositor unit had no attributable processes`);
-    return {
-      runtime,
-      resolution: { width: 1920, height: 1080 },
-      pssMiB: Number(processes.reduce((sum, entry) => sum + entry.pssMiB, 0).toFixed(2)),
-      rssMiB: Number(processes.reduce((sum, entry) => sum + entry.rssMiB, 0).toFixed(2)),
-      processes,
-    };
-  } finally {
-    if (owner !== undefined) await destroyBot(harness, owner).catch(() => undefined);
-    await harness.stop();
-  }
-}
-
-async function compositorMemoryProof(): Promise<Record<string, unknown>> {
-  try {
-    const baseline = await measureCompositor("hyprland");
-    const candidate = await measureCompositor("cage");
-    const reductionPercent = baseline.pssMiB === 0
-      ? 0
-      : Number(((baseline.pssMiB - candidate.pssMiB) / baseline.pssMiB * 100).toFixed(2));
-    return {
-      passed: reductionPercent >= 25,
-      minimumReductionPercent: 25,
-      reductionPercent,
-      baseline,
-      candidate,
-    };
-  } catch (error) {
-    return {
-      passed: false,
-      minimumReductionPercent: 25,
-      error: error instanceof Error ? error.message : String(error),
-    };
-  }
-}
 async function describeBinary(
   requested: string | undefined,
   fallback: string,
@@ -1483,8 +1422,9 @@ function measuredRange(frames: readonly Record<string, unknown>[], key: string):
 
 function candidateApproval(
   row: Record<string, unknown>,
+  rows: readonly Record<string, unknown>[],
   machine: Record<string, unknown>,
-  compositorMemory: Record<string, unknown>,
+  reportPath: string,
   reproducibleCommand: string,
 ): Record<string, unknown> {
   if (!Array.isArray(row.frames) || row.frames.length === 0) throw new Error("approved row lacked per-Screen frames");
@@ -1511,12 +1451,28 @@ function candidateApproval(
   };
   return {
     schemaVersion: 3,
+    sourceReport: {
+      schemaVersion: 3,
+      path: reportPath,
+    },
     measuredAt: new Date().toISOString(),
     machine,
     runtime: "cage",
     profile: row.profile,
     resolution: row.resolution,
     defaultCapacity: row.screens,
+    capacityRows: rows.map((candidate) => ({
+      profile: candidate.profile,
+      screens: candidate.screens,
+      supportStatus: candidate.supportStatus,
+      ...(candidate.supportStatus === "unsupported"
+        ? {
+            reason: typeof candidate.error === "string"
+              ? candidate.error
+              : "the measured performance row did not pass the release threshold",
+          }
+        : {}),
+    })),
     captureFrameRate: BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.captureFrameRate,
     targetFps: row.targetFps,
     durationMs: row.durationMs,
@@ -1551,7 +1507,6 @@ function candidateApproval(
       rssMiB: measuredNumber(total, "rssMiB"),
       cpuPercent: measuredNumber(total, "cpuPercent"),
     },
-    compositorMemory,
     admission: row.admission,
     inputToVisibleP50LimitMs: BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.inputToVisibleP50LimitMs,
     inputToVisibleP95EnvelopeMs: BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.observedInputToVisibleP95Ms,
@@ -1578,7 +1533,6 @@ loadTest("measures sustained final-stack Bot Screen capacity and admission", asy
     ?? path.join(path.dirname(reportPath), "omarchy-bot-screen-capacity-approval.json");
   const reproducibleCommand = [
     "OMARCHY_BOT_REAL_SCREEN_LOAD=1",
-    "OMARCHY_BOT_SCREEN_RUNTIME=cage",
     "OMARCHY_BOT_LOAD_MATRIX=1,2,4,8",
     "OMARCHY_BOT_LOAD_FALLBACK=1",
     "OMARCHY_BOT_LOAD_LAN_INTERFACE=<lan-interface>",
@@ -1586,9 +1540,8 @@ loadTest("measures sustained final-stack Bot Screen capacity and admission", asy
     "OMARCHY_BOT_LOAD_APPROVAL=<approval.json>",
     "bun test tests/integration/bot-screen-capacity.load.test.ts",
   ].join(" ");
-  const [cage, hyprland, ffmpeg, browser, gpu] = await Promise.all([
+  const [cage, ffmpeg, browser, gpu] = await Promise.all([
     describeBinary(process.env.OMARCHY_BOT_CAGE_BIN, "cage", ["-v"]),
-    describeBinary(undefined, "Hyprland"),
     describeBinary(process.env.OMARCHY_BOT_FFMPEG_BIN, "ffmpeg", ["-version"]),
     describeBinary(process.env.OMARCHY_BOT_LOAD_BROWSER_BIN, "brave"),
     gpuSnapshot(),
@@ -1599,9 +1552,7 @@ loadTest("measures sustained final-stack Bot Screen capacity and admission", asy
     cpu: os.cpus()[0]?.model ?? "unknown",
     logicalCpus: os.cpus().length,
     memoryMiB: Math.round(os.totalmem() / 1024 / 1024),
-    waylandDisplay: process.env.WAYLAND_DISPLAY ?? null,
     cage,
-    hyprland,
     ffmpeg,
     browser,
     gpu,
@@ -1622,11 +1573,9 @@ loadTest("measures sustained final-stack Bot Screen capacity and admission", asy
       captureFrameRate: BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.captureFrameRate,
       medianLatencyLimitMs: BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.inputToVisibleP50LimitMs,
       p95LatencyEnvelopeMs: BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.observedInputToVisibleP95Ms,
-      compositorMemoryReductionMinimumPercent: 25,
     },
     previousApprovedEnvelope: BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL,
     machine,
-    compositorMemory: null,
     releaseGate: { passed: false, pending: true },
     operationalGate: { passed: false, pending: true },
     rows,
@@ -1641,10 +1590,9 @@ loadTest("measures sustained final-stack Bot Screen capacity and admission", asy
   persistReport();
 
   const prior = {
-    application: process.env.OMARCHY_BOT_SCREEN_APP_BIN,
+    application: process.env.OMARCHY_BOT_LOAD_APP_BIN,
     profile: process.env.OMARCHY_BOT_SCREEN_PROFILE,
     frameRate: process.env.OMARCHY_BOT_SCREEN_FRAME_RATE,
-    runtime: process.env.OMARCHY_BOT_SCREEN_RUNTIME,
   };
   let fixtureRoot: string | undefined;
   let executionError: Error | undefined;
@@ -1658,11 +1606,8 @@ loadTest("measures sustained final-stack Bot Screen capacity and admission", asy
     }
     await buildFinalWebClient(path.resolve(import.meta.dir, "../.."));
     fixtureRoot = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-screen-load-"));
-    process.env.OMARCHY_BOT_SCREEN_APP_BIN = createBrowserFixture(fixtureRoot, browserBinary);
+    process.env.OMARCHY_BOT_LOAD_APP_BIN = createBrowserFixture(fixtureRoot, browserBinary);
     process.env.OMARCHY_BOT_SCREEN_FRAME_RATE = String(BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.captureFrameRate);
-    report.compositorMemory = await compositorMemoryProof();
-    persistReport();
-    process.env.OMARCHY_BOT_SCREEN_RUNTIME = "cage";
     process.env.OMARCHY_BOT_SCREEN_PROFILE = "1080p";
     for (const count of matrix) {
       try {
@@ -1702,10 +1647,9 @@ loadTest("measures sustained final-stack Bot Screen capacity and admission", asy
   } finally {
     if (fixtureRoot !== undefined) rmSync(fixtureRoot, { recursive: true, force: true });
     for (const [name, value] of [
-      ["OMARCHY_BOT_SCREEN_APP_BIN", prior.application],
+      ["OMARCHY_BOT_LOAD_APP_BIN", prior.application],
       ["OMARCHY_BOT_SCREEN_PROFILE", prior.profile],
       ["OMARCHY_BOT_SCREEN_FRAME_RATE", prior.frameRate],
-      ["OMARCHY_BOT_SCREEN_RUNTIME", prior.runtime],
     ] as const) {
       if (value === undefined) delete process.env[name];
       else process.env[name] = value;
@@ -1718,8 +1662,6 @@ loadTest("measures sustained final-stack Bot Screen capacity and admission", asy
   if (executionError === undefined) {
     try {
       requireApprovedDefaultRow(rows, chosenDefault, BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL);
-      const compositor = objectRecord(report.compositorMemory, "compositor memory proof");
-      if (compositor.passed !== true) throw new Error("Cage did not pass the matched 1080p compositor-memory reduction gate");
     } catch (error) {
       releaseGateError = error instanceof Error ? error : new Error(String(error));
     }
@@ -1740,8 +1682,9 @@ loadTest("measures sustained final-stack Bot Screen capacity and admission", asy
   if (releaseGateError === undefined && operationalGateError === undefined && defaultRow !== undefined) {
     const approval = candidateApproval(
       defaultRow,
+      rows,
       machine,
-      objectRecord(report.compositorMemory, "compositor memory proof"),
+      reportPath,
       reproducibleCommand,
     );
     report.candidateApproval = approval;

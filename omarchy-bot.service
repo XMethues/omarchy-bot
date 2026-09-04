@@ -12,15 +12,12 @@
 #        systemctl --user start omarchy-bot
 #        systemctl --user enable omarchy-bot
 #
-# The daemon spawns the pi + computer workers itself; it does not need a
-# desktop session to serve the API, but the computer worker needs access to
-# the running Wayland session (WAYLAND_DISPLAY is discovered at runtime).
+# The daemon spawns the Agent and computer workers and owns pure-headless Cage
+# Bot Screens. It does not inherit or discover a graphical-session Wayland socket.
 
 [Unit]
 Description=omarchy-bot daemon (multi-agent bot harness)
 Documentation=https://github.com/omarchy-bot/omarchy-bot
-PartOf=graphical-session.target
-After=graphical-session.target
 
 [Service]
 Type=simple
@@ -34,4 +31,4 @@ KillMode=control-group
 NoNewPrivileges=true
 
 [Install]
-WantedBy=graphical-session.target
+WantedBy=default.target

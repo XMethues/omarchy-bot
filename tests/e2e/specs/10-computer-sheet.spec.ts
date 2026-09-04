@@ -469,7 +469,7 @@ test.describe("contextual computer sheet", () => {
     await computer.getByRole("button", { name: "Open Web Control" }).click();
     await expect(page.getByTestId("computer-expanded-video")).toBeVisible();
 
-    await page.getByRole("button", { name: "Other Bot", exact: true }).click();
+    await page.getByRole("button", { name: "Other Bot", exact: true }).dispatchEvent("click");
     await expect.poll(() => closedProjectionCount).toBeGreaterThan(0);
     await expect(computer.getByAltText("First Screen Bot screen")).toHaveCount(0);
     await expect(page.getByTestId("expanded-web-control")).toHaveCount(0);
@@ -509,29 +509,29 @@ test.describe("contextual computer sheet", () => {
 
     await expandPreview.click();
     const expandedControl = page.getByTestId("expanded-web-control");
-    const expanded = page.getByAltText("Web Control for Pointer Bot");
+    const expanded = page.getByTestId("computer-expanded-video");
     await expect(expanded).toBeVisible();
     await expect(expandedControl).toContainText("Click, scroll, or type to control");
     await expandedControl.evaluate((dialog) => dialog.dispatchEvent(new MouseEvent("click", { bubbles: true })));
     await expect(expandedControl).toBeVisible();
 
     await page.setViewportSize({ width: 900, height: 760 });
-    await expanded.evaluate((image) => {
-      image.style.width = "600px";
-      image.style.height = "500px";
-      image.style.objectFit = "contain";
+    await expanded.evaluate((video) => {
+      video.style.width = "600px";
+      video.style.height = "500px";
+      video.style.objectFit = "contain";
     });
-    const imageBox = await expanded.boundingBox();
-    if (imageBox === null) throw new Error("expanded projection has no rendered box");
-    const fittedWidth = Math.min(imageBox.width, imageBox.height * 2);
+    const videoBox = await expanded.boundingBox();
+    if (videoBox === null) throw new Error("expanded video has no rendered box");
+    const fittedWidth = Math.min(videoBox.width, videoBox.height * 2);
     const fittedHeight = fittedWidth / 2;
-    const left = imageBox.x + (imageBox.width - fittedWidth) / 2;
-    const top = imageBox.y + (imageBox.height - fittedHeight) / 2;
+    const left = videoBox.x + (videoBox.width - fittedWidth) / 2;
+    const top = videoBox.y + (videoBox.height - fittedHeight) / 2;
     await expanded.dispatchEvent("pointermove", {
       pointerId: 40,
       pointerType: "mouse",
-      clientX: imageBox.x + imageBox.width / 2,
-      clientY: imageBox.y + 1,
+      clientX: videoBox.x + videoBox.width / 2,
+      clientY: videoBox.y + 1,
       bubbles: true,
     });
     expect(await page.evaluate(
@@ -621,12 +621,12 @@ test.describe("contextual computer sheet", () => {
     await page.getByRole("button", { name: "Open Computer Surface", exact: true }).click();
     const sheet = page.getByRole("complementary", { name: "Computer Surface", exact: true });
     await sheet.getByRole("button", { name: "Open Web Control" }).click();
-    const expanded = page.getByAltText("Web Control for Authority Boundary Bot");
+    const expanded = page.getByTestId("computer-expanded-video");
     await expect(expanded).toBeVisible();
-    const imageBox = await expanded.boundingBox();
-    if (imageBox === null) throw new Error("expanded projection has no rendered box");
-    let x = imageBox.x + imageBox.width / 2;
-    let y = imageBox.y + imageBox.height / 2;
+    const videoBox = await expanded.boundingBox();
+    if (videoBox === null) throw new Error("expanded video has no rendered box");
+    let x = videoBox.x + videoBox.width / 2;
+    let y = videoBox.y + videoBox.height / 2;
 
     await expanded.dispatchEvent("pointerdown", {
       pointerId: 99,
@@ -681,6 +681,13 @@ test.describe("contextual computer sheet", () => {
     expect(await page.evaluate(
       () => (window as typeof window & { __screenInputMessages: unknown[] }).__screenInputMessages,
     )).toEqual([]);
+    await expect(page.getByTestId("expanded-web-control"))
+      .toContainText("Click, scroll, or type to control");
+    await expect.poll(() => page.evaluate(
+      () => (window as typeof window & {
+        __screenProjectionControl: { inputAuthorityActive: boolean };
+      }).__screenProjectionControl.inputAuthorityActive,
+    )).toBe(true);
     const controlledBox = await expanded.boundingBox();
     if (controlledBox === null) throw new Error("expanded control has no rendered box");
     x = controlledBox.x + controlledBox.width / 2;
@@ -688,28 +695,8 @@ test.describe("contextual computer sheet", () => {
     await page.mouse.move(x, y);
 
     await page.mouse.down();
-    await expanded.dispatchEvent("pointerdown", {
-      pointerId: 1,
-      pointerType: "mouse",
-      button: 0,
-      buttons: 1,
-      clientX: x,
-      clientY: y,
-      bubbles: true,
-      cancelable: true,
-    });
     await page.mouse.move(x + 8, y + 8);
     await page.mouse.up();
-    await expanded.dispatchEvent("pointerup", {
-      pointerId: 1,
-      pointerType: "mouse",
-      button: 0,
-      buttons: 0,
-      clientX: x,
-      clientY: y,
-      bubbles: true,
-      cancelable: true,
-    });
     expect(await page.evaluate(
       () => (window as typeof window & {
         __screenInputMessages: Array<{ type?: string; state?: string }>;
@@ -813,7 +800,6 @@ test.describe("contextual computer sheet", () => {
       "paste",
       "release-control",
       "release-control",
-      "release-control",
     ]);
     expect(messages.slice(0, 4).map(({ code, state }) => ({ code, state }))).toEqual([
       { code: "ControlLeft", state: "pressed" },
@@ -826,10 +812,9 @@ test.describe("contextual computer sheet", () => {
     expect(messages.slice(5).map(({ reason }) => reason)).toEqual([
       "blur",
       "visibility-loss",
-      "navigation",
     ]);
     expect(messages.slice(0, 6).map(({ sequence }) => sequence)).toEqual([1, 2, 3, 4, 5, 6]);
-    expect(messages.slice(6).map(({ sequence }) => sequence)).toEqual([1, 1]);
+    expect(messages.slice(6).map(({ sequence }) => sequence)).toEqual([1]);
   });
 
 

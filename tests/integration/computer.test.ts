@@ -315,15 +315,15 @@ describe("contextual computer control", () => {
     expect(adapter.starts).toHaveLength(1);
   });
 
-  test("missing Hyprland reports Screen unavailable without falling back to the host", async () => {
-    const previousHyprlandBin = process.env.OMARCHY_BOT_HYPRLAND_BIN;
-    process.env.OMARCHY_BOT_HYPRLAND_BIN = "/definitely/missing/Hyprland";
+  test("missing Cage reports Screen unavailable without falling back to another desktop", async () => {
+    const previousCageBin = process.env.OMARCHY_BOT_CAGE_BIN;
+    process.env.OMARCHY_BOT_CAGE_BIN = "/definitely/missing/cage";
     await h.stop();
     try {
       h = await startDaemon(undefined, { useProductionBotScreen: true });
     } finally {
-      if (previousHyprlandBin === undefined) delete process.env.OMARCHY_BOT_HYPRLAND_BIN;
-      else process.env.OMARCHY_BOT_HYPRLAND_BIN = previousHyprlandBin;
+      if (previousCageBin === undefined) delete process.env.OMARCHY_BOT_CAGE_BIN;
+      else process.env.OMARCHY_BOT_CAGE_BIN = previousCageBin;
     }
     const owner = await ownerFor(h, await makeBot(h, "Unavailable screen"));
 

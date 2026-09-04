@@ -14,6 +14,8 @@ Styling:               Astryx tokens with product-owned layout styles
 Frontend data:         TanStack Router + Query + Virtual where needed
 Desktop integration:   systemd user service + localhost API
 Computer backend:      computer-use-linux behind computer-worker
+Bot Screen runtime:   one pure-headless Cage + persistent Bot Desktop per Bot
+Screen Projection:    low-frequency PNG preview + WebRTC H.264 Web Control
 Voice input:           Voxtype through the localhost daemon
 Persistence:           SQLite + daemon-managed local media
 ```
@@ -25,6 +27,8 @@ The daemon owns product state, SQLite, the REST/WebSocket API, process supervisi
 Workers start on demand by Agent, not by visible Bot. Several user-created Bots may share one Agent worker/runtime while retaining independent native sessions.
 
 The production daemon runs as a systemd user service with a fixed Bun runtime and absolute paths. Omarchy Shell integration may launch or summarize the product, but it does not own the daemon lifecycle.
+
+Bot Screens do not inherit the user's Wayland display. The daemon provisions Cage directly with private runtime directories and headless outputs; no runtime selector or fallback compositor is supported. The HTTP PNG snapshot remains a read-only recovery path and never substitutes an interactive live transport.
 
 ## Agent integration rule
 

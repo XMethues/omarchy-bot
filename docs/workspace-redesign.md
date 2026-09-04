@@ -200,19 +200,17 @@ The app does not depend on Voxtype's synthetic Return because file output bypass
 
 ## 10. Computer
 
-The current implementation has one real Omarchy screen shared by all Bots and the user.
+Each Bot owns one persistent independent Bot Screen. Screens have independent pixels, focus, cursor, input state, and retained application profiles while sharing intended user-account resources.
 
-- Keep one invisible global input arbiter so clicks and typing cannot interleave.
-- Do not show lease holders, TTLs, queue depth, or engineering diagnostics in normal UI.
+- Keep input arbitration internal and scoped to each Bot Screen so a Bot and the user cannot interleave actions on that Screen while unrelated Bots continue independently.
+- Do not show controller epochs, queues, runtime generations, or engineering diagnostics in normal UI.
 - A Computer glyph is always present in the Conversation Header. It is visually quiet while inactive and gains state only while the Bot is using the computer or needs human input.
-- The glyph toggles a right-side Astryx `LayoutPanel` at every window width, with a live preview and plain-language activity.
-- Selecting the preview's expand icon opens the desktop image in an Astryx Lightbox modal.
+- The glyph toggles a right-side Astryx `LayoutPanel` at every window width with a low-frequency, lossless, read-only Computer Preview and plain-language activity.
+- Expanding the preview opens Web Control backed only by the H.264 Screen Projection media track. The HTTP PNG snapshot is an explicit read-only fallback, never an interactive image stream.
 - Show **Take control** only when human input is relevant.
-- While the user controls the screen, show **Return to Bot**; re-observe before resuming automation.
-- Emergency control is never permanent idle Sidebar chrome. It is immediately available while computer input is active and remains available in the stopped state so the user can deliberately resume.
-- The arbiter coordinates the shared input seat; it does not approve or filter Agent capabilities.
-
-Independent per-Bot screens remain the required future architecture for true parallel desktop operation. Hyprland workspaces alone are not sufficient isolation.
+- While the user controls the Screen, show **Return to Bot**; re-observe before resuming automation.
+- Permanent deletion removes the Bot Screen's runtime state and retained profile before deleting its Surface identity.
+- Screen coordination does not approve or filter Agent capabilities, and compositor/socket isolation is not an adversarial security boundary.
 
 ## 11. Settings
 

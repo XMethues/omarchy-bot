@@ -419,8 +419,32 @@ export function requireApprovedDefaultRow(
   configuredDefault: number,
   approval: CapacityApproval,
 ): CapacityRowForGate {
-  if (approval.schemaVersion !== 2) {
-    throw new Error("configured Bot Screen default requires a schema-v2 approval artifact");
+  if (approval.schemaVersion !== 3) {
+    throw new Error("configured Bot Screen default requires a schema-v3 approval artifact");
+  }
+  if (
+    approval.sourceReport.schemaVersion !== 3
+    || approval.sourceReport.path.trim() === ""
+  ) {
+    throw new Error("configured Bot Screen default approval does not reference its schema-v3 final-stack report");
+  }
+  const supportedDefault = approval.capacityRows.some((candidate) =>
+    candidate.profile === approval.profile
+    && candidate.screens === approval.defaultCapacity
+    && candidate.supportStatus === "supported"
+  );
+  const unsupportedEight1080 = approval.capacityRows.some((candidate) =>
+    candidate.profile === "1080p"
+    && candidate.screens === 8
+    && candidate.supportStatus === "unsupported"
+  );
+  const supportedEight720 = approval.capacityRows.some((candidate) =>
+    candidate.profile === "720p"
+    && candidate.screens === 8
+    && candidate.supportStatus === "supported"
+  );
+  if (!supportedDefault || !unsupportedEight1080 || !supportedEight720) {
+    throw new Error("configured Bot Screen default approval lacks the explicit supported capacity matrix");
   }
   if (
     approval.finalClient.built !== true

@@ -476,14 +476,14 @@ describe("WebRTC Screen Projection signaling", () => {
     expect(adapter.captureStreamsClosed).toBe(1);
   }, 15_000);
 
-  test("streams expanded Screen Projection as H.264 without delivering expanded preview images", async () => {
-    const owner = await ownerFor(h, await makeBot(h, "Expanded frame rate"));
-    const connection = await connectProjection(h, owner, "expanded-frame-rate-browser");
+  test("uses only the H.264 media track during Expanded Web Control", async () => {
+    const owner = await ownerFor(h, await makeBot(h, "H.264 media track"));
+    const connection = await connectProjection(h, owner, "h264-media-browser");
     peer = connection.peer;
     const firstFrame = Promise.withResolvers<void>();
     const ninthFrame = Promise.withResolvers<void>();
     let videoFrames = 0;
-    let expandedPreviewFrames = 0;
+    let unexpectedPreviewFrames = 0;
     connection.video.onMessage(() => {
       videoFrames += 1;
       if (videoFrames === 1) firstFrame.resolve();
@@ -492,7 +492,7 @@ describe("WebRTC Screen Projection signaling", () => {
     connection.frames.onMessage((raw) => {
       if (typeof raw !== "string") return;
       const message = JSON.parse(raw) as { type?: string };
-      if (message.type === "preview-frame") expandedPreviewFrames += 1;
+      if (message.type === "preview-frame") unexpectedPreviewFrames += 1;
     });
 
     expect(connection.control.sendMessage(JSON.stringify({
@@ -523,7 +523,7 @@ describe("WebRTC Screen Projection signaling", () => {
       throw new Error(`${error instanceof Error ? error.message : String(error)}; ${diagnostics()}`);
     }
     expect(performance.now() - startedAt).toBeLessThanOrEqual(700);
-    expect(expandedPreviewFrames).toBe(0);
+    expect(unexpectedPreviewFrames).toBe(0);
     expect(connection.control.sendMessage(JSON.stringify({
       version: SCREEN_PROJECTION_PROTOCOL_VERSION,
       type: "browser-metrics",

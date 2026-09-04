@@ -1,13 +1,16 @@
 {
   "schemaVersion": 3,
-  "measuredAt": "2026-09-04T14:03:40.632Z",
+  "sourceReport": {
+    "schemaVersion": 3,
+    "path": "/home/colin/Projects/omarchy-bot/.scratch/bot-screen-media-desktop/capacity-report.json"
+  },
+  "measuredAt": "2026-09-04T14:29:41.855Z",
   "machine": {
     "hostname": "omarchy",
     "platform": "linux 7.1.9-arch1-2 x64",
     "cpu": "AMD Ryzen 9 7900X 12-Core Processor",
     "logicalCpus": 24,
     "memoryMiB": 63496,
-    "waylandDisplay": null,
     "cage": {
       "available": true,
       "requested": "/tmp/cage-portable.sh",
@@ -17,17 +20,6 @@
       ],
       "status": 0,
       "stdout": "Cage version 0.3.1-b7b774a (branch 'makepkg')",
-      "stderr": ""
-    },
-    "hyprland": {
-      "available": true,
-      "requested": "Hyprland",
-      "path": "/usr/bin/Hyprland",
-      "versionArgs": [
-        "--version"
-      ],
-      "status": 0,
-      "stdout": "Hyprland 0.56.2 built from branch v0.56.2 at commit efb50993780079460b0cbed1363e2166a2de1d9f clean ([gha] Nix: update inputs).\nDate: Wed Aug 5 14:13:21 2026\nTag: v0.56.2, commits: 7661\n\nLibraries:\nHyprgraphics: built against 0.5.1, system has 0.5.1\nHyprutils: built against 0.14.0, system has 0.14.1\nHyprcursor: built against 0.1.13, system has 0.1.13\nHyprlang: built against 0.6.8, system has 0.6.8\nAquamarine: built against 0.14.0, system has 0.14.0\n\nVersion ABI string: efb50993780079460b0cbed1363e2166a2de1d9f_aq_0.14_hu_0.14_hg_0.5_hc_0.1_hlg_0.6\nno flags were set",
       "stderr": ""
     },
     "ffmpeg": {
@@ -73,6 +65,34 @@
     "height": 1080
   },
   "defaultCapacity": 4,
+  "capacityRows": [
+    {
+      "profile": "1080p",
+      "screens": 1,
+      "supportStatus": "supported"
+    },
+    {
+      "profile": "1080p",
+      "screens": 2,
+      "supportStatus": "supported"
+    },
+    {
+      "profile": "1080p",
+      "screens": 4,
+      "supportStatus": "supported"
+    },
+    {
+      "profile": "1080p",
+      "screens": 8,
+      "supportStatus": "unsupported",
+      "reason": "the measured performance row did not pass the release threshold"
+    },
+    {
+      "profile": "720p",
+      "screens": 8,
+      "supportStatus": "supported"
+    }
+  ],
   "captureFrameRate": 18,
   "targetFps": 15,
   "durationMs": 15000,
@@ -96,35 +116,35 @@
     "mode": "headless",
     "transport": "WebRTC H.264 video track",
     "lanInterface": "eno1",
-    "lanEndpoint": "https://192.168.10.25:45039",
+    "lanEndpoint": "https://192.168.10.25:41601",
     "measurement": "daemon source/encode/send counters, browser WebRTC decode, video paint, and canvas readback"
   },
   "observedSourceFps": {
-    "minimum": 17.7,
-    "maximum": 18.16
+    "minimum": 18.31,
+    "maximum": 18.45
   },
   "observedEncodedFps": {
-    "minimum": 17.7,
-    "maximum": 18.16
+    "minimum": 18.25,
+    "maximum": 18.38
   },
   "observedSentFps": {
-    "minimum": 17.7,
-    "maximum": 18.16
+    "minimum": 18.25,
+    "maximum": 18.38
   },
   "observedReceivedFps": {
-    "minimum": 17.7,
-    "maximum": 18.16
+    "minimum": 18.25,
+    "maximum": 18.45
   },
   "observedDecodedFps": {
-    "minimum": 17.76,
-    "maximum": 18.23
+    "minimum": 18.25,
+    "maximum": 18.45
   },
   "observedDisplayedFps": {
-    "minimum": 17.57,
-    "maximum": 18.16
+    "minimum": 18.12,
+    "maximum": 18.31
   },
-  "observedEncodedBytes": 6991670,
-  "observedEncodedBitrateBps": 3707468.92,
+  "observedEncodedBytes": 7811692,
+  "observedEncodedBitrateBps": 4146927.64,
   "observedDrops": {
     "preCaptureBackpressureSkips": 0,
     "invalidFrameDrops": 0,
@@ -132,11 +152,11 @@
     "transportUnavailableSkips": 0,
     "transportDrops": 0,
     "decodeDrops": 0,
-    "paintDrops": 11,
+    "paintDrops": 9,
     "unexplainedDrops": 0
   },
-  "observedInputToVisibleP50Ms": 36,
-  "observedInputToVisibleP95Ms": 93.9,
+  "observedInputToVisibleP50Ms": 42.1,
+  "observedInputToVisibleP95Ms": 68.4,
   "observedCaptureToBrowserMs": {
     "available": false,
     "reason": "WebRTC H.264 did not negotiate an absolute capture timestamp"
@@ -146,60 +166,9 @@
     "maximum": 0.98
   },
   "activeResources": {
-    "pssMiB": 1512.4,
-    "rssMiB": 7183.98,
-    "cpuPercent": 217.18
-  },
-  "compositorMemory": {
-    "passed": true,
-    "minimumReductionPercent": 25,
-    "reductionPercent": 61.25,
-    "baseline": {
-      "runtime": "hyprland",
-      "resolution": {
-        "width": 1920,
-        "height": 1080
-      },
-      "pssMiB": 116.54,
-      "rssMiB": 364.53,
-      "processes": [
-        {
-          "pid": 2730181,
-          "role": "compositor",
-          "executable": "Hyprland",
-          "pssMiB": 116.54,
-          "rssMiB": 364.53,
-          "cpuPercent": 4
-        }
-      ]
-    },
-    "candidate": {
-      "runtime": "cage",
-      "resolution": {
-        "width": 1920,
-        "height": 1080
-      },
-      "pssMiB": 45.16,
-      "rssMiB": 268.62,
-      "processes": [
-        {
-          "pid": 2730935,
-          "role": "compositor",
-          "executable": "cage",
-          "pssMiB": 45.02,
-          "rssMiB": 266.46,
-          "cpuPercent": 0
-        },
-        {
-          "pid": 2730955,
-          "role": "compositor",
-          "executable": "omarchy-bot-desktop",
-          "pssMiB": 0.14,
-          "rssMiB": 2.16,
-          "cpuPercent": 0
-        }
-      ]
-    }
+    "pssMiB": 1524.76,
+    "rssMiB": 7151.93,
+    "cpuPercent": 204.21
   },
   "admission": {
     "capacity": 4,
@@ -214,8 +183,8 @@
     "rejected": {
       "status": 503,
       "body": {
-        "botId": "bot_a7b67735604b4097a77e182a5864c4a3",
-        "surfaceId": "surf_242e413f49be40ab91f8828fb2a83574",
+        "botId": "bot_a5f40e27e1ea4128b79e4c9ac8b0f842",
+        "surfaceId": "surf_07690e5f936945b3b4d77f5091a2258b",
         "takeover": "unavailable",
         "state": "unavailable",
         "activity": "Bot Screen capacity is full (4/4).",
@@ -231,6 +200,6 @@
     "activeEnvelopeMaintained": true
   },
   "inputToVisibleP50LimitMs": 200,
-  "inputToVisibleP95EnvelopeMs": 480.4,
-  "reproducibleCommand": "OMARCHY_BOT_REAL_SCREEN_LOAD=1 OMARCHY_BOT_SCREEN_RUNTIME=cage OMARCHY_BOT_LOAD_MATRIX=1,2,4,8 OMARCHY_BOT_LOAD_FALLBACK=1 OMARCHY_BOT_LOAD_LAN_INTERFACE=<lan-interface> OMARCHY_BOT_LOAD_REPORT=<report.json> OMARCHY_BOT_LOAD_APPROVAL=<approval.json> bun test tests/integration/bot-screen-capacity.load.test.ts"
+  "inputToVisibleP95EnvelopeMs": 93.9,
+  "reproducibleCommand": "OMARCHY_BOT_REAL_SCREEN_LOAD=1 OMARCHY_BOT_LOAD_MATRIX=1,2,4,8 OMARCHY_BOT_LOAD_FALLBACK=1 OMARCHY_BOT_LOAD_LAN_INTERFACE=<lan-interface> OMARCHY_BOT_LOAD_REPORT=<report.json> OMARCHY_BOT_LOAD_APPROVAL=<approval.json> bun test tests/integration/bot-screen-capacity.load.test.ts"
 }

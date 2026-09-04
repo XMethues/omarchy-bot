@@ -1,5 +1,7 @@
 # Provision one nested Hyprland Bot Screen per Bot
 
+_The compositor-specific nested-Hyprland and parent-Wayland mechanism is superseded by [ADR 0008](./0008-run-cage-bot-desktops.md). The decisions below about per-Bot Surface ownership, private sockets, headless outputs, independent input/focus, measured capacity, and the non-adversarial isolation boundary remain in force._
+
 Each Bot owns a persistent independent Bot Screen rather than sharing the user's physical Omarchy desktop. The host keeps one normal Omarchy/UWSM graphical session; the daemon launches each Bot's minimal nested Hyprland compositor as a separately supervised application unit with its own private runtime directory, Wayland socket, Hyprland instance, headless output, computer worker and capture/input helper. Bot Screens are keyed by Bot identity, never Agent identity, because multiple Bots may use the same Agent backend.
 
 The compositor bootstraps through the host Wayland backend to obtain rendering support, creates its Bot-owned headless output, then removes the parent-visible `WAYLAND-*` output. Capture connects only to the child socket and streams that output over WebRTC; virtual keyboard and output-bound virtual pointer input also connect only to that socket. Different Bot Screens therefore have independent pixels, focus, cursor and input state and can operate concurrently, while turns belonging to the same Bot still serialize access to that Bot's Screen.
