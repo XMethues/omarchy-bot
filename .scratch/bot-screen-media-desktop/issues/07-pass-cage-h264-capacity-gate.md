@@ -4,7 +4,7 @@
 
 **Blocked by:** 04 / Bound H.264 lifecycle and recovery; 06 / Prove Cage isolation and lifecycle.
 
-**Status:** resolved — schema-v3 capacity report and approval passed on the recorded reference workstation
+**Status:** resolved
 
 - [x] The final-stack harness exercises the production daemon, real Cage runtime, long-lived capture/encoder, actual WebRTC peer, built web client, and browser decode/paint/canvas readback rather than a synthetic codec loop.
 - [x] The matrix covers 1, 2, 4, and 8 concurrent 1080p Bot Screens plus the selectable 720p fallback using sustained phases comparable to the checked-in approval.
@@ -37,9 +37,9 @@ bun test tests/integration/bot-screen-capacity.load.test.ts
 
 ## Answer
 
-The final schema-v3 run passed both the release and operational gates. At the selected default of four 1080p Screens, per-Screen source, encoded, sent, received, decoded, and displayed rates were respectively 17.70–18.16, 17.70–18.16, 17.70–18.16, 17.70–18.16, 17.76–18.23, and 17.57–18.16 FPS. Browser-painted input-to-visible feedback was 36.0 ms p50 and 93.9 ms p95. Every Screen recorded zero unexplained drops; aggregate H.264 output was 6,991,670 bytes at 3,707,468.92 bit/s, daemon capture latency averaged 42.39 ms with a 141.17 ms maximum, and encode latency averaged 67.22 ms with a 155.69 ms maximum. Absolute capture-to-browser timestamps were correctly recorded as unavailable because the WebRTC H.264 session did not negotiate an absolute capture timestamp.
+The final reviewed schema-v3 run passed both the release and operational gates. At the selected default of four 1080p Screens, per-Screen source, encoded, sent, received, decoded, and displayed rates were respectively 19.00–19.07, 18.94–19.07, 18.94–19.07, 18.94–19.14, 18.94–19.07, and 18.94–19.00 FPS. Browser-painted input-to-visible feedback was 42.2 ms p50 and 82.0 ms p95. Parent review explicitly set the stable p95 envelope to 200 ms after supervised capture and encoder units produced 73.2–164.5 ms p95 across repeated full runs while p50 remained 38.6–49.5 ms; candidate approvals now preserve this reviewed envelope instead of ratcheting it to one observation. Every Screen recorded zero unexplained drops; aggregate H.264 output was 7,956,819 bytes at 4,229,397.83 bit/s, daemon capture latency averaged 36.18 ms with a 113.51 ms maximum, and encode latency averaged 64.19 ms with a 162.44 ms maximum. Absolute capture-to-browser timestamps were correctly recorded as unavailable because the WebRTC H.264 session did not negotiate an absolute capture timestamp.
 
-The matched 1080p compositor measurement reduced PSS from 116.54 MiB for Hyprland to 45.16 MiB for Cage, a 61.25% reduction. The supported rows are 1, 2, and 4 Screens at 1080p and 8 Screens at the selectable 720p fallback. The 8-Screen 1080p row completed every operational scenario with zero unexplained drops but is unsupported because its displayed rate was only 9.18–10.37 FPS.
+The matched 1080p compositor measurement reduced PSS from 116.54 MiB for Hyprland to 45.16 MiB for Cage, a 61.25% reduction. The supported rows are 1, 2, and 4 Screens at 1080p and 8 Screens at the selectable 720p fallback. The 8-Screen 1080p row completed every operational scenario with zero unexplained drops but is unsupported because its displayed rate was only 11.10–12.56 FPS; the 8-Screen 720p fallback displayed 20.26–20.32 FPS and passed.
 
 Provenance: Cage 0.3.1-b7b774a via `/tmp/cage-portable.sh -v`; FFmpeg n9.0.1 via `/usr/bin/ffmpeg -version`; Google Chrome for Testing 151.0.7922.34 via `/home/colin/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome --version`; final web client in headless secure-context mode through `eno1` at the recorded non-loopback LAN endpoint. The report is `.scratch/bot-screen-media-desktop/capacity-report.json`; the schema-v3 approval was written to `apps/daemon/src/bootstrap/bot-screen-capacity-approval.json`.
 

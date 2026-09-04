@@ -35,6 +35,8 @@ interface H264EncoderOptions {
   height: number;
   frameRate: number;
   binary?: string;
+  commandPrefix?: (generation: number) => readonly string[];
+  launcherEnvironment?: Record<string, string>;
   onAccessUnit(accessUnit: H264AccessUnit): void;
 }
 
@@ -164,7 +166,8 @@ export function startH264Encoder(options: H264EncoderOptions): H264EncoderProces
 
   interface EncoderGeneration {
     id: number;
-    process: Bun.Subprocess<"pipe", "pipe", "pipe">;
+    process: Bun.Subprocess;
+    writer: WritableStreamDefaultWriter<Uint8Array>;
     done: Promise<void>;
     stopping: boolean;
   }
@@ -178,8 +181,12 @@ export function startH264Encoder(options: H264EncoderOptions): H264EncoderProces
   };
 
   const spawnGeneration = (): EncoderGeneration => {
-    const processHandle: Bun.Subprocess<"pipe", "pipe", "pipe"> = Bun.spawn({
+    const id = ++generationSequence;
+    const input = new TransformStream<Uint8Array, Uint8Array>();
+    const writer = input.writable.getWriter();
+    const processHandle = Bun.spawn({
       cmd: [
+        ...(options.commandPrefix?.(id) ?? []),
         executable,
         "-hide_banner", "-loglevel", "error",
         "-f", "rawvideo", "-pixel_format", "rgba",
@@ -190,14 +197,16 @@ export function startH264Encoder(options: H264EncoderOptions): H264EncoderProces
         "-x264-params", `repeat-headers=1:aud=1:keyint=${keyframeInterval}:min-keyint=${keyframeInterval}:scenecut=0`,
         "-f", "h264", "pipe:1",
       ],
-      stdin: "pipe",
+      stdin: input.readable,
       stdout: "pipe",
       stderr: "pipe",
+      ...(options.launcherEnvironment === undefined ? {} : { env: options.launcherEnvironment }),
     });
     const parser = new H264AccessUnitParser();
     const generation = {
-      id: ++generationSequence,
+      id,
       process: processHandle,
+      writer,
       done: Promise.resolve(),
       stopping: false,
     } satisfies EncoderGeneration;
@@ -228,7 +237,7 @@ export function startH264Encoder(options: H264EncoderOptions): H264EncoderProces
   const stopGeneration = async (generation: EncoderGeneration): Promise<void> => {
     if (!generation.stopping) {
       generation.stopping = true;
-      generation.process.stdin.end();
+      await generation.writer.close().catch(() => {});
     }
     await Promise.race([
       generation.done.catch(() => {}),
@@ -254,14 +263,23 @@ export function startH264Encoder(options: H264EncoderOptions): H264EncoderProces
       }
       const generation = current;
       if (generation === undefined) throw new Error("H.264 encoder is unavailable");
-      generation.process.stdin.write(frame);
-      await Promise.race([
-        generation.process.stdin.flush(),
-        Bun.sleep(ENCODER_WRITE_TIMEOUT_MS).then(() => {
-          throw new Error("H.264 encoder exceeded its frame latency bound");
-        }),
-      ]);
-      if (generation.process.exitCode !== null && !generation.stopping) {
+      if (closing || failed || generation.stopping) return;
+      if (generation.process.exitCode !== null) {
+        throw new Error("H.264 encoder exited while accepting a frame");
+      }
+      try {
+        await Promise.race([
+          generation.writer.write(frame),
+          Bun.sleep(ENCODER_WRITE_TIMEOUT_MS).then(() => {
+            throw new Error("H.264 encoder exceeded its frame latency bound");
+          }),
+        ]);
+      } catch (error) {
+        if (closing || generation.stopping) return;
+        throw error;
+      }
+      if (closing || generation.stopping) return;
+      if (generation.process.exitCode !== null) {
         throw new Error("H.264 encoder exited while accepting a frame");
       }
     }

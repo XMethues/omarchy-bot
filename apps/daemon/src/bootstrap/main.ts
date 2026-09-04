@@ -84,6 +84,7 @@ export async function main(options: MainOptions = {}): Promise<{
     ...(process.env.OMARCHY_BOT_DESKTOP_BIN === undefined
       ? {}
       : { botDesktopBin: process.env.OMARCHY_BOT_DESKTOP_BIN }),
+    ...(cfg.botScreenFfmpegBin === undefined ? {} : { ffmpegBin: cfg.botScreenFfmpegBin }),
   });
   const screens = new BotScreenManager(
     db,
@@ -121,6 +122,8 @@ export async function main(options: MainOptions = {}): Promise<{
     (owner) => computer.webControlReleased(owner),
     cfg.botScreenFrameRate,
     cfg.botScreenWebRtcPort,
+    runtimeDir,
+    cfg.botScreenFfmpegBin,
   );
   const botDeletions = new BotDeletionService(
     db,

@@ -37,6 +37,7 @@ export interface CageAdapterOptions {
   grimBin?: string;
   inputHelperBin?: string;
   captureHelperBin?: string;
+  ffmpegBin?: string;
   botDesktopBin?: string;
   computerWorkers: Pick<Supervisor, "startComputerWorker">;
 }
@@ -69,6 +70,33 @@ async function command(argv: string[], env: Record<string, string>): Promise<Com
   ]);
   return { status, stdout, stderr };
 }
+async function requireH264Encoder(
+  binary: string | undefined,
+  commandPrefix: readonly string[] = [],
+  launcherEnvironment?: Record<string, string>,
+): Promise<void> {
+  const ffmpeg = executable(binary, "ffmpeg");
+  if (ffmpeg === undefined) throw new Error("Cage Bot Screen requires ffmpeg with libx264");
+  const child = Bun.spawn([...commandPrefix, ffmpeg, "-hide_banner", "-encoders"], {
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+    ...(launcherEnvironment === undefined ? {} : { env: launcherEnvironment }),
+  });
+  const [status, stdout, stderr] = await Promise.all([
+    child.exited,
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+  ]);
+  if (status !== 0 || !/\blibx264\b/.test(stdout)) {
+    throw new Error(
+      `Cage Bot Screen requires ffmpeg with libx264${
+        stderr.trim() === "" ? "" : `: ${stderr.trim()}`
+      }`,
+    );
+  }
+}
+
 
 async function terminateCapture(child: CaptureProcess): Promise<void> {
   if (child.exitCode !== null) return;
@@ -84,9 +112,7 @@ async function terminateCapture(child: CaptureProcess): Promise<void> {
 
 class WaylandVirtualInput {
   readonly exited: Promise<Error>;
-  #reader: ReadableStreamDefaultReader<Uint8Array>;
-  #decoder = new TextDecoder();
-  #buffer = "";
+  #responses: ProcessLineReader;
   #requestSequence = 0;
   #operations: Promise<void> = Promise.resolve();
   #stopped = false;
@@ -97,7 +123,10 @@ class WaylandVirtualInput {
     private readonly process: PointerProcess,
     provision: BotScreenProvision,
   ) {
-    this.#reader = process.stdout.getReader();
+    this.#responses = new ProcessLineReader(
+      process.stdout,
+      "Bot Screen input helper closed its protocol stream",
+    );
     this.#context = `${provision.surfaceId} ${provision.generation} ${provision.geometryGeneration}`;
     this.exited = process.exited.then((status) => new Error(`Bot Screen input helper exited with status ${status}`));
   }
@@ -126,7 +155,7 @@ class WaylandVirtualInput {
     });
     const input = new WaylandVirtualInput(process, provision);
     const ready = await Promise.race([
-      input.#readLine(),
+      input.#responses.next(),
       process.exited.then(async (status) => {
         const stderr = await new Response(process.stderr).text();
         throw new Error(
@@ -224,7 +253,7 @@ class WaylandVirtualInput {
         const exchange = (async () => {
           this.process.stdin.write(`${line}\n`);
           await this.process.stdin.flush();
-          return this.#readLine();
+          return this.#responses.next();
         })();
         response = await Promise.race([
           exchange,
@@ -261,19 +290,6 @@ class WaylandVirtualInput {
     return operation;
   }
 
-  async #readLine(): Promise<string> {
-    for (;;) {
-      const newline = this.#buffer.indexOf("\n");
-      if (newline >= 0) {
-        const line = this.#buffer.slice(0, newline);
-        this.#buffer = this.#buffer.slice(newline + 1);
-        return line;
-      }
-      const chunk = await this.#reader.read();
-      if (chunk.done) throw new Error("Bot Screen input helper closed its protocol stream");
-      this.#buffer += this.#decoder.decode(chunk.value, { stream: true });
-    }
-  }
 }
 
 class CaptureProtocolReader {
@@ -352,8 +368,9 @@ class WaylandCaptureStream implements BotScreenCaptureStream {
     environment: Record<string, string>,
     expectedWidth: number,
     expectedHeight: number,
+    commandPrefix: readonly string[] = [],
   ): Promise<WaylandCaptureStream> {
-    const process = Bun.spawn([binary, outputName], {
+    const process = Bun.spawn([...commandPrefix, binary, outputName], {
       env: environment,
       stdin: "pipe",
       stdout: "pipe",
@@ -516,7 +533,10 @@ class ProcessLineReader {
   #decoder = new TextDecoder();
   #buffer = "";
 
-  constructor(stream: ReadableStream<Uint8Array>) {
+  constructor(
+    stream: ReadableStream<Uint8Array>,
+    private readonly eofMessage = "Bot Desktop closed its readiness stream",
+  ) {
     this.#reader = stream.getReader();
   }
 
@@ -529,7 +549,7 @@ class ProcessLineReader {
         return line;
       }
       const chunk = await this.#reader.read();
-      if (chunk.done) throw new Error("Bot Desktop closed its readiness stream");
+      if (chunk.done) throw new Error(this.eofMessage);
       this.#buffer += this.#decoder.decode(chunk.value, { stream: true });
     }
   }
@@ -572,6 +592,17 @@ export class CageBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     if (!Number.isSafeInteger(provision.scale) || provision.scale < 1) {
       throw new Error("Cage Bot Screen scale must be a positive integer");
     }
+    const encoderEnvironment = {
+      HOME: process.env.HOME ?? "",
+      LANG: process.env.LANG ?? "C.UTF-8",
+      PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
+    };
+    await requireH264Encoder(
+      this.options.ffmpegBin,
+      this.#units.command(provision.surfaceId, provision.generation, "encoder-preflight", encoderEnvironment),
+      this.#units.enabled ? this.#units.launcherEnvironment(encoderEnvironment) : undefined,
+    );
+    await this.#units.stop(provision.surfaceId, provision.generation);
     const cage = executable(this.options.cageBin, "cage");
     const wlrRandr = executable(this.options.wlrRandrBin, "wlr-randr");
     const grim = executable(this.options.grimBin, "grim");
@@ -733,6 +764,7 @@ export class CageBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
       let stopInFlight: Promise<void> | undefined;
       const captureStreams = new Set<BotScreenCaptureStream>();
       const captureStreamStarts = new Set<Promise<void>>();
+      let captureStreamSequence = 0;
       const capture = async (): Promise<BotScreenCapture> => {
         if (stopped || cageProcess.exitCode !== null) throw new Error("Cage Bot Screen compositor is not running");
         if (startedDesktop.exitCode !== null) throw new Error("Bot Desktop is not running");
@@ -747,9 +779,15 @@ export class CageBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
           const stream = await WaylandCaptureStream.start(
             captureHelper,
             outputName,
-            childEnv,
+            this.#units.launcherEnvironment(childEnv),
             videoWidth,
             videoHeight,
+            this.#units.command(
+              provision.surfaceId,
+              provision.generation,
+              `capture-${++captureStreamSequence}`,
+              childEnv,
+            ),
           );
           if (stopped || cageProcess.exitCode !== null) {
             await stream.close();

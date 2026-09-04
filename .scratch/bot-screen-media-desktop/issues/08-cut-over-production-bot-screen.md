@@ -4,7 +4,7 @@
 
 **Blocked by:** 07 / Pass the Cage and H.264 capacity gate.
 
-**Status:** resolved — Cage and hybrid PNG/H.264 are the sole production Bot Screen stack
+**Status:** resolved
 
 - [x] Cage is the production-default and only runtime implementation; no dormant runtime selector, Hyprland fallback, or dual provisioning path remains.
 - [x] Production setup no longer requires Hyprland, `hyprctl`, generated Hyprland configuration, a parent Wayland bootstrap, or Alacritty for Bot Screen readiness.

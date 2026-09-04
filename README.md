@@ -1,6 +1,6 @@
 # Omarchy Bot
 
-A local AI teammate workspace for Omarchy. Users create named Bots, choose any supported Agent backend, and work with them through persistent conversations, rich input, native Agent capabilities, and contextual access to Bot-owned computer surfaces.
+A local AI teammate workspace for Omarchy. Users create named Bots, choose any supported Agent backend, and work with them through persistent conversations, rich input, native Agent capabilities, and contextual access to their Bot Screens through the Computer Surface.
 
 ## Product model
 

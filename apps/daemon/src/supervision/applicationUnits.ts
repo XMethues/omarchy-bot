@@ -1,6 +1,16 @@
 import { lstatSync } from "node:fs";
 import path from "node:path";
 import type { SurfaceId } from "@omarchy-bot/domain";
+export type ApplicationUnitRole =
+  | "compositor"
+  | "application"
+  | "input"
+  | "worker"
+  | "capture"
+  | `capture-${string}`
+  | "encoder"
+  | `encoder-${string}`;
+
 
 function socketExists(candidate: string): boolean {
   try {
@@ -18,6 +28,13 @@ async function run(argv: string[]): Promise<{ status: number; stdout: string; st
     new Response(child.stderr).text(),
   ]);
   return { status, stdout, stderr };
+}
+export function applicationUnitName(
+  surfaceId: SurfaceId,
+  generation: number,
+  role: ApplicationUnitRole,
+): string {
+  return `omarchy-bot-screen-${surfaceId.slice("surf_".length)}-g${generation}-${role}.service`;
 }
 
 /**
@@ -46,7 +63,7 @@ export class ApplicationUnits {
   command(
     surfaceId: SurfaceId,
     generation: number,
-    role: "compositor" | "application" | "input" | "worker",
+    role: ApplicationUnitRole,
     targetEnvironment: Record<string, string>,
   ): string[] {
     if (!this.enabled) return [];
@@ -66,7 +83,7 @@ export class ApplicationUnits {
       "--wait",
       "--pipe",
       "--service-type=exec",
-      `--unit=${this.#prefix(surfaceId)}-g${generation}-${role}`,
+      `--unit=${applicationUnitName(surfaceId, generation, role).slice(0, -".service".length)}`,
       "--slice=app.slice",
       "--property=KillMode=control-group",
       "--",
@@ -104,29 +121,23 @@ export class ApplicationUnits {
     }
     const prefix = this.#prefix(surfaceId);
     const pattern = generation === undefined ? `${prefix}-g*` : `${prefix}-g${generation}-*`;
-    const listed = await run([
-      systemctl,
-      "--user",
-      "list-units",
-      "--all",
-      "--full",
-      "--plain",
-      "--no-legend",
-      `${pattern}.service`,
-    ]);
-    if (listed.status !== 0) {
-      throw new Error(`could not inspect Bot Screen application units: ${listed.stderr.trim() || `status ${listed.status}`}`);
-    }
-    const units = listed.stdout
-      .split("\n")
-      .map((line) => {
-        const [unit] = line.trim().split(/\s+/, 1);
-        return unit;
-      })
-      .filter((unit): unit is string => unit !== undefined && unit.endsWith(".service"));
-    if (units.length === 0) return;
-    const stopped = await run([systemctl, "--user", "stop", ...units]);
+    const unitPattern = `${pattern}.service`;
+    const stopped = await run([systemctl, "--user", "stop", unitPattern]);
     if (stopped.status !== 0) {
+      const remaining = await run([
+        systemctl,
+        "--user",
+        "list-units",
+        "--all",
+        "--full",
+        "--plain",
+        "--no-legend",
+        unitPattern,
+      ]);
+      const hasRemainingUnits = remaining.stdout
+        .split("\n")
+        .some((line) => line.trim().split(/\s+/, 1)[0]?.endsWith(".service") === true);
+      if (remaining.status === 0 && !hasRemainingUnits) return;
       throw new Error(`could not stop Bot Screen application units: ${stopped.stderr.trim() || `status ${stopped.status}`}`);
     }
   }

@@ -9,6 +9,7 @@ const original = {
   profile: process.env.OMARCHY_BOT_SCREEN_PROFILE,
   frameRate: process.env.OMARCHY_BOT_SCREEN_FRAME_RATE,
   webRtcPort: process.env.OMARCHY_BOT_SCREEN_WEBRTC_PORT,
+  ffmpeg: process.env.OMARCHY_BOT_FFMPEG_BIN,
   host: process.env.OMARCHY_BOT_HOST,
   home: process.env.OMARCHY_BOT_HOME,
   state: process.env.OMARCHY_BOT_STATE,
@@ -22,6 +23,7 @@ afterEach(() => {
     ["OMARCHY_BOT_SCREEN_PROFILE", original.profile],
     ["OMARCHY_BOT_SCREEN_FRAME_RATE", original.frameRate],
     ["OMARCHY_BOT_SCREEN_WEBRTC_PORT", original.webRtcPort],
+    ["OMARCHY_BOT_FFMPEG_BIN", original.ffmpeg],
     ["OMARCHY_BOT_HOST", original.host],
     ["OMARCHY_BOT_HOME", original.home],
     ["OMARCHY_BOT_STATE", original.state],
@@ -38,6 +40,7 @@ test("selects the measured 720p Bot Screen fallback from configuration", () => {
   process.env.OMARCHY_BOT_SCREEN_PROFILE = "720p";
   process.env.OMARCHY_BOT_SCREEN_FRAME_RATE = "15";
   process.env.OMARCHY_BOT_SCREEN_WEBRTC_PORT = "7433";
+  process.env.OMARCHY_BOT_FFMPEG_BIN = "/opt/bot-screen/ffmpeg";
   temporaryRoot = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-screen-config-"));
   process.env.OMARCHY_BOT_HOME = path.join(temporaryRoot, "data");
   process.env.OMARCHY_BOT_STATE = path.join(temporaryRoot, "state");
@@ -49,6 +52,7 @@ test("selects the measured 720p Bot Screen fallback from configuration", () => {
     botScreenLogicalHeight: 720,
     botScreenFrameRate: 15,
     botScreenWebRtcPort: 7433,
+    botScreenFfmpegBin: "/opt/bot-screen/ffmpeg",
   });
 });
 

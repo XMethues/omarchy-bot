@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { CageBotScreenRuntimeAdapter } from "../../apps/daemon/src/modules/computer/cageBotScreenRuntime.ts";
 import type { ComputerWorkerScope, SurfaceComputerWorker } from "../../apps/daemon/src/supervision/supervisor.ts";
+import { applicationUnitName } from "../../apps/daemon/src/supervision/applicationUnits.ts";
 import type { SurfaceId } from "../../packages/domain/src/ids.ts";
 
 const SURFACE_ID = "surf_11111111111111111111111111111111" as SurfaceId;
@@ -20,6 +21,15 @@ function executable(directory: string, name: string, body: string): string {
   chmodSync(target, 0o700);
   return target;
 }
+
+test("application units distinguish concurrent capture streams on one Surface", () => {
+  const captureUnits = [
+    applicationUnitName(SURFACE_ID, 1, "capture-1"),
+    applicationUnitName(SURFACE_ID, 1, "capture-2"),
+  ];
+  expect(new Set(captureUnits).size).toBe(2);
+  expect(captureUnits.every((unit) => unit.includes("-capture-"))).toBeTrue();
+});
 
 test("Cage runtime becomes ready only with explicit private geometry, Desktop, capture, input, and worker", async () => {
   root = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-cage-runtime-"));
@@ -67,6 +77,7 @@ process.exit(status);
     "",
   ].join("\n"));
   const capture = executable(bin, "capture", "#!/bin/sh\nprintf 'READY\\n'\nwhile read -r command; do [ \"$command\" = close ] && exit 0; done\n");
+  const ffmpeg = executable(bin, "ffmpeg", "#!/bin/sh\nprintf ' V..... libx264 H.264 encoder\\n'\n");
   let workerScope: ComputerWorkerScope | undefined;
   let workerStopped = false;
   const workerExit = Promise.withResolvers<Error>();
@@ -88,6 +99,7 @@ process.exit(status);
     inputHelperBin: input,
     captureHelperBin: capture,
     botDesktopBin: desktop,
+    ffmpegBin: ffmpeg,
     computerWorkers: {
       startComputerWorker: async (scope) => {
         workerScope = scope;
@@ -143,6 +155,11 @@ process.exit(status);
   const captureResult = await runtime.capture();
   expect(captureResult.mediaType).toBe("image/png");
   expect(captureResult.bytes.slice(0, 8)).toEqual(new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+  const [firstCaptureStream, secondCaptureStream] = await Promise.all([
+    runtime.openCaptureStream(),
+    runtime.openCaptureStream(),
+  ]);
+  await Promise.all([firstCaptureStream.close(), secondCaptureStream.close()]);
   await expect(runtime.act({ name: "open_app", args: { app: "fixture.desktop" } })).resolves.toEqual({
     text: "worker-open_app",
   });
@@ -187,10 +204,12 @@ test("Cage dependency failure happens before a Surface runtime or profile is cre
   root = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-cage-preflight-"));
   const runtimeRoot = path.join(root, "runtime");
   const profileRoot = path.join(root, "profiles");
+  const ffmpeg = executable(root, "ffmpeg", "#!/bin/sh\nprintf ' V..... libx264 H.264 encoder\\n'\n");
   const adapter = new CageBotScreenRuntimeAdapter({
     runtimeRoot,
     profileRoot,
     cageBin: path.join(root, "missing-cage"),
+    ffmpegBin: ffmpeg,
     computerWorkers: { startComputerWorker: async () => { throw new Error("worker should not start"); } },
   });
 
@@ -203,6 +222,43 @@ test("Cage dependency failure happens before a Surface runtime or profile is cre
     scale: 1,
     refreshRate: 16,
   })).rejects.toThrow("Cage, wlr-randr, and grim are required");
+  expect(existsSync(path.join(runtimeRoot, SURFACE_ID))).toBeFalse();
+  expect(existsSync(path.join(profileRoot, SURFACE_ID))).toBeFalse();
+});
+
+test("Cage rejects ffmpeg without libx264 before starting a Surface process", async () => {
+  root = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-cage-ffmpeg-preflight-"));
+  const bin = path.join(root, "bin");
+  const runtimeRoot = path.join(root, "runtime");
+  const profileRoot = path.join(root, "profiles");
+  const cageStarted = path.join(root, "cage-started");
+  mkdirSync(bin);
+  const inert = "#!/bin/sh\nexit 0\n";
+  const cage = executable(bin, "cage", `#!/bin/sh\ntouch ${JSON.stringify(cageStarted)}\nexit 0\n`);
+  const ffmpeg = executable(bin, "ffmpeg", "#!/bin/sh\nprintf ' V..... h264_other H.264 encoder\\n'\n");
+  const adapter = new CageBotScreenRuntimeAdapter({
+    runtimeRoot,
+    profileRoot,
+    cageBin: cage,
+    wlrRandrBin: executable(bin, "wlr-randr", inert),
+    grimBin: executable(bin, "grim", inert),
+    inputHelperBin: executable(bin, "input", inert),
+    captureHelperBin: executable(bin, "capture", inert),
+    botDesktopBin: executable(bin, "desktop", inert),
+    ffmpegBin: ffmpeg,
+    computerWorkers: { startComputerWorker: async () => { throw new Error("worker should not start"); } },
+  });
+
+  await expect(adapter.start({
+    surfaceId: SURFACE_ID,
+    generation: 1,
+    geometryGeneration: 1,
+    logicalWidth: 1920,
+    logicalHeight: 1080,
+    scale: 1,
+    refreshRate: 18,
+  })).rejects.toThrow("requires ffmpeg with libx264");
+  expect(existsSync(cageStarted)).toBeFalse();
   expect(existsSync(path.join(runtimeRoot, SURFACE_ID))).toBeFalse();
   expect(existsSync(path.join(profileRoot, SURFACE_ID))).toBeFalse();
 });

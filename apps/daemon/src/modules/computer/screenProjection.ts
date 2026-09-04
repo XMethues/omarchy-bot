@@ -20,6 +20,7 @@ import {
   type ScreenProjectionModeDto,
   type ScreenProjectionOfferDto,
 } from "@omarchy-bot/protocol";
+import { ApplicationUnits } from "../../supervision/applicationUnits.ts";
 import type { ComputerSurfaceOwner } from "./broker.ts";
 import type {
   BotScreenManager,
@@ -268,6 +269,7 @@ export class ScreenProjectionService {
   #controllers = new Map<SurfaceId, InputController>();
   #controllerEpochs = new Map<SurfaceId, number>();
   #releaseBarriers = new Map<SurfaceId, Promise<void>>();
+  #units: ApplicationUnits;
   #unsubscribeScreens: () => void;
   constructor(
     private readonly screens: BotScreenManager,
@@ -277,7 +279,10 @@ export class ScreenProjectionService {
     private readonly webControlReleased: (owner: ComputerSurfaceOwner) => void,
     private readonly videoFrameRate = 15,
     private readonly webRtcPort = 0,
+    hostRuntimeDir?: string,
+    private readonly ffmpegBin?: string,
   ) {
+    this.#units = new ApplicationUnits(hostRuntimeDir);
     if (!Number.isSafeInteger(webRtcPort) || webRtcPort < 0 || webRtcPort > 65_535) {
       throw new Error("Screen Projection WebRTC port must be an integer from 0 to 65535");
     }
@@ -705,10 +710,28 @@ export class ScreenProjectionService {
       ) return;
       let encoder!: H264EncoderProcess;
       try {
+        const encoderEnvironment = {
+          HOME: process.env.HOME ?? "",
+          LANG: process.env.LANG ?? "C.UTF-8",
+          PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
+        };
         encoder = startH264Encoder({
           width: session.source.videoWidth,
           height: session.source.videoHeight,
           frameRate: this.videoFrameRate,
+          ...(this.ffmpegBin === undefined ? {} : { binary: this.ffmpegBin }),
+          ...(this.#units.enabled
+            ? {
+                commandPrefix: (encoderGeneration) =>
+                  this.#units.command(
+                    session.source.surfaceId,
+                    session.source.runtimeGeneration,
+                    `encoder-${session.id}-${encoderGeneration}`,
+                    encoderEnvironment,
+                  ),
+                launcherEnvironment: this.#units.launcherEnvironment(encoderEnvironment),
+              }
+            : {}),
           onAccessUnit: (unit) => {
             if (
               session.encoder !== encoder

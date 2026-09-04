@@ -22,6 +22,8 @@ export interface Config {
   statusPath: string;
   /** Voxtype binary override (defaults to `voxtype` on PATH). */
   voxtypeBin?: string;
+  /** ffmpeg override shared by Cage preflight and H.264 Screen Projection. */
+  botScreenFfmpegBin?: string;
   /** HTTP listener address. Non-loopback values expose unauthenticated control APIs. */
   host: string;
   port: number;
@@ -73,13 +75,41 @@ function botScreenCapacity(profile: "1080p" | "720p"): number {
   }
   return capacity;
 }
+function validateApprovedCompositorMemory(): void {
+  const proof = BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.compositorMemory;
+  const matched1080p = (
+    measurement: { runtime: string; resolution: { width: number; height: number }; pssMiB: number },
+    runtime: "hyprland" | "cage",
+  ): boolean =>
+    measurement.runtime === runtime
+    && measurement.resolution.width === 1920
+    && measurement.resolution.height === 1080
+    && measurement.pssMiB > 0;
+  const measuredReduction =
+    (proof.baseline.pssMiB - proof.candidate.pssMiB) / proof.baseline.pssMiB * 100;
+  if (
+    proof.passed !== true
+    || !matched1080p(proof.baseline, "hyprland")
+    || !matched1080p(proof.candidate, "cage")
+    || proof.minimumReductionPercent <= 0
+    || proof.reductionPercent < proof.minimumReductionPercent
+    || proof.candidate.pssMiB >= proof.baseline.pssMiB
+    || measuredReduction < proof.minimumReductionPercent
+    || Math.abs(measuredReduction - proof.reductionPercent) > 0.01
+  ) {
+    throw new Error("checked Bot Screen approval lacks a passing matched-1080p compositor-memory proof");
+  }
+}
+
 
 
 export function loadConfig(): Config {
+  validateApprovedCompositorMemory();
   const dataDir = process.env.OMARCHY_BOT_HOME ?? path.join(os.homedir(), ".local/share/omarchy-bot");
   const stateDir = process.env.OMARCHY_BOT_STATE ?? path.join(os.homedir(), ".local/state/omarchy-bot");
   const runtimeDir = process.env.XDG_RUNTIME_DIR;
   const voxtypeBin = process.env.OMARCHY_BOT_VOXTYPE_BIN;
+  const botScreenFfmpegBin = process.env.OMARCHY_BOT_FFMPEG_BIN;
   const screenProfile = botScreenProfile();
   const cfg: Config = {
     dataDir,
@@ -96,6 +126,7 @@ export function loadConfig(): Config {
     conformanceDir: path.join(dataDir, "conformance"),
     statusPath: path.join(stateDir, "status.json"),
     ...(voxtypeBin !== undefined ? { voxtypeBin } : {}),
+    ...(botScreenFfmpegBin === undefined ? {} : { botScreenFfmpegBin }),
     host: process.env.OMARCHY_BOT_HOST ?? "127.0.0.1",
     port: Number(process.env.OMARCHY_BOT_PORT ?? 7321),
     turnTimeoutMs: Number(process.env.OMARCHY_BOT_TURN_TIMEOUT_MS ?? 600_000),

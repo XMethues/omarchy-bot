@@ -106,6 +106,39 @@ export function isNonLoopbackLanEndpoint(value: unknown): boolean {
     return false;
   }
 }
+function validCompositorMemoryProof(value: unknown): boolean {
+  if (value === null || typeof value !== "object") return false;
+  const proof = value as Record<string, unknown>;
+  const matched = (measurement: unknown, runtime: "hyprland" | "cage"): boolean => {
+    if (measurement === null || typeof measurement !== "object") return false;
+    const record = measurement as Record<string, unknown>;
+    const resolution = record.resolution;
+    return record.runtime === runtime
+      && typeof record.pssMiB === "number"
+      && record.pssMiB > 0
+      && resolution !== null
+      && typeof resolution === "object"
+      && (resolution as Record<string, unknown>).width === 1920
+      && (resolution as Record<string, unknown>).height === 1080;
+  };
+  const baselinePss = (proof.baseline as Record<string, unknown> | undefined)?.pssMiB;
+  const candidatePss = (proof.candidate as Record<string, unknown> | undefined)?.pssMiB;
+  const measuredReduction = typeof baselinePss === "number"
+      && baselinePss > 0
+      && typeof candidatePss === "number"
+    ? (baselinePss - candidatePss) / baselinePss * 100
+    : Number.NaN;
+  return proof.passed === true
+    && typeof proof.minimumReductionPercent === "number"
+    && proof.minimumReductionPercent > 0
+    && typeof proof.reductionPercent === "number"
+    && proof.reductionPercent >= proof.minimumReductionPercent
+    && matched(proof.baseline, "hyprland")
+    && measuredReduction >= proof.minimumReductionPercent
+    && Math.abs(measuredReduction - proof.reductionPercent) <= 0.01
+    && matched(proof.candidate, "cage");
+}
+
 
 function validStageLatency(value: unknown): boolean {
   if (value === null || typeof value !== "object") return false;
@@ -428,6 +461,9 @@ export function requireApprovedDefaultRow(
   ) {
     throw new Error("configured Bot Screen default approval does not reference its schema-v3 final-stack report");
   }
+  if (!validCompositorMemoryProof(approval.compositorMemory)) {
+    throw new Error("configured Bot Screen default approval lacks passing matched-1080p compositor-memory proof");
+  }
   const supportedDefault = approval.capacityRows.some((candidate) =>
     candidate.profile === approval.profile
     && candidate.screens === approval.defaultCapacity
@@ -504,7 +540,7 @@ export function requireApprovedDefaultRow(
   if (!validPaintLatency(row.inputToVisibleMs, approval.inputToVisibleP50LimitMs)) {
     throw new Error("release gate requires browser-painted input-to-visible latency samples");
   }
-  if (row.inputToVisibleMs.p95 > approval.observedInputToVisibleP95Ms) {
+  if (row.inputToVisibleMs.p95 > approval.inputToVisibleP95EnvelopeMs) {
     throw new Error("release gate input-to-visible p95 regressed beyond the approved envelope");
   }
   const admission = row.admission;

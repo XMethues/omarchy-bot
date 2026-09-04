@@ -37,7 +37,7 @@ import {
 } from "./helpers/bot-screen-capacity-report.ts";
 
 const loadTest = process.env.OMARCHY_BOT_REAL_SCREEN_LOAD === "1" ? test : test.skip;
-const ROLES = ["compositor", "application", "input", "worker"] as const;
+const ROLES = ["compositor", "application", "input", "worker", "capture", "encoder"] as const;
 const MATRIX = [1, 2, 4, 8] as const;
 
 
@@ -401,8 +401,31 @@ class ProjectionClient {
   }
 }
 
-function unitName(surfaceId: SurfaceId, generation: number, role: typeof ROLES[number]): string {
+function unitName(surfaceId: SurfaceId, generation: number, role: string): string {
   return `omarchy-bot-screen-${surfaceId.slice("surf_".length)}-g${generation}-${role}.service`;
+}
+
+async function roleUnitNames(
+  owner: Owner,
+  generation: number,
+  role: typeof ROLES[number],
+): Promise<string[]> {
+  const pattern = unitName(owner.surfaceId, generation, `${role}*`);
+  const result = await command([
+    "systemctl",
+    "--user",
+    "list-units",
+    "--all",
+    "--full",
+    "--plain",
+    "--no-legend",
+    pattern,
+  ]);
+  if (result.status !== 0) return [];
+  return result.stdout
+    .split("\n")
+    .map((line) => line.trim().split(/\s+/, 1)[0])
+    .filter((unit): unit is string => unit !== undefined && unit.endsWith(".service"));
 }
 
 async function screenPidRoles(
@@ -412,12 +435,14 @@ async function screenPidRoles(
   const pids = new Map<number, typeof ROLES[number] | "unknown">();
   if (Bun.which("systemctl") !== null) {
     for (const role of ROLES) {
-      const result = await command(["systemctl", "--user", "show", unitName(owner.surfaceId, generation, role), "--property=ControlGroup", "--value"]);
-      const file = result.status === 0 && result.stdout !== "" ? path.join("/sys/fs/cgroup", result.stdout, "cgroup.procs") : "";
-      if (file !== "" && existsSync(file)) {
-        for (const raw of readFileSync(file, "utf8").trim().split(/\s+/)) {
-          const pid = Number(raw);
-          if (Number.isSafeInteger(pid) && pid > 0) pids.set(pid, role);
+      for (const unit of await roleUnitNames(owner, generation, role)) {
+        const result = await command(["systemctl", "--user", "show", unit, "--property=ControlGroup", "--value"]);
+        const file = result.status === 0 && result.stdout !== "" ? path.join("/sys/fs/cgroup", result.stdout, "cgroup.procs") : "";
+        if (file !== "" && existsSync(file)) {
+          for (const raw of readFileSync(file, "utf8").trim().split(/\s+/)) {
+            const pid = Number(raw);
+            if (Number.isSafeInteger(pid) && pid > 0) pids.set(pid, role);
+          }
         }
       }
     }
@@ -572,7 +597,11 @@ async function waitReady(harness: Harness, owner: Owner): Promise<number> {
   await until(async () => {
     const response = await fetch(`${harness.baseUrl}/api/computer/state?botId=${owner.botId}&surfaceId=${owner.surfaceId}`);
     const view = await response.json() as { state?: string; activity?: string };
-    if (view.state === "unavailable") throw new Error(view.activity ?? "Bot Screen unavailable");
+    if (view.state === "unavailable") {
+      const runtime = harness.svc.screens.status(owner);
+      if (runtime.state === "failed") throw new Error(runtime.failure);
+      return undefined;
+    }
     return view.state === "ready" ? true : undefined;
   }, 30_000, `Screen ${owner.surfaceId} did not become ready`);
   return Number((performance.now() - startedAt).toFixed(2));
@@ -580,8 +609,15 @@ async function waitReady(harness: Harness, owner: Owner): Promise<number> {
 
 async function destroyBot(harness: Harness, owner: Owner): Promise<number> {
   const startedAt = performance.now();
-  const result = await api<{ status: string }>(harness, "DELETE", `/api/bots/${owner.botId}`, {});
-  if (result.status !== "deleted") throw new Error(`Bot ${owner.botId} was not permanently deleted`);
+  const result = await api<{ status: string; failures?: unknown }>(
+    harness,
+    "DELETE",
+    `/api/bots/${owner.botId}`,
+    {},
+  );
+  if (result.status !== "deleted") {
+    throw new Error(`Bot ${owner.botId} was not permanently deleted: ${JSON.stringify(result.failures ?? [])}`);
+  }
   if (
     existsSync(path.join(harness.svc.cfg.botScreenRuntimeDir, owner.surfaceId))
     || existsSync(path.join(harness.svc.cfg.botScreenProfileDir, owner.surfaceId))
@@ -602,7 +638,10 @@ function matchingProcessPids(executableName: string): Set<number> {
       const commandLine = readFileSync(`/proc/${entry}/cmdline`, "utf8").split("\0");
       const stat = readFileSync(`/proc/${entry}/stat`, "utf8");
       const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
-      if (Number(fields[1]) !== process.pid) continue;
+      const directDaemonChild = Number(fields[1]) === process.pid;
+      const cgroup = readFileSync(`/proc/${entry}/cgroup`, "utf8");
+      const surfaceUnitChild = cgroup.includes("omarchy-bot-screen-");
+      if (!directDaemonChild && !surfaceUnitChild) continue;
       const matchesEncoder = executableName !== "ffmpeg"
         || commandLine.some((argument) => argument.includes("repeat-headers=1:aud=1"));
       if (path.basename(commandLine[0] ?? "") === executableName && matchesEncoder) {
@@ -1255,7 +1294,7 @@ async function runRow(profile: "1080p" | "720p", count: number, durationMs: numb
     && p95 !== null
     && simultaneousAgentAndWebInputCompleted
     && p50 <= BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.inputToVisibleP50LimitMs
-    && (!admissionRow || p95 <= BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.observedInputToVisibleP95Ms);
+    && (!admissionRow || p95 <= BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.inputToVisibleP95EnvelopeMs);
   if (admission !== null) admission.activeEnvelopeMaintained = performancePassed;
   const operationalPassed = rowError === undefined
     && frameMetrics.length === count
@@ -1507,9 +1546,10 @@ function candidateApproval(
       rssMiB: measuredNumber(total, "rssMiB"),
       cpuPercent: measuredNumber(total, "cpuPercent"),
     },
+    compositorMemory: BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.compositorMemory,
     admission: row.admission,
     inputToVisibleP50LimitMs: BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.inputToVisibleP50LimitMs,
-    inputToVisibleP95EnvelopeMs: BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.observedInputToVisibleP95Ms,
+    inputToVisibleP95EnvelopeMs: BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.inputToVisibleP95EnvelopeMs,
     reproducibleCommand,
   };
 }

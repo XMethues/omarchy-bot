@@ -96,15 +96,23 @@ describe("H.264 Screen Projection framing", () => {
   });
 
 
-  test("emits a fresh decodable keyframe after browser feedback requests recovery", async () => {
+  test("uses a distinct supervised command prefix for each requested keyframe generation", async () => {
     const rgba = Buffer.alloc(2 * 1 * 4);
     const first = Promise.withResolvers<void>();
     const recovered = Promise.withResolvers<void>();
     let recoveryRequested = false;
+    const env = Bun.which("env");
+    if (env === null) throw new Error("env is required by the encoder generation test");
+    const commandPrefixes: string[][] = [];
     const encoder = startH264Encoder({
       width: 2,
       height: 1,
       frameRate: 15,
+      commandPrefix: (generation) => {
+        const prefix = [env, `ENCODER_GENERATION=${generation}`];
+        commandPrefixes.push(prefix);
+        return prefix;
+      },
       onAccessUnit: (unit) => {
         first.resolve();
         if (recoveryRequested && unit.keyframe) recovered.resolve();
@@ -133,9 +141,67 @@ describe("H.264 Screen Projection framing", () => {
           throw new Error("ffmpeg did not emit a requested recovery keyframe");
         }),
       ]);
+      expect(commandPrefixes.map((prefix) => prefix.at(-1)))
+        .toEqual(["ENCODER_GENERATION=1", "ENCODER_GENERATION=2"]);
     } finally {
       await encoder.close();
     }
+  });
+
+  test("suppresses a supervised write failure only when restart teardown is already closing", async () => {
+    const shell = Bun.which("sh");
+    const placeholder = Bun.which("true");
+    if (shell === null || placeholder === null) {
+      throw new Error("sh and true are required by the encoder teardown test");
+    }
+    const secondGenerationStarted = Promise.withResolvers<void>();
+    const frame = Buffer.alloc(1024 * 1024 * 4);
+    const encoder = startH264Encoder({
+      width: 1024,
+      height: 1024,
+      frameRate: 15,
+      binary: placeholder,
+      commandPrefix: (generation) => {
+        if (generation === 2) secondGenerationStarted.resolve();
+        return [
+          shell,
+          "-c",
+          generation === 1 ? "cat >/dev/null" : "sleep 0.05",
+          `encoder-generation-${generation}`,
+        ];
+      },
+      onAccessUnit: () => {},
+    });
+    const failures: unknown[] = [];
+    const completion = encoder.done.catch((error) => {
+      failures.push(error);
+    });
+    encoder.requestKeyframe();
+    encoder.writeFrame(frame);
+    await secondGenerationStarted.promise;
+
+    await Promise.all([encoder.close(), completion]);
+    expect(failures).toEqual([]);
+  });
+
+  test("rejects lifetime when the active supervised encoder exits", async () => {
+    const shell = Bun.which("sh");
+    const placeholder = Bun.which("true");
+    if (shell === null || placeholder === null) {
+      throw new Error("sh and true are required by the encoder active-exit test");
+    }
+    const encoder = startH264Encoder({
+      width: 1024,
+      height: 1024,
+      frameRate: 15,
+      binary: placeholder,
+      commandPrefix: () => [shell, "-c", "sleep 0.05; exit 17", "active-encoder"],
+      onAccessUnit: () => {},
+    });
+    const activeFailure = expect(encoder.done).rejects.toBeInstanceOf(Error);
+
+    await activeFailure;
+    await encoder.close();
   });
   test("advances RTP timestamps on the 90 kHz video clock", () => {
     expect([0, 1, 2, 15].map((sequence) => h264Timestamp(sequence, 15)))

@@ -141,6 +141,21 @@ describe("Bot Screen default-capacity release gate", () => {
         strategy: "permanent-delete-and-fresh-provision",
         cyclesPerRow: 2,
       },
+      compositorMemory: {
+        passed: true,
+        minimumReductionPercent: 25,
+        reductionPercent: 61.25,
+        baseline: {
+          runtime: "hyprland",
+          resolution: { width: 1920, height: 1080 },
+          pssMiB: 116.54,
+        },
+        candidate: {
+          runtime: "cage",
+          resolution: { width: 1920, height: 1080 },
+          pssMiB: 45.16,
+        },
+      },
     });
     expect(BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.sourceReport.path)
       .toEndWith(".scratch/bot-screen-media-desktop/capacity-report.json");
@@ -231,6 +246,31 @@ describe("Bot Screen default-capacity release gate", () => {
       .toThrow("approval did not pass its recorded thresholds");
   });
 
+  test("rejects approval without a passing matched-1080p compositor proof", () => {
+    const failedProof = {
+      ...BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL,
+      compositorMemory: {
+        ...BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.compositorMemory,
+        passed: false,
+      },
+    };
+    expect(() => requireApprovedDefaultRow([passingDefaultRow()], 4, failedProof))
+      .toThrow("matched-1080p compositor-memory proof");
+
+    const mismatchedProfile = {
+      ...BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL,
+      compositorMemory: {
+        ...BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.compositorMemory,
+        candidate: {
+          ...BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.compositorMemory.candidate,
+          resolution: { width: 1280, height: 720 },
+        },
+      },
+    };
+    expect(() => requireApprovedDefaultRow([passingDefaultRow()], 4, mismatchedProfile))
+      .toThrow("matched-1080p compositor-memory proof");
+  });
+
   test("requires reviewable final-client LAN provenance in the approval artifact", () => {
     const unreviewableApproval = {
       ...BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL,
@@ -241,6 +281,34 @@ describe("Bot Screen default-capacity release gate", () => {
     };
     expect(() => requireApprovedDefaultRow([passingDefaultRow()], 4, unreviewableApproval))
       .toThrow("lacks final-client LAN browser provenance");
+  });
+
+  test("uses the reviewed p95 envelope instead of ratcheting to one observation", () => {
+    const withinEnvelope = passingDefaultRow();
+    withinEnvelope.inputToVisibleMs = {
+      source: "browser-paint",
+      samples: [BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.observedInputToVisibleP95Ms + 1],
+      p50: BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.observedInputToVisibleP50Ms,
+      p95: BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.observedInputToVisibleP95Ms + 1,
+    };
+    expect(requireApprovedDefaultRow(
+      [withinEnvelope],
+      4,
+      BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL,
+    )).toBe(withinEnvelope);
+
+    const beyondEnvelope = passingDefaultRow();
+    beyondEnvelope.inputToVisibleMs = {
+      source: "browser-paint",
+      samples: [BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.inputToVisibleP95EnvelopeMs + 1],
+      p50: BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.observedInputToVisibleP50Ms,
+      p95: BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.inputToVisibleP95EnvelopeMs + 1,
+    };
+    expect(() => requireApprovedDefaultRow(
+      [beyondEnvelope],
+      4,
+      BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL,
+    )).toThrow("p95 regressed beyond the approved envelope");
   });
 
   test("requires production encoding, preserved sequence accounting, and browser paint", () => {
