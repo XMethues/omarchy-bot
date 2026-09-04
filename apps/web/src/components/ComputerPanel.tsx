@@ -176,8 +176,8 @@ function ComputerPanelContent({
   onRetryScreen,
   onExpandPreview,
 }: ComputerPanelContentProps): JSX.Element {
-  const canTakeControl = !previewOnly && view.takeover === "available";
-  const projectionUnavailable = projectionState === "unavailable";
+  const projectionUnavailable = projectionState === "snapshot" || projectionState === "unavailable";
+  const canTakeControl = !previewOnly && view.takeover === "available" && !projectionUnavailable;
   const projectionWaiting =
     screenRetrying || (view.state !== "unavailable" && frameUrl === undefined && !projectionUnavailable);
 
@@ -274,7 +274,7 @@ function ComputerPanelContent({
             data-testid="computer-take-control"
           />
         ) : null}
-        {!previewOnly && view.takeover === "active" && !loading ? (
+        {!previewOnly && !projectionUnavailable && view.takeover === "active" && !loading ? (
           <Button
             label="Continue takeover"
             variant="primary"
@@ -396,6 +396,11 @@ export function ComputerPanel({
         onControlStateChange: (active) => {
           if (selectedSurfaceRef.current === surfaceId) setControlReady(active);
         },
+        onReconnectRequested: () => {
+          if (selectedSurfaceRef.current === surfaceId) {
+            setProjectionAttempt((attempt) => attempt + 1);
+          }
+        },
       },
     );
     connectionRef.current = connection;
@@ -447,10 +452,23 @@ export function ComputerPanel({
     if (video === null || videoStream === undefined || connection === undefined || !previewExpanded) return;
     video.srcObject = videoStream;
     void video.play().catch(() => {});
-    const callback = video.requestVideoFrameCallback(() => {
-      connection.videoFramePainted(video.videoWidth, video.videoHeight);
-    });
+    let callback: number;
+    const painted: VideoFrameRequestCallback = (now, metadata) => {
+      const captureTime = "captureTime" in metadata && typeof metadata.captureTime === "number"
+        ? metadata.captureTime
+        : undefined;
+      connection.videoFramePainted(
+        video.videoWidth,
+        video.videoHeight,
+        captureTime === undefined ? { paintedAt: now } : { captureTime, paintedAt: now },
+      );
+      callback = video.requestVideoFrameCallback(painted);
+    };
+    const decodeFailed = (): void => connection.videoDecodeFailed();
+    video.addEventListener("error", decodeFailed);
+    callback = video.requestVideoFrameCallback(painted);
     return () => {
+      video.removeEventListener("error", decodeFailed);
       video.cancelVideoFrameCallback(callback);
       video.srcObject = null;
     };
@@ -468,13 +486,14 @@ export function ComputerPanel({
     const resumeAfterFocus = (): void => connection?.resumeControl();
     const releaseForNavigation = (): void => {
       clearBrowserHeldInput();
-      connection?.releaseControl("navigation");
+      connection?.suspend("navigation");
     };
     const handleVisibility = (): void => {
       if (document.visibilityState === "hidden") {
         clearBrowserHeldInput();
-        connection?.releaseControl("visibility-loss");
+        connection?.suspend("visibility-loss");
       } else {
+        connection?.setMode("expanded");
         connection?.resumeControl();
       }
     };
@@ -488,7 +507,7 @@ export function ComputerPanel({
       window.removeEventListener("pagehide", releaseForNavigation);
       clearBrowserHeldInput();
       document.removeEventListener("visibilitychange", handleVisibility);
-      connection?.releaseControl("teardown");
+      connection?.suspend("teardown");
     };
   }, [clearBrowserHeldInput, isSmallScreen, open, previewExpanded]);
 
@@ -629,7 +648,7 @@ export function ComputerPanel({
         setProjectionAttempt((attempt) => attempt + 1);
       }}
       onRetryScreen={retryUnavailableScreen}
-      {...(!isSmallScreen && frameUrl !== undefined && projectionState !== "unavailable"
+      {...(!isSmallScreen && frameUrl !== undefined && projectionState === "preview"
         ? {
             onExpandPreview:
               view.takeover === "available"

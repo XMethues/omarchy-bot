@@ -1,6 +1,9 @@
 import type { ComputerBroker } from "../modules/computer/broker.ts";
 import { ScreenProjectionOfferDto } from "@omarchy-bot/protocol";
-import type { ScreenProjectionService } from "../modules/computer/screenProjection.ts";
+import {
+  ScreenProjectionUnavailableError,
+  type ScreenProjectionService,
+} from "../modules/computer/screenProjection.ts";
 
 const JSON_HEADERS = { "content-type": "application/json" };
 
@@ -38,6 +41,14 @@ export async function handleProjectionRequest(
     try {
       return json(await projections.answer(owner, offer.data), 201);
     } catch (error) {
+      if (error instanceof ScreenProjectionUnavailableError) {
+        return json({
+          error: error.message,
+          failure: error.reason,
+          snapshotFallback: true,
+          surfaceId: owner.surfaceId,
+        }, 503);
+      }
       return json({ error: error instanceof Error ? error.message : "Screen Projection could not start" }, 503);
     }
   }

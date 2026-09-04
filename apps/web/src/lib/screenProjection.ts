@@ -8,22 +8,42 @@ import {
   ScreenInputAuthorityMessageDto,
   ScreenKeyCodeDto,
   ScreenProjectionAnswerDto,
+  ScreenProjectionFailureMessageDto,
   ScreenProjectionPreviewFrameHeaderDto,
+  type ScreenProjectionBrowserMetricsDto,
+  type ScreenProjectionFailureReasonDto,
   type ScreenProjectionPreviewFrameHeaderDto as PreviewFrameHeader,
   type ScreenInputAuthorityMessageDto as InputAuthority,
   type ScreenProjectionModeDto,
 } from "@omarchy-bot/protocol";
 
 const MAX_FRAME_BYTES = 8 * 1024 * 1024;
+
+const FAILURE_MESSAGES: Record<ScreenProjectionFailureReasonDto, string> = {
+  "unsupported-h264": "This browser does not support H.264 Web Control.",
+  "missing-first-frame": "No current frame arrived from the Bot Screen.",
+  "capture-failed": "The Bot Screen capture helper stopped producing frames.",
+  "encoder-failed": "The Bot Screen video encoder failed.",
+  "transport-failed": "The screen connection was lost.",
+  "decode-failed": "The browser could not decode the Bot Screen video.",
+};
 const CONNECTION_TIMEOUT_MS = 10_000;
 const FIRST_FRAME_TIMEOUT_MS = 5_000;
 
 export type ScreenProjectionMode = Exclude<ScreenProjectionModeDto, "idle">;
-export type ScreenProjectionState = "connecting" | "preview" | "expanded" | "reconnecting" | "unavailable" | "closed";
+export type ScreenProjectionState =
+  "connecting" | "preview" | "expanded" | "reconnecting" | "snapshot" | "unavailable" | "closed";
 
 export interface ScreenProjectionOwner {
   botId: string;
   surfaceId: string;
+}
+
+export interface ScreenProjectionFailure {
+  surfaceId: string;
+  reason: ScreenProjectionFailureReasonDto;
+  message: string;
+  snapshotAvailable: boolean;
 }
 
 export interface ScreenProjectionCallbacks {
@@ -31,6 +51,8 @@ export interface ScreenProjectionCallbacks {
   onFrame(frame: Blob | undefined): void;
   onVideo(stream: MediaStream | undefined): void;
   onError(error: string): void;
+  onFailure?(failure: ScreenProjectionFailure): void;
+  onReconnectRequested?(): void;
   onControlStateChange?(active: boolean): void;
   onControlRevoked?(): void;
 }
@@ -86,6 +108,18 @@ export class ScreenProjectionConnection {
   #resumeAfterRelease = false;
   #geometry: ProjectionGeometry | undefined;
   readonly #heldPointerButtons = new Set<PointerButton>();
+  #browserMetrics: ScreenProjectionBrowserMetricsDto = {
+    browserReceives: 0,
+    browserDecodes: 0,
+    browserPaints: 0,
+    decodeDrops: 0,
+    paintDrops: 0,
+    captureToPaintLatencySamples: 0,
+    captureToPaintLatencyTotalMs: 0,
+    captureToPaintLatencyMaxMs: 0,
+  };
+  #lastMetricsSentAt = 0;
+  #reconnectRequested = false;
 
   constructor(
     private readonly endpoint: string,
@@ -98,6 +132,7 @@ export class ScreenProjectionConnection {
     this.#input = this.#peer.createDataChannel(SCREEN_INPUT_CHANNEL, { ordered: true });
     this.#preview.addEventListener("message", (event) => this.#receive(event.data));
     this.#input.addEventListener("message", (event) => this.#receiveInputAuthority(event.data));
+    this.#control.addEventListener("message", (event) => this.#receiveProjectionFailure(event.data));
     this.#control.addEventListener("open", () => this.#activate());
     const transceiver = this.#peer.addTransceiver("video", { direction: "recvonly" });
     const h264Codecs = RTCRtpReceiver.getCapabilities("video")?.codecs.filter((codec) =>
@@ -111,20 +146,20 @@ export class ScreenProjectionConnection {
       if (this.#closed || event.track.kind !== "video") return;
       this.#videoStream = event.streams[0] ?? new MediaStream([event.track]);
       this.#videoReady = false;
+      event.track.addEventListener("ended", () => {
+        if (!this.#closed) this.#requestReconnect();
+      }, { once: true });
       this.callbacks.onVideo(this.#videoStream);
     });
     this.#peer.addEventListener("connectionstatechange", () => {
       if (this.#closed) return;
       if (this.#peer.connectionState === "disconnected") {
-        this.releaseControl("teardown");
-        clearTimeout(this.#firstFrameTimer);
-        this.#firstFrameTimer = undefined;
-        this.callbacks.onState("reconnecting");
-        this.#armConnectionDeadline("The screen connection was lost.");
+        this.#requestReconnect();
       } else if (this.#peer.connectionState === "connected") {
+        this.#reconnectRequested = false;
         this.#activate();
       } else if (this.#peer.connectionState === "failed") {
-        this.#fail("Couldn’t connect to the Bot Screen.");
+        this.#fail("transport-failed", "Couldn’t connect to the Bot Screen.");
       }
     });
   }
@@ -133,9 +168,10 @@ export class ScreenProjectionConnection {
     this.callbacks.onState("connecting");
     this.#armConnectionDeadline("Couldn’t connect to the Bot Screen.");
     if (!this.#h264Available) {
-      this.#fail("This browser does not support H.264 Web Control.");
+      this.#fail("unsupported-h264", "This browser does not support H.264 Web Control.");
       return;
     }
+    let failureReason: ScreenProjectionFailureReasonDto = "transport-failed";
     try {
       const offer = await this.#peer.createOffer();
       await this.#peer.setLocalDescription(offer);
@@ -187,6 +223,12 @@ export class ScreenProjectionConnection {
           && typeof rawAnswer.error === "string"
             ? rawAnswer.error
             : "Couldn’t start the Bot Screen.";
+        if (
+          rawAnswer !== null
+          && typeof rawAnswer === "object"
+          && "failure" in rawAnswer
+          && rawAnswer.failure === "unsupported-h264"
+        ) failureReason = "unsupported-h264";
         throw new Error(message);
       }
       const answer = ScreenProjectionAnswerDto.safeParse(rawAnswer);
@@ -211,7 +253,10 @@ export class ScreenProjectionConnection {
       this.#activate();
     } catch (error) {
       if (this.#closed || (error instanceof DOMException && error.name === "AbortError")) return;
-      this.#fail(error instanceof Error ? error.message : "Couldn’t connect to the Bot Screen.");
+      this.#fail(
+        failureReason,
+        error instanceof Error ? error.message : "Couldn’t connect to the Bot Screen.",
+      );
     }
   }
 
@@ -230,22 +275,46 @@ export class ScreenProjectionConnection {
   }
 
   /** Makes input interactive only after a correctly sized H.264 frame was browser-painted. */
-  videoFramePainted(videoWidth: number, videoHeight: number): boolean {
+  videoFramePainted(
+    videoWidth: number,
+    videoHeight: number,
+    metadata?: { captureTime?: number; paintedAt?: number },
+  ): boolean {
     const geometry = this.#geometry;
     if (
       this.#closed
       || this.#desiredMode !== "expanded"
       || this.#videoStream === undefined
       || geometry === undefined
-      || videoWidth !== geometry.videoWidth
-      || videoHeight !== geometry.videoHeight
     ) return false;
+    if (videoWidth !== geometry.videoWidth || videoHeight !== geometry.videoHeight) {
+      this.#fail("decode-failed", "The Bot Screen video did not match its current geometry.");
+      return false;
+    }
     this.#videoReady = true;
     clearTimeout(this.#firstFrameTimer);
     this.#firstFrameTimer = undefined;
     this.callbacks.onState("expanded");
     this.#publishInputAuthority();
+    this.#browserMetrics.browserPaints += 1;
+    const paintedAt = metadata?.paintedAt ?? performance.now();
+    if (metadata?.captureTime !== undefined && metadata.captureTime <= paintedAt) {
+      const latency = paintedAt - metadata.captureTime;
+      this.#browserMetrics.captureToPaintLatencySamples += 1;
+      this.#browserMetrics.captureToPaintLatencyTotalMs += latency;
+      this.#browserMetrics.captureToPaintLatencyMaxMs = Math.max(
+        this.#browserMetrics.captureToPaintLatencyMaxMs,
+        latency,
+      );
+    }
+    void this.#sampleBrowserMetrics();
     return true;
+  }
+
+  videoDecodeFailed(): void {
+    if (!this.#closed && this.#desiredMode === "expanded") {
+      this.#fail("decode-failed", "The browser could not decode the Bot Screen video.");
+    }
   }
 
   pointerMotion(clientX: number, clientY: number, renderedVideo: Element, clampToContent = false): void {
@@ -314,6 +383,23 @@ export class ScreenProjectionConnection {
       this.#releasingEpoch = authority.controllerEpoch;
       this.#inputAuthority = undefined;
       this.#clearHeldInput();
+    }
+  }
+
+  suspend(reason: "visibility-loss" | "navigation" | "teardown"): void {
+    if (this.#closed) return;
+    this.releaseControl(reason);
+    clearTimeout(this.#firstFrameTimer);
+    this.#firstFrameTimer = undefined;
+    this.#videoReady = false;
+    if (this.#control.readyState === "open" && this.#runtimeGeneration !== undefined) {
+      this.#control.send(JSON.stringify({
+        version: SCREEN_PROJECTION_PROTOCOL_VERSION,
+        type: "view",
+        surfaceId: this.owner.surfaceId,
+        runtimeGeneration: this.#runtimeGeneration,
+        mode: "idle",
+      }));
     }
   }
 
@@ -399,11 +485,53 @@ export class ScreenProjectionConnection {
     }
     if (this.#firstFrameTimer === undefined) {
       this.#firstFrameTimer = window.setTimeout(
-        () => this.#fail(this.#desiredMode === "expanded"
-          ? "No H.264 video arrived from the Bot Screen."
-          : "No image arrived from the Bot Screen."),
+        () => this.#fail(
+          "missing-first-frame",
+          this.#desiredMode === "expanded"
+            ? "No H.264 video arrived from the Bot Screen."
+            : "No image arrived from the Bot Screen.",
+        ),
         FIRST_FRAME_TIMEOUT_MS,
       );
+    }
+  }
+
+  #receiveProjectionFailure(raw: unknown): void {
+    if (this.#closed || typeof raw !== "string") return;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return;
+    }
+    const failure = ScreenProjectionFailureMessageDto.safeParse(parsed);
+    if (
+      !failure.success
+      || failure.data.surfaceId !== this.owner.surfaceId
+      || failure.data.runtimeGeneration !== this.#runtimeGeneration
+    ) return;
+    this.#fail(failure.data.reason, FAILURE_MESSAGES[failure.data.reason]);
+  }
+
+  #requestReconnect(): void {
+    if (this.#closed || this.#reconnectRequested) return;
+    this.#reconnectRequested = true;
+    this.releaseControl("teardown");
+    clearTimeout(this.#firstFrameTimer);
+    this.#firstFrameTimer = undefined;
+    this.#pending = undefined;
+    this.#receivedPreview = false;
+    this.#videoReady = false;
+    this.#offeredInputAuthority = undefined;
+    this.callbacks.onFrame(undefined);
+    this.callbacks.onVideo(undefined);
+    this.callbacks.onState("reconnecting");
+    if (this.callbacks.onReconnectRequested !== undefined) {
+      queueMicrotask(() => {
+        if (!this.#closed) this.callbacks.onReconnectRequested?.();
+      });
+    } else {
+      this.#armConnectionDeadline("The screen connection was lost.");
     }
   }
 
@@ -576,27 +704,108 @@ export class ScreenProjectionConnection {
 
   #armConnectionDeadline(message: string): void {
     if (this.#connectionTimer !== undefined) return;
-    this.#connectionTimer = window.setTimeout(() => this.#fail(message), CONNECTION_TIMEOUT_MS);
+    this.#connectionTimer = window.setTimeout(
+      () => this.#fail("transport-failed", message),
+      CONNECTION_TIMEOUT_MS,
+    );
   }
 
-  #fail(message: string): void {
+  async #sampleBrowserMetrics(): Promise<void> {
+    const getStats = this.#peer.getStats;
+    if (typeof getStats === "function") {
+      try {
+        const report = await getStats.call(this.#peer);
+        report.forEach((entry) => {
+          const metric = entry as RTCStats & {
+            kind?: string;
+            mediaType?: string;
+            framesReceived?: number;
+            framesDecoded?: number;
+            framesDropped?: number;
+          };
+          if (
+            metric.type !== "inbound-rtp"
+            || (metric.kind ?? metric.mediaType) !== "video"
+          ) return;
+          this.#browserMetrics.browserReceives = Math.max(
+            this.#browserMetrics.browserReceives,
+            metric.framesReceived ?? 0,
+          );
+          this.#browserMetrics.browserDecodes = Math.max(
+            this.#browserMetrics.browserDecodes,
+            metric.framesDecoded ?? 0,
+          );
+          this.#browserMetrics.decodeDrops = Math.max(
+            this.#browserMetrics.decodeDrops,
+            metric.framesDropped ?? 0,
+          );
+        });
+      } catch {
+        // Browser stats are diagnostic only and never interrupt Screen Projection.
+      }
+    }
+    this.#browserMetrics.browserReceives = Math.max(
+      this.#browserMetrics.browserReceives,
+      this.#browserMetrics.browserPaints,
+    );
+    this.#browserMetrics.browserDecodes = Math.max(
+      this.#browserMetrics.browserDecodes,
+      this.#browserMetrics.browserPaints,
+    );
+    this.#browserMetrics.paintDrops = Math.max(
+      this.#browserMetrics.paintDrops,
+      this.#browserMetrics.browserDecodes - this.#browserMetrics.browserPaints,
+    );
+    const now = performance.now();
+    if (
+      now - this.#lastMetricsSentAt < 1_000
+      || this.#control.readyState !== "open"
+      || this.#control.bufferedAmount > 0
+      || this.#runtimeGeneration === undefined
+    ) return;
+    try {
+      this.#control.send(JSON.stringify({
+        version: SCREEN_PROJECTION_PROTOCOL_VERSION,
+        type: "browser-metrics",
+        surfaceId: this.owner.surfaceId,
+        runtimeGeneration: this.#runtimeGeneration,
+        metrics: this.#browserMetrics,
+      }));
+      this.#lastMetricsSentAt = now;
+    } catch {
+      // A closing metrics channel must not delay control or change Surface state.
+    }
+  }
+
+  #fail(reason: ScreenProjectionFailureReasonDto, message: string): void {
     if (this.#closed) return;
     this.callbacks.onError(message);
     this.close();
-    void this.#loadSnapshotFallback();
+    void this.#loadSnapshotFallback(reason, message);
   }
 
-  async #loadSnapshotFallback(): Promise<void> {
+  async #loadSnapshotFallback(
+    reason: ScreenProjectionFailureReasonDto,
+    message: string,
+  ): Promise<void> {
     const snapshot = new URL(this.endpoint, window.location.href);
     snapshot.pathname = snapshot.pathname.replace(/\/projection$/, "/snapshot");
+    let snapshotAvailable = false;
     try {
       const response = await fetch(snapshot);
       if (!response.ok || response.headers.get("content-type") !== "image/png") throw new Error();
       this.callbacks.onFrame(await response.blob());
+      snapshotAvailable = true;
     } catch {
       this.callbacks.onFrame(undefined);
     }
-    this.callbacks.onState("unavailable");
+    this.callbacks.onFailure?.({
+      surfaceId: this.owner.surfaceId,
+      reason,
+      message,
+      snapshotAvailable,
+    });
+    this.callbacks.onState(snapshotAvailable ? "snapshot" : "unavailable");
   }
 
   #matchesGeometry(value: ProjectionGeometry): boolean {

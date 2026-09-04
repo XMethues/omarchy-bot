@@ -12,8 +12,11 @@ import {
   SCREEN_PROJECTION_PROTOCOL_VERSION,
   ScreenInputMessageDto,
   type ScreenInputAuthorityMessageDto,
-  ScreenProjectionControlMessageDto,
+  ScreenProjectionClientControlMessageDto,
+  type ScreenProjectionFailureMessageDto,
+  type ScreenProjectionFailureReasonDto,
   type ScreenProjectionAnswerDto,
+  type ScreenProjectionBrowserMetricsDto,
   type ScreenProjectionModeDto,
   type ScreenProjectionOfferDto,
 } from "@omarchy-bot/protocol";
@@ -29,6 +32,7 @@ import {
   h264Timestamp,
   parseH264ReceiveOffer,
   startH264Encoder,
+  type H264OfferCodec,
   type H264EncoderProcess,
 } from "./h264Encoder.ts";
 
@@ -37,6 +41,8 @@ const MAX_BUFFERED_BYTES = 8 * 1024 * 1024;
 const MAX_FRAME_BYTES = MAX_BUFFERED_BYTES;
 const CHUNK_BYTES = 48 * 1024;
 const SIGNALING_TIMEOUT_MS = 5_000;
+const CAPTURE_TIMEOUT_MS = 2_000;
+const FAILURE_DELIVERY_GRACE_MS = 100;
 
 export type ProjectionViewMode = ScreenProjectionModeDto;
 export type ProjectionLifecycleState = "connecting" | ProjectionViewMode | "closed" | "failed";
@@ -48,6 +54,8 @@ export interface ProjectionStatus {
   state: ProjectionLifecycleState;
   mode: ProjectionViewMode;
   framesSent: number;
+  failure?: ScreenProjectionFailureReasonDto;
+  snapshotFallback?: true;
 }
 
 export interface ProjectionLoadMetrics {
@@ -57,17 +65,43 @@ export interface ProjectionLoadMetrics {
   readonly captureAttempts: number;
   readonly sourceFrames: number;
   readonly encodedFrames: number;
-  readonly framesSent: number;
-  readonly preCaptureBackpressureSkips: number;
-  readonly encodedBackpressureDrops: number;
-  readonly transportUnavailableSkips: number;
-  readonly invalidFrameDrops: number;
+  readonly rtpSends: number;
+  readonly browserReceives: number;
+  readonly browserDecodes: number;
+  readonly browserPaints: number;
+  readonly captureSkips: number;
+  readonly encoderDrops: number;
+  readonly transportSkips: number;
   readonly sendFailures: number;
+  readonly decodeDrops: number;
+  readonly paintDrops: number;
+  readonly unexplainedShortfalls: number;
+  readonly captureLatencySamples: number;
+  readonly captureLatencyTotalMs: number;
+  readonly captureLatencyMaxMs: number;
+  readonly encodeLatencySamples: number;
+  readonly encodeLatencyTotalMs: number;
+  readonly encodeLatencyMaxMs: number;
+  readonly captureToPaintLatencySamples: number;
+  readonly captureToPaintLatencyTotalMs: number;
+  readonly captureToPaintLatencyMaxMs: number;
 }
 
 export interface ProjectionFailureDiagnostic {
-  readonly error: string;
+  readonly reason: ScreenProjectionFailureReasonDto;
+  /** Internal process detail; never returned by the HTTP status contract. */
+  readonly technicalError?: string;
   readonly metrics: Readonly<ProjectionLoadMetrics>;
+}
+
+export class ScreenProjectionUnavailableError extends Error {
+  constructor(
+    readonly reason: ScreenProjectionFailureReasonDto,
+    message: string,
+  ) {
+    super(message);
+    this.name = "ScreenProjectionUnavailableError";
+  }
 }
 
 
@@ -86,6 +120,7 @@ interface ProjectionSession {
   videoTrack: Track;
   rtpConfig: RtpPacketizationConfig;
   encoder?: H264EncoderProcess | undefined;
+  videoStart?: Promise<void> | undefined;
   videoSequence: number;
   sequence: number;
   timer?: Timer | undefined;
@@ -96,12 +131,22 @@ interface ProjectionSession {
   captureAttempts: number;
   sourceFrames: number;
   encodedFrames: number;
+  rtpSends: number;
   framesSent: number;
   preCaptureBackpressureSkips: number;
   encodedBackpressureDrops: number;
   transportUnavailableSkips: number;
   invalidFrameDrops: number;
   sendFailures: number;
+  browserMetrics: ScreenProjectionBrowserMetricsDto;
+  captureLatencySamples: number;
+  captureLatencyTotalMs: number;
+  captureLatencyMaxMs: number;
+  encodeLatencySamples: number;
+  encodeLatencyTotalMs: number;
+  encodeLatencyMaxMs: number;
+  encodeStartedAt: number[];
+  awaitingKeyframe: boolean;
   captureInFlight: boolean;
   inputSuspended: boolean;
 }
@@ -183,6 +228,19 @@ function deadline<T>(message: string): Deadline<T> {
   };
 }
 
+async function withinProjectionDeadline<T>(operation: Promise<T>, message: string): Promise<T> {
+  let timer: Timer | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), CAPTURE_TIMEOUT_MS);
+    timer.unref?.();
+  });
+  try {
+    return await Promise.race([operation, timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /**
  * Owns WebRTC peers, capture pumps, and validated Web Controllers. HTTP
  * routes exchange SDP while runtime handles, geometry, authority, ordering,
@@ -193,6 +251,7 @@ export class ScreenProjectionService {
   #failures = new Map<string, {
     botId: string;
     surfaceId: SurfaceId;
+    runtimeGeneration: number;
     diagnostic: ProjectionFailureDiagnostic;
   }>();
   #terminalCleanups = new Set<Promise<void>>();
@@ -222,14 +281,22 @@ export class ScreenProjectionService {
     }
     this.#unsubscribeScreens = screens.subscribe((transition) => {
       if (transition.state === "failed" || transition.state === "stopped") {
-        this.closeSurface(transition.surfaceId);
+        void this.closeSurface(transition.surfaceId);
       }
     });
   }
 
   async answer(owner: ComputerSurfaceOwner, offer: ScreenProjectionOfferDto): Promise<ScreenProjectionAnswerDto> {
     if (offer.type !== "offer" || offer.sdp.trim() === "") throw new Error("a WebRTC SDP offer is required");
-    const codec = parseH264ReceiveOffer(offer.sdp);
+    let codec: H264OfferCodec;
+    try {
+      codec = parseH264ReceiveOffer(offer.sdp);
+    } catch {
+      throw new ScreenProjectionUnavailableError(
+        "unsupported-h264",
+        "Expanded Web Control requires browser-compatible H.264 Baseline video",
+      );
+    }
     const source = await this.screens.projectionSource(owner);
     if (source === undefined) throw new Error("Bot Screen is unavailable");
 
@@ -277,9 +344,29 @@ export class ScreenProjectionService {
       framesSent: 0,
       preCaptureBackpressureSkips: 0,
       encodedBackpressureDrops: 0,
+      rtpSends: 0,
       transportUnavailableSkips: 0,
       invalidFrameDrops: 0,
       sendFailures: 0,
+      browserMetrics: {
+        browserReceives: 0,
+        browserDecodes: 0,
+        browserPaints: 0,
+        decodeDrops: 0,
+        paintDrops: 0,
+        captureToPaintLatencySamples: 0,
+        captureToPaintLatencyTotalMs: 0,
+        captureToPaintLatencyMaxMs: 0,
+      },
+      captureLatencySamples: 0,
+      captureLatencyTotalMs: 0,
+      captureLatencyMaxMs: 0,
+      encodeLatencySamples: 0,
+      encodeLatencyTotalMs: 0,
+      encodeLatencyMaxMs: 0,
+      encodeStartedAt: [],
+      awaitingKeyframe: false,
+      videoStart: undefined,
     };
     this.#sessions.set(id, session);
     this.#terminalCleanups.add(session.peerClosed);
@@ -296,15 +383,17 @@ export class ScreenProjectionService {
     peer.onDataChannel((channel) => this.#acceptChannel(session, channel));
     peer.onStateChange((state) => {
       if (state === "closed") session.resolvePeerClosed();
-      if (state === "closed" || state === "disconnected" || state === "failed") {
-        this.#close(session, state === "failed");
+      if (state === "failed") {
+        this.#fail(session, "transport-failed");
+      } else if (state === "closed" || state === "disconnected") {
+        this.#close(session, false);
       }
     });
     videoTrack.onOpen(() => {
       if (session.mode === "expanded") this.#startVideo(session);
     });
     videoTrack.onClosed(() => this.#close(session, false));
-    videoTrack.onError(() => this.#close(session, true));
+    videoTrack.onError(() => this.#fail(session, "transport-failed"));
 
     try {
       peer.setRemoteDescription(offer.sdp, "offer");
@@ -346,7 +435,7 @@ export class ScreenProjectionService {
         candidates,
       };
     } catch (error) {
-      this.#close(session, true);
+      this.#fail(session, "transport-failed");
       throw error;
     } finally {
       localDescription.cancel();
@@ -357,16 +446,32 @@ export class ScreenProjectionService {
 
   status(owner: ComputerSurfaceOwner, sessionId: string): ProjectionStatus | undefined {
     const session = this.#sessions.get(sessionId);
-    if (session === undefined || session.owner.botId !== owner.botId || session.owner.surfaceId !== owner.surfaceId) {
+    if (session !== undefined) {
+      if (session.owner.botId !== owner.botId || session.owner.surfaceId !== owner.surfaceId) return undefined;
+      const failure = this.#failures.get(sessionId)?.diagnostic.reason;
+      return {
+        sessionId,
+        surfaceId: session.source.surfaceId,
+        runtimeGeneration: session.source.runtimeGeneration,
+        state: session.state,
+        mode: session.mode,
+        framesSent: session.framesSent,
+        ...(failure === undefined ? {} : { failure, snapshotFallback: true as const }),
+      };
+    }
+    const failure = this.#failures.get(sessionId);
+    if (failure === undefined || failure.botId !== owner.botId || failure.surfaceId !== owner.surfaceId) {
       return undefined;
     }
     return {
       sessionId,
-      surfaceId: session.source.surfaceId,
-      runtimeGeneration: session.source.runtimeGeneration,
-      state: session.state,
-      mode: session.mode,
-      framesSent: session.framesSent,
+      surfaceId: failure.surfaceId,
+      runtimeGeneration: failure.runtimeGeneration,
+      state: "failed",
+      mode: "idle",
+      framesSent: failure.diagnostic.metrics.rtpSends,
+      failure: failure.diagnostic.reason,
+      snapshotFallback: true,
     };
   }
 
@@ -376,23 +481,15 @@ export class ScreenProjectionService {
    */
   loadMetrics(owner: ComputerSurfaceOwner, sessionId: string): Readonly<ProjectionLoadMetrics> | undefined {
     const session = this.#sessions.get(sessionId);
-    if (session === undefined || session.owner.botId !== owner.botId || session.owner.surfaceId !== owner.surfaceId) {
+    if (session !== undefined) {
+      if (session.owner.botId !== owner.botId || session.owner.surfaceId !== owner.surfaceId) return undefined;
+      return this.#metricsSnapshot(session);
+    }
+    const failure = this.#failures.get(sessionId);
+    if (failure === undefined || failure.botId !== owner.botId || failure.surfaceId !== owner.surfaceId) {
       return undefined;
     }
-    return Object.freeze({
-      sessionId,
-      surfaceId: session.source.surfaceId,
-      sequence: session.sequence,
-      captureAttempts: session.captureAttempts,
-      sourceFrames: session.sourceFrames,
-      encodedFrames: session.encodedFrames,
-      framesSent: session.framesSent,
-      preCaptureBackpressureSkips: session.preCaptureBackpressureSkips,
-      encodedBackpressureDrops: session.encodedBackpressureDrops,
-      transportUnavailableSkips: session.transportUnavailableSkips,
-      invalidFrameDrops: session.invalidFrameDrops,
-      sendFailures: session.sendFailures,
-    });
+    return failure.diagnostic.metrics;
   }
 
   /** Internal terminal failure snapshot for focused integration diagnostics. */
@@ -417,10 +514,14 @@ export class ScreenProjectionService {
     return true;
   }
 
-  closeSurface(surfaceId: SurfaceId): void {
-    for (const session of this.#sessions.values()) {
-      if (session.owner.surfaceId === surfaceId) this.#close(session, false);
-    }
+  async closeSurface(surfaceId: SurfaceId): Promise<void> {
+    const sessions = [...this.#sessions.values()].filter((session) => session.owner.surfaceId === surfaceId);
+    for (const session of sessions) this.#close(session, false);
+    await Promise.allSettled(
+      [...this.#terminations.values()]
+        .filter((termination) => termination.surfaceId === surfaceId)
+        .map((termination) => termination.promise),
+    );
   }
 
   async revokeControl(surfaceId: SurfaceId): Promise<void> {
@@ -452,10 +553,12 @@ export class ScreenProjectionService {
     await Promise.allSettled([
       ...sessions.flatMap((session) => [
         ...(session.captureTask === undefined ? [] : [session.captureTask]),
+        ...(session.videoStart === undefined ? [] : [session.videoStart]),
         ...session.captureCleanups,
         session.peerClosed,
       ]),
       ...this.#terminalCleanups,
+      ...[...this.#terminations.values()].map((termination) => termination.promise),
     ]);
     await Promise.allSettled(this.#releaseBarriers.values());
     this.diagnostics.shutdown();
@@ -483,7 +586,7 @@ export class ScreenProjectionService {
       }
     });
     channel.onClosed(() => this.#close(session, false));
-    channel.onError(() => this.#close(session, true));
+    channel.onError(() => this.#fail(session, "transport-failed"));
   }
 
   #control(session: ProjectionSession, raw: string | Buffer | ArrayBuffer): void {
@@ -494,20 +597,47 @@ export class ScreenProjectionService {
     } catch {
       return;
     }
-    const message = ScreenProjectionControlMessageDto.safeParse(parsed);
+
+    const message = ScreenProjectionClientControlMessageDto.safeParse(parsed);
     if (
       !message.success
       || this.#sessions.get(session.id) !== session
       || message.data.surfaceId !== session.source.surfaceId
       || message.data.runtimeGeneration !== session.source.runtimeGeneration
+      || session.state === "failed"
     ) return;
+    if (message.data.type === "browser-metrics") {
+      const current = session.browserMetrics;
+      const next = message.data.metrics;
+      session.browserMetrics = {
+        browserReceives: Math.max(current.browserReceives, next.browserReceives),
+        browserDecodes: Math.max(current.browserDecodes, next.browserDecodes),
+        browserPaints: Math.max(current.browserPaints, next.browserPaints),
+        decodeDrops: Math.max(current.decodeDrops, next.decodeDrops),
+        paintDrops: Math.max(current.paintDrops, next.paintDrops),
+        captureToPaintLatencySamples: Math.max(
+          current.captureToPaintLatencySamples,
+          next.captureToPaintLatencySamples,
+        ),
+        captureToPaintLatencyTotalMs: Math.max(
+          current.captureToPaintLatencyTotalMs,
+          next.captureToPaintLatencyTotalMs,
+        ),
+        captureToPaintLatencyMaxMs: Math.max(
+          current.captureToPaintLatencyMaxMs,
+          next.captureToPaintLatencyMaxMs,
+        ),
+      };
+      return;
+    }
     this.#setMode(session, message.data.mode);
   }
+
 
   #setMode(session: ProjectionSession, mode: ProjectionViewMode): void {
     if (session.timer !== undefined) clearTimeout(session.timer);
     session.timer = undefined;
-    if (session.mode === "expanded" && mode !== "expanded") this.#revokeInputFor(session);
+    if (session.mode === "expanded" && mode !== "expanded") void this.#revokeInputFor(session);
     const changed = session.mode !== mode;
     if (changed) {
       this.#stopCaptureStream(session);
@@ -518,6 +648,11 @@ export class ScreenProjectionService {
     session.nextFrameAt = mode === "idle" ? undefined : performance.now();
     session.state = mode;
     if (mode === "expanded") {
+      for (const candidate of this.#sessions.values()) {
+        if (candidate !== session && candidate.source.surfaceId === session.source.surfaceId) {
+          this.#close(candidate, false);
+        }
+      }
       this.#startVideo(session);
       if (changed || !this.#isInputController(session)) void this.#claimInput(session).catch(() => {});
     } else if (mode === "preview") {
@@ -529,57 +664,91 @@ export class ScreenProjectionService {
     if (
       session.mode !== "expanded"
       || session.encoder !== undefined
+      || session.videoStart !== undefined
       || !session.videoTrack.isOpen()
       || this.#sessions.get(session.id) !== session
     ) return;
-    let encoder!: H264EncoderProcess;
-    try {
-      encoder = startH264Encoder({
-        width: session.source.videoWidth,
-        height: session.source.videoHeight,
-        frameRate: this.expandedFrameRate,
-        onAccessUnit: (unit) => {
-          if (
-            session.encoder !== encoder
-            || session.mode !== "expanded"
-            || this.#sessions.get(session.id) !== session
-          ) return;
-          session.encodedFrames += 1;
-          if (!session.videoTrack.isOpen()) {
-            session.transportUnavailableSkips += 1;
-            return;
-          }
-          session.rtpConfig.timestamp = h264Timestamp(session.videoSequence, this.expandedFrameRate);
-          session.videoSequence += 1;
-          if (session.videoTrack.sendMessageBinary(unit.bytes)) {
-            session.sequence += 1;
-            session.framesSent += 1;
-          } else {
-            session.sendFailures += 1;
+    const start = (async () => {
+      await Promise.allSettled([
+        ...session.captureCleanups,
+        ...[...this.#terminations.values()]
+          .filter((termination) => termination.surfaceId === session.source.surfaceId)
+          .map((termination) => termination.promise),
+      ]);
+      if (
+        session.mode !== "expanded"
+        || session.encoder !== undefined
+        || !session.videoTrack.isOpen()
+        || this.#sessions.get(session.id) !== session
+      ) return;
+      let encoder!: H264EncoderProcess;
+      try {
+        encoder = startH264Encoder({
+          width: session.source.videoWidth,
+          height: session.source.videoHeight,
+          frameRate: this.expandedFrameRate,
+          onAccessUnit: (unit) => {
+            if (
+              session.encoder !== encoder
+              || session.mode !== "expanded"
+              || this.#sessions.get(session.id) !== session
+            ) return;
+            const encodedAt = performance.now();
+            const encodeStartedAt = session.encodeStartedAt.shift();
+            if (encodeStartedAt !== undefined) {
+              const latency = Math.max(0, encodedAt - encodeStartedAt);
+              session.encodeLatencySamples += 1;
+              session.encodeLatencyTotalMs += latency;
+              session.encodeLatencyMaxMs = Math.max(session.encodeLatencyMaxMs, latency);
+            }
+            session.encodedFrames += 1;
+            if (session.awaitingKeyframe && !unit.keyframe) {
+              session.encodedBackpressureDrops += 1;
+              return;
+            }
+            if (unit.keyframe) session.awaitingKeyframe = false;
+            if (!session.videoTrack.isOpen()) {
+              session.transportUnavailableSkips += 1;
+              return;
+            }
+            session.rtpConfig.timestamp = h264Timestamp(session.videoSequence, this.expandedFrameRate);
+            session.videoSequence += 1;
+            try {
+              if (session.videoTrack.sendMessageBinary(unit.bytes)) {
+                session.sequence += 1;
+                session.rtpSends += 1;
+                session.framesSent += 1;
+              } else {
+                session.sendFailures += 1;
+              }
+            } catch {
+              session.sendFailures += 1;
+            }
+          },
+        });
+      } catch (error) {
+        this.#fail(session, "encoder-failed", error);
+        return;
+      }
+      session.encoder = encoder;
+      session.awaitingKeyframe = true;
+      void encoder.done.then(
+        () => {
+          if (session.encoder === encoder) {
+            this.#fail(session, "encoder-failed", new Error("H.264 encoder completed unexpectedly"));
           }
         },
-      });
-    } catch (error) {
-      this.#recordFailure(session, error);
-      this.#close(session, true);
-      return;
-    }
-    session.encoder = encoder;
-    void encoder.done.then(
-      () => {
-        if (session.encoder !== encoder) return;
-        this.#recordFailure(session, new Error("H.264 encoder exited unexpectedly"));
-        this.#close(session, true);
-      },
-      (error) => {
-        if (session.encoder !== encoder) return;
-        this.#recordFailure(session, error);
-        this.#close(session, true);
-      },
-    );
-    this.#schedule(session, 0);
+        (error) => {
+          if (session.encoder === encoder) this.#fail(session, "encoder-failed", error);
+        },
+      );
+      this.#schedule(session, 0);
+    })();
+    session.videoStart = start;
+    void start.finally(() => {
+      if (session.videoStart === start) session.videoStart = undefined;
+    });
   }
-
   #schedule(session: ProjectionSession, delay: number): void {
     if (session.timer !== undefined || session.mode === "idle" || this.#sessions.get(session.id) !== session) return;
     session.timer = setTimeout(() => {
@@ -614,19 +783,33 @@ export class ScreenProjectionService {
 
     session.captureInFlight = true;
     session.captureAttempts += 1;
+    const captureStartedAt = performance.now();
+    let failure: ScreenProjectionFailureReasonDto = "capture-failed";
     try {
       let captureStream = session.captureStream;
       if (captureStream === undefined) {
         await Promise.allSettled(session.captureCleanups);
         if (this.#captureStopped(session, mode)) return;
-        captureStream = await session.source.openCaptureStream();
+        const opening = session.source.openCaptureStream();
+        try {
+          captureStream = await withinProjectionDeadline(
+            opening,
+            "Screen capture helper did not start within its latency bound",
+          );
+        } catch (error) {
+          void opening.then((stream) => stream.close()).catch(() => {});
+          throw error;
+        }
       }
       if (this.#captureStopped(session, mode)) {
         await captureStream.close().catch(() => {});
         return;
       }
       session.captureStream = captureStream;
-      const frame = await captureStream.next();
+      const frame = await withinProjectionDeadline(
+        captureStream.next(),
+        "Screen capture helper did not produce a frame within its latency bound",
+      );
       if (session.captureStream !== captureStream || this.#captureStopped(session, mode)) return;
       session.sourceFrames += 1;
       const expectedByteLength = session.source.videoWidth * session.source.videoHeight * 4;
@@ -640,7 +823,14 @@ export class ScreenProjectionService {
         return;
       }
       if (mode === "expanded") {
-        await encoder!.writeFrame(frame.bytes);
+        failure = "encoder-failed";
+        const encodeStartedAt = performance.now();
+        const result = encoder!.writeFrame(frame.bytes);
+        if (result.replacedPendingFrame) {
+          session.encodedBackpressureDrops += 1;
+          session.encodeStartedAt.pop();
+        }
+        session.encodeStartedAt.push(encodeStartedAt);
         return;
       }
       const encoded = await sharp(frame.bytes, {
@@ -676,22 +866,29 @@ export class ScreenProjectionService {
         byteLength,
         chunkCount,
       });
-      if (!preview!.sendMessage(header)) {
-        session.sendFailures += 1;
-        return;
-      }
-      for (let offset = 0; offset < byteLength; offset += CHUNK_BYTES) {
-        if (!preview!.sendMessageBinary(bytes.subarray(offset, Math.min(offset + CHUNK_BYTES, byteLength)))) {
+      try {
+        if (!preview!.sendMessage(header)) {
           session.sendFailures += 1;
           return;
         }
+        for (let offset = 0; offset < byteLength; offset += CHUNK_BYTES) {
+          if (!preview!.sendMessageBinary(bytes.subarray(offset, Math.min(offset + CHUNK_BYTES, byteLength)))) {
+            session.sendFailures += 1;
+            return;
+          }
+        }
+        session.framesSent += 1;
+      } catch {
+        session.sendFailures += 1;
       }
-      session.framesSent += 1;
-    } catch (error) {
-      this.#recordFailure(session, error);
-      this.#close(session, true);
+    } catch {
+      queueMicrotask(() => this.#fail(session, failure));
       return;
     } finally {
+      const captureLatency = Math.max(0, performance.now() - captureStartedAt);
+      session.captureLatencySamples += 1;
+      session.captureLatencyTotalMs += captureLatency;
+      session.captureLatencyMaxMs = Math.max(session.captureLatencyMaxMs, captureLatency);
       session.captureInFlight = false;
       this.#scheduleNext(session);
     }
@@ -1098,7 +1295,12 @@ export class ScreenProjectionService {
     const stream = session.captureStream;
     session.captureStream = undefined;
     if (stream === undefined) return;
-    const cleanup = stream.close();
+    let cleanup: Promise<void>;
+    try {
+      cleanup = stream.close();
+    } catch {
+      cleanup = Promise.resolve();
+    }
     session.captureCleanups.add(cleanup);
     this.#terminalCleanups.add(cleanup);
     void cleanup.finally(() => {
@@ -1110,8 +1312,16 @@ export class ScreenProjectionService {
   #stopEncoder(session: ProjectionSession): void {
     const encoder = session.encoder;
     session.encoder = undefined;
+    session.awaitingKeyframe = false;
+    session.encodedBackpressureDrops += session.encodeStartedAt.length;
+    session.encodeStartedAt.length = 0;
     if (encoder === undefined) return;
-    const cleanup = encoder.close();
+    let cleanup: Promise<void>;
+    try {
+      cleanup = encoder.close();
+    } catch {
+      cleanup = Promise.resolve();
+    }
     session.captureCleanups.add(cleanup);
     this.#terminalCleanups.add(cleanup);
     void cleanup.finally(() => {
@@ -1120,35 +1330,138 @@ export class ScreenProjectionService {
     }).catch(() => {});
   }
 
-  #recordFailure(session: ProjectionSession, cause: unknown): void {
-    const metrics = Object.freeze({
+  #metricsSnapshot(session: ProjectionSession): Readonly<ProjectionLoadMetrics> {
+    const browser = session.browserMetrics;
+    const captureOutstanding = session.captureInFlight ? 1 : 0;
+    const captureShortfall = session.state === "failed"
+      ? 0
+      : Math.max(
+          0,
+          session.captureAttempts - session.sourceFrames - session.preCaptureBackpressureSkips - captureOutstanding,
+        );
+    const encoderShortfall = session.mode === "expanded" || session.encodedFrames > 0
+      ? Math.max(
+          0,
+          session.sourceFrames
+            - session.invalidFrameDrops
+            - session.encodedFrames
+            - session.encodedBackpressureDrops
+            - session.encodeStartedAt.length,
+        )
+      : 0;
+    const transportShortfall = Math.max(
+      0,
+      session.encodedFrames
+        - session.rtpSends
+        - session.transportUnavailableSkips
+        - session.sendFailures
+        - session.encodedBackpressureDrops,
+    );
+    const receiveShortfall = Math.max(0, session.rtpSends - browser.browserReceives);
+    const decodeShortfall = Math.max(
+      0,
+      browser.browserReceives - browser.browserDecodes - browser.decodeDrops,
+    );
+    const paintShortfall = Math.max(
+      0,
+      browser.browserDecodes - browser.browserPaints - browser.paintDrops,
+    );
+    return Object.freeze({
       sessionId: session.id,
       surfaceId: session.source.surfaceId,
       sequence: session.sequence,
       captureAttempts: session.captureAttempts,
       sourceFrames: session.sourceFrames,
       encodedFrames: session.encodedFrames,
-      framesSent: session.framesSent,
-      preCaptureBackpressureSkips: session.preCaptureBackpressureSkips,
-      encodedBackpressureDrops: session.encodedBackpressureDrops,
-      transportUnavailableSkips: session.transportUnavailableSkips,
-      invalidFrameDrops: session.invalidFrameDrops,
+      rtpSends: session.rtpSends,
+      browserReceives: browser.browserReceives,
+      browserDecodes: browser.browserDecodes,
+      browserPaints: browser.browserPaints,
+      captureSkips: session.preCaptureBackpressureSkips,
+      encoderDrops: session.encodedBackpressureDrops + session.invalidFrameDrops,
+      transportSkips: session.transportUnavailableSkips,
       sendFailures: session.sendFailures,
+      decodeDrops: browser.decodeDrops,
+      paintDrops: browser.paintDrops,
+      unexplainedShortfalls:
+        captureShortfall
+        + encoderShortfall
+        + transportShortfall
+        + receiveShortfall
+        + decodeShortfall
+        + paintShortfall,
+      captureLatencySamples: session.captureLatencySamples,
+      captureLatencyTotalMs: session.captureLatencyTotalMs,
+      captureLatencyMaxMs: session.captureLatencyMaxMs,
+      encodeLatencySamples: session.encodeLatencySamples,
+      encodeLatencyTotalMs: session.encodeLatencyTotalMs,
+      encodeLatencyMaxMs: session.encodeLatencyMaxMs,
+      captureToPaintLatencySamples: browser.captureToPaintLatencySamples,
+      captureToPaintLatencyTotalMs: browser.captureToPaintLatencyTotalMs,
+      captureToPaintLatencyMaxMs: browser.captureToPaintLatencyMaxMs,
     });
+  }
+
+  #recordFailure(
+    session: ProjectionSession,
+    reason: ScreenProjectionFailureReasonDto,
+    technicalError?: unknown,
+  ): void {
+    if (this.#failures.has(session.id)) return;
     this.#failures.set(session.id, {
       botId: session.owner.botId,
       surfaceId: session.owner.surfaceId,
+      runtimeGeneration: session.source.runtimeGeneration,
       diagnostic: Object.freeze({
-        error: cause instanceof Error ? cause.message : String(cause),
-        metrics,
+        reason,
+        ...(technicalError === undefined
+          ? {}
+          : { technicalError: technicalError instanceof Error ? technicalError.message : String(technicalError) }),
+        metrics: this.#metricsSnapshot(session),
       }),
     });
     const oldest = this.#failures.keys().next();
     if (this.#failures.size > 64 && !oldest.done) this.#failures.delete(oldest.value);
   }
 
+  #fail(
+    session: ProjectionSession,
+    reason: ScreenProjectionFailureReasonDto,
+    technicalError?: unknown,
+  ): void {
+    if (this.#sessions.get(session.id) !== session || session.state === "failed") return;
+    session.state = "failed";
+    session.mode = "idle";
+    this.#recordFailure(session, reason, technicalError);
+    session.inputSuspended = true;
+    clearTimeout(session.timer);
+    session.timer = undefined;
+    void this.#revokeInputFor(session).catch(() => {});
+    this.#stopCaptureStream(session);
+    this.#stopEncoder(session);
+    const message: ScreenProjectionFailureMessageDto = {
+      version: SCREEN_PROJECTION_PROTOCOL_VERSION,
+      type: "projection-failure",
+      surfaceId: session.source.surfaceId,
+      runtimeGeneration: session.source.runtimeGeneration,
+      reason,
+      snapshotFallback: true,
+    };
+    try {
+      if (session.control?.isOpen() === true) session.control.sendMessage(JSON.stringify(message));
+    } catch {
+      // The peer may close before its terminal Surface state is delivered.
+    }
+    session.timer = setTimeout(() => {
+      session.timer = undefined;
+      this.#close(session, true);
+    }, FAILURE_DELIVERY_GRACE_MS);
+    session.timer.unref?.();
+  }
+
   #close(session: ProjectionSession, failed: boolean): void {
     if (this.#sessions.get(session.id) !== session) return;
+    if (failed) this.#recordFailure(session, "transport-failed");
     void this.#revokeInputFor(session).catch(() => {});
     this.#sessions.delete(session.id);
     if (session.timer !== undefined) clearTimeout(session.timer);
@@ -1166,6 +1479,7 @@ export class ScreenProjectionService {
     }
     const termination = Promise.allSettled([
       ...(session.captureTask === undefined ? [] : [session.captureTask]),
+      ...(session.videoStart === undefined ? [] : [session.videoStart]),
       ...session.captureCleanups,
       session.peerClosed,
     ]).then(() => {});

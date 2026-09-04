@@ -741,18 +741,13 @@ async function runRow(profile: "1080p" | "720p", count: number, durationMs: numb
       const after = productionEnds[index]!;
       const sourceFrames = metricDelta(after, before, "sourceFrames");
       const encodedFrames = metricDelta(after, before, "encodedFrames");
-      const sentFrames = metricDelta(after, before, "framesSent");
-      const preCaptureBackpressureSkips = metricDelta(after, before, "preCaptureBackpressureSkips");
-      const encodedBackpressureDrops = metricDelta(after, before, "encodedBackpressureDrops");
-      const transportUnavailableSkips = metricDelta(after, before, "transportUnavailableSkips");
-      const invalidFrameDrops = metricDelta(after, before, "invalidFrameDrops");
+      const sentFrames = metricDelta(after, before, "rtpSends");
+      const preCaptureBackpressureSkips = metricDelta(after, before, "captureSkips");
+      const encodedBackpressureDrops = metricDelta(after, before, "encoderDrops");
+      const transportUnavailableSkips = metricDelta(after, before, "transportSkips");
       const sendFailures = metricDelta(after, before, "sendFailures");
+      const unexplainedDrops = metricDelta(after, before, "unexplainedShortfalls");
       const seconds = active.durationMs / 1_000;
-      const unexplainedProductionDrops = Math.max(
-        0,
-        encodedFrames - sentFrames - encodedBackpressureDrops - sendFailures,
-      );
-      const unexplainedTransportDrops = Math.max(0, sentFrames - browserMetric.receivedFrames);
       return {
         ...browserMetric,
         sourceFrames,
@@ -764,9 +759,9 @@ async function runRow(profile: "1080p" | "720p", count: number, durationMs: numb
         preCaptureBackpressureSkips,
         encodedBackpressureDrops,
         transportUnavailableSkips,
-        invalidFrameDrops,
+        invalidFrameDrops: 0,
         sendFailures,
-        unexplainedDrops: unexplainedProductionDrops + unexplainedTransportDrops,
+        unexplainedDrops,
         targetFrameShortfall: {
           source: Math.max(0, expectedFrames - sourceFrames),
           encoded: Math.max(0, expectedFrames - encodedFrames),

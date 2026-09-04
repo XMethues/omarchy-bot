@@ -266,6 +266,53 @@ export const ScreenProjectionControlMessageDto = z.object({
 });
 export type ScreenProjectionControlMessageDto = z.infer<typeof ScreenProjectionControlMessageDto>;
 
+export const ScreenProjectionFailureReasonDto = z.enum([
+  "unsupported-h264",
+  "missing-first-frame",
+  "capture-failed",
+  "encoder-failed",
+  "transport-failed",
+  "decode-failed",
+]);
+export type ScreenProjectionFailureReasonDto = z.infer<typeof ScreenProjectionFailureReasonDto>;
+
+export const ScreenProjectionBrowserMetricsDto = z.object({
+  browserReceives: z.number().int().nonnegative(),
+  browserDecodes: z.number().int().nonnegative(),
+  browserPaints: z.number().int().nonnegative(),
+  decodeDrops: z.number().int().nonnegative(),
+  paintDrops: z.number().int().nonnegative(),
+  captureToPaintLatencySamples: z.number().int().nonnegative(),
+  captureToPaintLatencyTotalMs: z.number().finite().nonnegative(),
+  captureToPaintLatencyMaxMs: z.number().finite().nonnegative(),
+});
+export type ScreenProjectionBrowserMetricsDto = z.infer<typeof ScreenProjectionBrowserMetricsDto>;
+
+export const ScreenProjectionBrowserMetricsMessageDto = z.object({
+  version: z.literal(SCREEN_PROJECTION_PROTOCOL_VERSION),
+  type: z.literal("browser-metrics"),
+  surfaceId: SurfaceIdDto,
+  runtimeGeneration: z.number().int().positive(),
+  metrics: ScreenProjectionBrowserMetricsDto,
+});
+export type ScreenProjectionBrowserMetricsMessageDto = z.infer<typeof ScreenProjectionBrowserMetricsMessageDto>;
+
+export const ScreenProjectionClientControlMessageDto = z.discriminatedUnion("type", [
+  ScreenProjectionControlMessageDto,
+  ScreenProjectionBrowserMetricsMessageDto,
+]);
+export type ScreenProjectionClientControlMessageDto = z.infer<typeof ScreenProjectionClientControlMessageDto>;
+
+export const ScreenProjectionFailureMessageDto = z.object({
+  version: z.literal(SCREEN_PROJECTION_PROTOCOL_VERSION),
+  type: z.literal("projection-failure"),
+  surfaceId: SurfaceIdDto,
+  runtimeGeneration: z.number().int().positive(),
+  reason: ScreenProjectionFailureReasonDto,
+  snapshotFallback: z.literal(true),
+});
+export type ScreenProjectionFailureMessageDto = z.infer<typeof ScreenProjectionFailureMessageDto>;
+
 const ScreenInputEnvelopeDto = z.object({
   version: z.literal(SCREEN_PROJECTION_PROTOCOL_VERSION),
   surfaceId: SurfaceIdDto,

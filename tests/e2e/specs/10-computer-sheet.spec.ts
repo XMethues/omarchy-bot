@@ -235,6 +235,17 @@ async function installProjectionPeer(
         testControl.inputAuthorityAvailable = false;
         peers.at(-1)?.dispatchInputAuthority(false);
       },
+      disconnect(): void {
+        const peer = peers.at(-1);
+        if (peer === undefined) return;
+        peer.connectionState = "disconnected";
+        peer.dispatchEvent(new Event("connectionstatechange"));
+      },
+      failDecode(): void {
+        document.querySelector<HTMLVideoElement>(
+          'video[data-testid="computer-expanded-video"]',
+        )?.dispatchEvent(new Event("error"));
+      },
     };
     Object.defineProperty(window, "__screenProjectionControl", { configurable: true, value: testControl });
     Object.defineProperty(window, "RTCPeerConnection", { configurable: true, value: FakePeerConnection });
@@ -913,6 +924,121 @@ test.describe("contextual computer sheet", () => {
     await expect(panel.getByRole("button", { name: "Open Web Control" })).toHaveCount(0);
     await expect(panel).not.toContainText("WebRTC");
   });
+  test("labels unsupported H.264 negotiation as a read-only Surface snapshot", async ({ page }) => {
+    await installProjectionPeer(page);
+    await page.route("**/api/computer/**", async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname === "/api/computer/projection") {
+        await route.fulfill({
+          status: 503,
+          contentType: "application/json",
+          body: JSON.stringify({
+            error: "Expanded Web Control requires browser-compatible H.264 Baseline video",
+            failure: "unsupported-h264",
+            snapshotFallback: true,
+            surfaceId: url.searchParams.get("surfaceId"),
+          }),
+        });
+        return;
+      }
+      if (url.pathname === "/api/computer/snapshot") {
+        await route.fulfill({ status: 200, contentType: "image/png", body: PNG });
+        return;
+      }
+      await fulfillJson(route, {
+        botId: url.searchParams.get("botId"),
+        surfaceId: url.searchParams.get("surfaceId"),
+        state: "ready",
+        takeover: "available",
+        activity: "Screen ready.",
+      });
+    });
+
+    await page.goto("/");
+    await createBot(page, "Unsupported Codec Bot");
+    await page.getByRole("button", { name: "Open Computer Surface", exact: true }).click();
+    const panel = page.getByRole("complementary", { name: "Computer Surface", exact: true });
+    await expect(panel.getByAltText("Unsupported Codec Bot screen")).toBeVisible();
+    await expect(panel).toContainText("Read-only snapshot");
+    await expect(panel).toContainText("H.264 Baseline");
+    await expect(panel.getByRole("button", { name: "Open Web Control" })).toHaveCount(0);
+    await expect(panel.getByRole("button", { name: "Take control" })).toHaveCount(0);
+  });
+
+  test("uses a read-only snapshot after browser video decode failure", async ({ page }) => {
+    await installProjectionPeer(page);
+    await page.route("**/api/computer/**", async (route) => {
+      if (await fulfillProjection(route)) return;
+      const url = new URL(route.request().url());
+      if (url.pathname === "/api/computer/snapshot") {
+        await route.fulfill({ status: 200, contentType: "image/png", body: PNG });
+        return;
+      }
+      await fulfillJson(route, {
+        botId: url.searchParams.get("botId"),
+        surfaceId: url.searchParams.get("surfaceId"),
+        state: "ready",
+        takeover: "unavailable",
+        activity: "Screen ready.",
+      });
+    });
+
+    await page.goto("/");
+    await createBot(page, "Decode Failure Bot");
+    await page.getByRole("button", { name: "Open Computer Surface", exact: true }).click();
+    const panel = page.getByRole("complementary", { name: "Computer Surface", exact: true });
+    await panel.getByRole("button", { name: "Open Web Control" }).click();
+    await expect(page.getByTestId("expanded-web-control")).toBeVisible();
+    await page.evaluate(() => {
+      (window as typeof window & {
+        __screenProjectionControl: { failDecode(): void };
+      }).__screenProjectionControl.failDecode();
+    });
+
+    await expect(panel.getByAltText("Decode Failure Bot screen")).toBeVisible();
+    await expect(panel).toContainText("Read-only snapshot");
+    await expect(panel).toContainText("could not decode");
+    await expect(panel.getByRole("button", { name: "Open Web Control" })).toHaveCount(0);
+    await expect(page.getByTestId("expanded-web-control")).toHaveCount(0);
+  });
+
+  test("reconnects the selected Surface with fresh media and controller state", async ({ page }) => {
+    await installProjectionPeer(page);
+    let projectionAttempts = 0;
+    await page.route("**/api/computer/**", async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname === "/api/computer/projection" && route.request().method() === "POST") {
+        projectionAttempts += 1;
+      }
+      if (await fulfillProjection(route)) return;
+      await fulfillJson(route, {
+        botId: url.searchParams.get("botId"),
+        surfaceId: url.searchParams.get("surfaceId"),
+        state: "ready",
+        takeover: "unavailable",
+        activity: "Screen ready.",
+      });
+    });
+
+    await page.goto("/");
+    await createBot(page, "Reconnect Media Bot");
+    await page.getByRole("button", { name: "Open Computer Surface", exact: true }).click();
+    const panel = page.getByRole("complementary", { name: "Computer Surface", exact: true });
+    await panel.getByRole("button", { name: "Open Web Control" }).click();
+    await expect(page.getByTestId("expanded-web-control")).toContainText("Click, scroll, or type to control");
+    await page.evaluate(() => {
+      (window as typeof window & {
+        __screenProjectionControl: { disconnect(): void };
+      }).__screenProjectionControl.disconnect();
+    });
+
+    await expect.poll(() => projectionAttempts).toBe(2);
+    await expect(page.getByTestId("expanded-web-control")).toContainText("Click, scroll, or type to control");
+    expect(await page.evaluate(
+      () => new URL(location.href).searchParams.get("bot"),
+    )).not.toBeNull();
+  });
+
 
   test("retries an interrupted Bot Screen through projection activation", async ({ page }) => {
     await installProjectionPeer(page);

@@ -403,12 +403,17 @@ describe("WebRTC Screen Projection signaling", () => {
       captureAttempts: 0,
       sourceFrames: 0,
       encodedFrames: 0,
-      framesSent: 0,
-      preCaptureBackpressureSkips: 0,
-      encodedBackpressureDrops: 0,
-      transportUnavailableSkips: 0,
-      invalidFrameDrops: 0,
+      rtpSends: 0,
+      browserReceives: 0,
+      browserDecodes: 0,
+      browserPaints: 0,
+      captureSkips: 0,
+      encoderDrops: 0,
+      transportSkips: 0,
       sendFailures: 0,
+      decodeDrops: 0,
+      paintDrops: 0,
+      unexplainedShortfalls: 0,
     });
 
     const messages: Array<string | Buffer | ArrayBuffer> = [];
@@ -451,10 +456,10 @@ describe("WebRTC Screen Projection signaling", () => {
       captureAttempts: 1,
       sourceFrames: 1,
       encodedFrames: 0,
-      framesSent: 1,
-      encodedBackpressureDrops: 0,
-      invalidFrameDrops: 0,
+      rtpSends: 0,
+      encoderDrops: 0,
       sendFailures: 0,
+      captureLatencySamples: 1,
     });
     expect(adapter.captureStreamsOpened).toBe(1);
     expect(adapter.maximumCaptureRequestsInFlight).toBe(1);
@@ -519,23 +524,144 @@ describe("WebRTC Screen Projection signaling", () => {
     }
     expect(performance.now() - startedAt).toBeLessThanOrEqual(700);
     expect(expandedPreviewFrames).toBe(0);
+    expect(connection.control.sendMessage(JSON.stringify({
+      version: SCREEN_PROJECTION_PROTOCOL_VERSION,
+      type: "browser-metrics",
+      surfaceId: owner.surfaceId,
+      runtimeGeneration: connection.answer.runtimeGeneration,
+      metrics: {
+        browserReceives: 9,
+        browserDecodes: 8,
+        browserPaints: 7,
+        decodeDrops: 1,
+        paintDrops: 1,
+        captureToPaintLatencySamples: 7,
+        captureToPaintLatencyTotalMs: 350,
+        captureToPaintLatencyMaxMs: 75,
+        typedText: "DO-NOT-RETAIN-TYPED",
+        frameBytes: "DO-NOT-RETAIN-FRAME",
+        controllerId: "DO-NOT-RETAIN-CONTROLLER",
+      },
+    }))).toBeTrue();
+    await Bun.sleep(20);
+    expect(h.svc.projections.loadMetrics(owner, connection.answer.sessionId)).toMatchObject({
+      browserReceives: 9,
+      browserDecodes: 8,
+      browserPaints: 7,
+      decodeDrops: 1,
+      paintDrops: 1,
+      captureToPaintLatencySamples: 7,
+      captureToPaintLatencyTotalMs: 350,
+      captureToPaintLatencyMaxMs: 75,
+    });
+    const retainedMetrics = JSON.stringify(
+      h.svc.projections.loadMetrics(owner, connection.answer.sessionId),
+    );
+    expect(retainedMetrics).not.toContain("DO-NOT-RETAIN");
+
+    expect(connection.control.sendMessage(JSON.stringify({
+      version: SCREEN_PROJECTION_PROTOCOL_VERSION,
+      type: "view",
+      surfaceId: owner.surfaceId,
+      runtimeGeneration: connection.answer.runtimeGeneration,
+      mode: "preview",
+    }))).toBeTrue();
+    await adapter.waitForCaptureStreamsClosed(1);
+    expect(h.svc.projections.status(owner, connection.answer.sessionId)).toMatchObject({
+      state: "preview",
+      mode: "preview",
+    });
   }, 15_000);
 
+
+  test("reconnect replaces stale media and awaits the old Surface pipeline before starting another", async () => {
+    const owner = await ownerFor(h, await makeBot(h, "Reconnected projection"));
+    const first = await connectProjection(h, owner, "first-reconnect-browser");
+    peer = first.peer;
+    const firstFrame = waitFor<void>("first reconnect video frame", (resolve) => first.video.onMessage(() => resolve()));
+    expect(first.control.sendMessage(JSON.stringify({
+      version: SCREEN_PROJECTION_PROTOCOL_VERSION,
+      type: "view",
+      surfaceId: owner.surfaceId,
+      runtimeGeneration: first.answer.runtimeGeneration,
+      mode: "expanded",
+    }))).toBeTrue();
+    await firstFrame;
+
+    const replacement = await connectProjection(h, owner, "replacement-reconnect-browser");
+    peer = replacement.peer;
+    const replacementFrame = waitFor<void>(
+      "replacement reconnect video frame",
+      (resolve) => replacement.video.onMessage(() => resolve()),
+    );
+    expect(replacement.control.sendMessage(JSON.stringify({
+      version: SCREEN_PROJECTION_PROTOCOL_VERSION,
+      type: "view",
+      surfaceId: owner.surfaceId,
+      runtimeGeneration: replacement.answer.runtimeGeneration,
+      mode: "expanded",
+    }))).toBeTrue();
+    await replacementFrame;
+    await adapter.waitForCaptureStreamsClosed(1);
+
+    expect(first.control.isOpen()).toBeFalse();
+    expect(replacement.answer.runtimeGeneration).toBe(first.answer.runtimeGeneration);
+    expect(adapter.captureStreamsOpened).toBe(2);
+    expect(h.svc.projections.status(owner, replacement.answer.sessionId)).toMatchObject({
+      state: "expanded",
+      mode: "expanded",
+    });
+
+    await h.svc.projections.closeSurface(owner.surfaceId);
+    await adapter.waitForCaptureStreamsClosed(2);
+    expect(replacement.control.isOpen()).toBeFalse();
+  }, 15_000);
 
   test("contains capture stream failure to its Screen Projection", async () => {
     const owner = await ownerFor(h, await makeBot(h, "Failed capture stream"));
     adapter.failNextCaptureStreamFrame(owner.surfaceId);
     const connection = await connectProjection(h, owner, "failed-capture-stream-browser");
     peer = connection.peer;
+    const failed = waitFor<{ reason: string; snapshotFallback: boolean }>(
+      "Surface-scoped capture failure",
+      (resolve) => {
+        connection.control.onMessage((raw) => {
+          if (typeof raw !== "string") return;
+          const message = JSON.parse(raw) as { type?: string; reason?: string; snapshotFallback?: boolean };
+          if (message.type === "projection-failure" && message.reason !== undefined) {
+            resolve({ reason: message.reason, snapshotFallback: message.snapshotFallback === true });
+          }
+        });
+      },
+    );
     const streamClosed = waitFor<void>("failed capture stream closing", (resolve) => {
       connection.frames.onClosed(resolve);
     });
 
-    expect(connection.control.sendMessage(JSON.stringify({ version: SCREEN_PROJECTION_PROTOCOL_VERSION, type: "view",
-    surfaceId: owner.surfaceId,
-    runtimeGeneration: connection.answer.runtimeGeneration,
-    mode: "preview", }))).toBeTrue();
+    expect(connection.control.sendMessage(JSON.stringify({
+      version: SCREEN_PROJECTION_PROTOCOL_VERSION,
+      type: "view",
+      surfaceId: owner.surfaceId,
+      runtimeGeneration: connection.answer.runtimeGeneration,
+      mode: "preview",
+    }))).toBeTrue();
+    expect(await failed).toEqual({ reason: "capture-failed", snapshotFallback: true });
     await streamClosed;
+    const terminalStatus = await fetch(
+      `${h.baseUrl}/api/computer/projection?botId=${encodeURIComponent(owner.botId)}&surfaceId=${encodeURIComponent(owner.surfaceId)}&sessionId=${encodeURIComponent(connection.answer.sessionId)}`,
+    );
+    expect(terminalStatus.status).toBe(200);
+    expect(await terminalStatus.json()).toMatchObject({
+      surfaceId: owner.surfaceId,
+      state: "failed",
+      mode: "idle",
+      failure: "capture-failed",
+      snapshotFallback: true,
+    });
+    expect(h.svc.projections.failureDiagnostic(owner, connection.answer.sessionId)).toMatchObject({
+      reason: "capture-failed",
+      metrics: { captureAttempts: 1 },
+    });
 
     const snapshot = await fetch(
       `${h.baseUrl}/api/computer/snapshot?botId=${encodeURIComponent(owner.botId)}&surfaceId=${encodeURIComponent(owner.surfaceId)}`,
@@ -561,6 +687,36 @@ describe("WebRTC Screen Projection signaling", () => {
     );
 
     expect(response.status).toBe(404);
+  }, 15_000);
+
+  test("returns an attributable Surface-scoped fallback when H.264 cannot negotiate", async () => {
+    const owner = await ownerFor(h, await makeBot(h, "Unsupported projection codec"));
+    peer = new rtc.PeerConnection("unsupported-codec-browser", { iceServers: [] });
+    const sdp = (await createOffer(peer)).replaceAll(
+      `profile-level-id=${SCREEN_H264_PROFILE}`,
+      "profile-level-id=640c1f",
+    );
+    const response = await fetch(
+      `${h.baseUrl}/api/computer/projection?botId=${encodeURIComponent(owner.botId)}&surfaceId=${encodeURIComponent(owner.surfaceId)}`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(projectionOffer(sdp)),
+      },
+    );
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({
+      error: "Expanded Web Control requires browser-compatible H.264 Baseline video",
+      failure: "unsupported-h264",
+      snapshotFallback: true,
+      surfaceId: owner.surfaceId,
+    });
+    const snapshot = await fetch(
+      `${h.baseUrl}/api/computer/snapshot?botId=${encodeURIComponent(owner.botId)}&surfaceId=${encodeURIComponent(owner.surfaceId)}`,
+    );
+    expect(snapshot.status).toBe(200);
+    expect(snapshot.headers.get("cache-control")).toBe("no-store");
   }, 15_000);
 
   test("malformed SDP settles signaling deadlines without an unhandled rejection", async () => {

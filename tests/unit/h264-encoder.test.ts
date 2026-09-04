@@ -64,6 +64,7 @@ describe("H.264 Screen Projection framing", () => {
     expect(() => parser.push(incompleteKeyframe)).toThrow("codec headers");
   });
 
+
   test("emits the first Baseline access unit promptly from raw capture frames", async () => {
     const rgba = Buffer.alloc(2 * 1 * 4);
     const first = Promise.withResolvers<{ keyframe: boolean; byteLength: number }>();
@@ -94,6 +95,48 @@ describe("H.264 Screen Projection framing", () => {
     }
   });
 
+
+  test("emits a fresh decodable keyframe after browser feedback requests recovery", async () => {
+    const rgba = Buffer.alloc(2 * 1 * 4);
+    const first = Promise.withResolvers<void>();
+    const recovered = Promise.withResolvers<void>();
+    let recoveryRequested = false;
+    const encoder = startH264Encoder({
+      width: 2,
+      height: 1,
+      frameRate: 15,
+      onAccessUnit: (unit) => {
+        first.resolve();
+        if (recoveryRequested && unit.keyframe) recovered.resolve();
+      },
+    });
+    try {
+      for (let index = 0; index < 3; index += 1) {
+        encoder.writeFrame(rgba);
+        await Bun.sleep(10);
+      }
+      await Promise.race([
+        first.promise,
+        Bun.sleep(1_000).then(() => {
+          throw new Error("ffmpeg did not emit its immediate keyframe");
+        }),
+      ]);
+      recoveryRequested = true;
+      encoder.requestKeyframe();
+      for (let index = 0; index < 3; index += 1) {
+        encoder.writeFrame(rgba);
+        await Bun.sleep(10);
+      }
+      await Promise.race([
+        recovered.promise,
+        Bun.sleep(2_000).then(() => {
+          throw new Error("ffmpeg did not emit a requested recovery keyframe");
+        }),
+      ]);
+    } finally {
+      await encoder.close();
+    }
+  });
   test("advances RTP timestamps on the 90 kHz video clock", () => {
     expect([0, 1, 2, 15].map((sequence) => h264Timestamp(sequence, 15)))
       .toEqual([0, 6_000, 12_000, 90_000]);

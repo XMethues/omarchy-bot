@@ -4,6 +4,8 @@ const H264_AUD_NAL_TYPE = 9;
 const H264_IDR_NAL_TYPE = 5;
 const H264_SPS_NAL_TYPE = 7;
 const H264_PPS_NAL_TYPE = 8;
+const MAX_ACCESS_UNIT_BYTES = 8 * 1024 * 1024;
+const ENCODER_WRITE_TIMEOUT_MS = 1_000;
 
 export interface H264OfferCodec {
   mid: string;
@@ -16,8 +18,14 @@ export interface H264AccessUnit {
   keyframe: boolean;
 }
 
+export interface H264EncoderWriteResult {
+  /** True when this capture superseded an older frame that had not reached ffmpeg. */
+  replacedPendingFrame: boolean;
+}
+
 export interface H264EncoderProcess {
-  writeFrame(bytes: Uint8Array): Promise<void>;
+  writeFrame(bytes: Uint8Array): H264EncoderWriteResult;
+  requestKeyframe(): void;
   readonly done: Promise<void>;
   close(): Promise<void>;
 }
@@ -64,6 +72,7 @@ export function parseH264ReceiveOffer(sdp: string): H264OfferCodec {
   throw new Error("Expanded Web Control requires browser-compatible H.264 Baseline video");
 }
 
+
 function startCodeLength(bytes: Buffer, offset: number): number {
   if (bytes[offset] !== 0 || bytes[offset + 1] !== 0) return 0;
   if (bytes[offset + 2] === 1) return 3;
@@ -96,6 +105,10 @@ export class H264AccessUnitParser {
 
   push(chunk: Uint8Array): H264AccessUnit[] {
     if (chunk.byteLength === 0) return [];
+    if (this.#pending.byteLength + chunk.byteLength > MAX_ACCESS_UNIT_BYTES) {
+      this.#pending = Buffer.alloc(0);
+      throw new Error("H.264 encoder produced an oversized access unit");
+    }
     const incoming = Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength);
     this.#pending = this.#pending.byteLength === 0
       ? Buffer.from(incoming)
@@ -140,63 +153,159 @@ export function startH264Encoder(options: H264EncoderOptions): H264EncoderProces
   const executable = Bun.which(binary);
   if (executable === null) throw new Error("Expanded Web Control requires ffmpeg with libx264");
   const keyframeInterval = options.frameRate * 2;
-  const processHandle: Bun.Subprocess<"pipe", "pipe", "pipe"> = Bun.spawn({
-    cmd: [
-      executable,
-      "-hide_banner", "-loglevel", "error",
-      "-f", "rawvideo", "-pixel_format", "rgba",
-      "-video_size", `${options.width}x${options.height}`, "-framerate", String(options.frameRate), "-i", "pipe:0",
-      "-an", "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
-      "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2,format=yuv420p",
-      "-profile:v", "baseline",
-      "-x264-params", `repeat-headers=1:aud=1:keyint=${keyframeInterval}:min-keyint=${keyframeInterval}:scenecut=0`,
-      "-f", "h264", "pipe:1",
-    ],
-    stdin: "pipe",
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const parser = new H264AccessUnitParser();
+  const lifetime = Promise.withResolvers<void>();
   let closing = false;
+  let failed = false;
   let closePromise: Promise<void> | undefined;
-  const stderr = new Response(processHandle.stderr).text();
-  const output = (async () => {
-    for await (const chunk of processHandle.stdout) {
-      for (const unit of parser.push(chunk)) options.onAccessUnit(unit);
+  let pendingFrame: Uint8Array | undefined;
+  let pump: Promise<void> | undefined;
+  let keyframeRequested = false;
+  let generationSequence = 0;
+
+  interface EncoderGeneration {
+    id: number;
+    process: Bun.Subprocess<"pipe", "pipe", "pipe">;
+    done: Promise<void>;
+    stopping: boolean;
+  }
+
+  let current: EncoderGeneration | undefined;
+
+  const fail = (cause: unknown): void => {
+    if (closing || failed) return;
+    failed = true;
+    lifetime.reject(cause instanceof Error ? cause : new Error(String(cause)));
+  };
+
+  const spawnGeneration = (): EncoderGeneration => {
+    const processHandle: Bun.Subprocess<"pipe", "pipe", "pipe"> = Bun.spawn({
+      cmd: [
+        executable,
+        "-hide_banner", "-loglevel", "error",
+        "-f", "rawvideo", "-pixel_format", "rgba",
+        "-video_size", `${options.width}x${options.height}`, "-framerate", String(options.frameRate), "-i", "pipe:0",
+        "-an", "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
+        "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2,format=yuv420p",
+        "-profile:v", "baseline",
+        "-x264-params", `repeat-headers=1:aud=1:keyint=${keyframeInterval}:min-keyint=${keyframeInterval}:scenecut=0`,
+        "-f", "h264", "pipe:1",
+      ],
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const parser = new H264AccessUnitParser();
+    const generation = {
+      id: ++generationSequence,
+      process: processHandle,
+      done: Promise.resolve(),
+      stopping: false,
+    } satisfies EncoderGeneration;
+    const stderr = new Response(processHandle.stderr).text();
+    const output = (async () => {
+      for await (const chunk of processHandle.stdout) {
+        for (const unit of parser.push(chunk)) {
+          if (current?.id === generation.id && !generation.stopping) options.onAccessUnit(unit);
+        }
+      }
+      for (const unit of parser.finish()) {
+        if (current?.id === generation.id && !generation.stopping) options.onAccessUnit(unit);
+      }
+    })();
+    generation.done = Promise.all([processHandle.exited, output, stderr]).then(([status, , errorOutput]) => {
+      if (!generation.stopping && !closing) {
+        throw new Error(
+          status === 0
+            ? "H.264 encoder exited unexpectedly"
+            : `H.264 encoder exited with status ${status}${errorOutput.trim() === "" ? "" : `: ${errorOutput.trim()}`}`,
+        );
+      }
+    });
+    void generation.done.catch(fail);
+    return generation;
+  };
+
+  const stopGeneration = async (generation: EncoderGeneration): Promise<void> => {
+    if (!generation.stopping) {
+      generation.stopping = true;
+      generation.process.stdin.end();
     }
-    for (const unit of parser.finish()) options.onAccessUnit(unit);
-  })();
-  const done = Promise.all([processHandle.exited, output, stderr]).then(([status, , errorOutput]) => {
-    if (status !== 0 && !closing) {
-      throw new Error(`H.264 encoder exited with status ${status}${errorOutput.trim() === "" ? "" : `: ${errorOutput.trim()}`}`);
+    await Promise.race([
+      generation.done.catch(() => {}),
+      Bun.sleep(1_000).then(() => {
+        if (generation.process.exitCode === null) generation.process.kill("SIGTERM");
+      }),
+    ]);
+    if (generation.process.exitCode === null) await generation.process.exited;
+    await generation.done.catch(() => {});
+  };
+
+  const drain = async (): Promise<void> => {
+    while (!closing && !failed && pendingFrame !== undefined) {
+      const frame = pendingFrame;
+      pendingFrame = undefined;
+      if (keyframeRequested) {
+        keyframeRequested = false;
+        const generation = current;
+        current = undefined;
+        if (generation !== undefined) await stopGeneration(generation);
+        if (closing || failed) return;
+        current = spawnGeneration();
+      }
+      const generation = current;
+      if (generation === undefined) throw new Error("H.264 encoder is unavailable");
+      generation.process.stdin.write(frame);
+      await Promise.race([
+        generation.process.stdin.flush(),
+        Bun.sleep(ENCODER_WRITE_TIMEOUT_MS).then(() => {
+          throw new Error("H.264 encoder exceeded its frame latency bound");
+        }),
+      ]);
+      if (generation.process.exitCode !== null && !generation.stopping) {
+        throw new Error("H.264 encoder exited while accepting a frame");
+      }
     }
-  });
+  };
+
+  const scheduleDrain = (): void => {
+    if (pump !== undefined || closing || failed) return;
+    const active = drain();
+    pump = active;
+    void active.catch(fail).finally(() => {
+      if (pump === active) pump = undefined;
+      if (pendingFrame !== undefined && !closing && !failed) scheduleDrain();
+    });
+  };
+
+  current = spawnGeneration();
 
   return {
-    done,
-    async writeFrame(bytes): Promise<void> {
+    done: lifetime.promise,
+    writeFrame(bytes): H264EncoderWriteResult {
       if (bytes.byteLength !== options.width * options.height * 4) {
         throw new Error("H.264 encoder received invalid RGBA frame geometry");
       }
-      if (closing || processHandle.exitCode !== null) throw new Error("H.264 encoder is closed");
-      processHandle.stdin.write(bytes);
-      await processHandle.stdin.flush();
+      if (closing || failed || current?.process.exitCode !== null) throw new Error("H.264 encoder is closed");
+      const replacedPendingFrame = pendingFrame !== undefined;
+      pendingFrame = bytes;
+      scheduleDrain();
+      return { replacedPendingFrame };
+    },
+    requestKeyframe(): void {
+      if (!closing && !failed) keyframeRequested = true;
     },
     close(): Promise<void> {
       if (closePromise !== undefined) return closePromise;
       closing = true;
-      processHandle.stdin.end();
-      closePromise = Promise.race([
-        done,
-        Bun.sleep(1_000).then(() => {
-          if (processHandle.exitCode === null) processHandle.kill("SIGTERM");
-        }),
-      ]).then(async () => {
-        if (processHandle.exitCode === null) await processHandle.exited;
-      }).catch(async () => {
-        if (processHandle.exitCode === null) processHandle.kill("SIGTERM");
-        await processHandle.exited;
-      });
+      pendingFrame = undefined;
+      closePromise = (async () => {
+        await pump?.catch(() => {});
+        const generation = current;
+        current = undefined;
+        if (generation !== undefined) await stopGeneration(generation);
+        if (!failed) lifetime.resolve();
+        await lifetime.promise.catch(() => {});
+      })();
       return closePromise;
     },
   };
