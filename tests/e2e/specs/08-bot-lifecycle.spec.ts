@@ -31,6 +31,7 @@ test.describe("single Bot lifecycle", () => {
       .getByRole("button", { name: "Settings", exact: true })
       .click();
     const settings = page.getByRole("dialog", { name: "Settings" });
+    await settings.getByRole("navigation", { name: "Settings sections" }).getByRole("button", { name: "Bots" }).click();
     await expect(settings.getByTestId("settings-bot-bot_legacy_archived")).toContainText("Restored legacy bot");
     await expect(settings.getByRole("button", { name: "Delete Restored legacy bot" })).toBeVisible();
     await expect(settings.getByRole("button", { name: "Archive Restored legacy bot", exact: true })).toHaveCount(0);

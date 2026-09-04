@@ -11,8 +11,6 @@ const styles = stylex.create({
   },
   composerWrap: {
     width: "100%",
-    maxWidth: 860,
-    marginInline: "auto",
     boxSizing: "border-box",
   },
   composerDropZone: {

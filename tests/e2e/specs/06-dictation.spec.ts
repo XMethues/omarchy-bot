@@ -175,7 +175,9 @@ test.describe("Voxtype composer dictation", () => {
     await createBot(page, "Voice Settings Bot");
 
     await page.getByRole("navigation", { name: "Bot navigation" }).getByRole("button", { name: "Settings", exact: true }).click();
-    await expect(page.getByRole("dialog", { name: "Settings" })).toBeVisible();
+    const settings = page.getByRole("dialog", { name: "Settings" });
+    await expect(settings).toBeVisible();
+    await settings.getByRole("navigation", { name: "Settings sections" }).getByRole("button", { name: "Voice" }).click();
     const setting = page.getByRole("switch", { name: "Auto-send voice transcriptions" });
     await expect(setting).not.toBeChecked();
     await setting.check();
@@ -185,6 +187,7 @@ test.describe("Voxtype composer dictation", () => {
     await page.keyboard.press("Escape");
     await page.reload();
     await page.getByRole("navigation", { name: "Bot navigation" }).getByRole("button", { name: "Settings", exact: true }).click();
+    await page.getByRole("dialog", { name: "Settings" }).getByRole("navigation", { name: "Settings sections" }).getByRole("button", { name: "Voice" }).click();
     await expect(page.getByRole("switch", { name: "Auto-send voice transcriptions" })).toBeChecked();
   });
 

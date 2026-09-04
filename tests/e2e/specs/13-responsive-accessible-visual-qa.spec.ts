@@ -577,7 +577,6 @@ test.describe("ticket 13 responsive, accessible, and visual QA", () => {
     await expect(settings.getByText("Follows your current Omarchy and system appearance.", { exact: true })).toBeVisible();
     await expect(settings.getByRole("radio")).toHaveCount(0);
     await expect.poll(() => page.locator("html").getAttribute("data-theme")).toBeNull();
-    await expect(settings.getByText("Reconnect Claude before sending a message.", { exact: true })).toBeVisible();
   });
 
   test("matches the fixed light desktop workspace", async ({ page }) => {

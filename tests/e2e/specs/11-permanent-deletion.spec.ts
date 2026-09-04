@@ -180,6 +180,7 @@ test.describe("direct local Bot deletion", () => {
       .getByRole("button", { name: "Settings", exact: true })
       .click();
     const settings = page.getByRole("dialog", { name: "Settings" });
+    await settings.getByRole("navigation", { name: "Settings sections" }).getByRole("button", { name: "Bots" }).click();
     await settings.getByRole("button", { name: `Delete ${botName}` }).click();
     await expect(deletionConfirmation(page, botName)).toBeVisible();
     await expect(deletionConfirmation(page, botName)).toContainText("stop all of this Bot’s current work");
