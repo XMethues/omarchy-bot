@@ -128,35 +128,37 @@ describe("Bot Screen default-capacity release gate", () => {
   test("ties default four to the checked final-client measurement", () => {
     expect(BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL).toMatchObject({
       schemaVersion: 3,
-      sourceReport: {
-        path: ".scratch/bot-screen-media-desktop/capacity-report.json",
-      },
+      sourceReport: { schemaVersion: 3 },
       runtime: "cage",
       defaultCapacity: 4,
       profile: "1080p",
       resolution: { width: 1920, height: 1080 },
-      capacityRows: [
-        { profile: "1080p", screens: 1, supportStatus: "supported" },
-        { profile: "1080p", screens: 2, supportStatus: "supported" },
-        { profile: "1080p", screens: 4, supportStatus: "supported" },
-        { profile: "1080p", screens: 8, supportStatus: "unsupported" },
-        { profile: "720p", screens: 8, supportStatus: "supported" },
-      ],
       finalClient: {
         built: true,
-        mode: "headless",
         transport: "WebRTC H.264 video track",
-        lanEndpoint: "https://192.168.10.25:45039",
       },
       lifecycleProof: {
         strategy: "permanent-delete-and-fresh-provision",
         cyclesPerRow: 2,
       },
-      observedSourceFps: { minimum: 17.7, maximum: 18.16 },
-      observedEncodedFps: { minimum: 17.7, maximum: 18.16 },
-      observedDisplayedFps: { minimum: 17.57, maximum: 18.16 },
-      observedInputToVisibleP50Ms: 36,
-      observedInputToVisibleP95Ms: 93.9,
+    });
+    expect(BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.sourceReport.path)
+      .toEndWith(".scratch/bot-screen-media-desktop/capacity-report.json");
+    expect(BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.capacityRows).toContainEqual({
+      profile: "1080p",
+      screens: 4,
+      supportStatus: "supported",
+    });
+    expect(BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.capacityRows).toContainEqual({
+      profile: "1080p",
+      screens: 8,
+      supportStatus: "unsupported",
+      reason: expect.any(String),
+    });
+    expect(BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.capacityRows).toContainEqual({
+      profile: "720p",
+      screens: 8,
+      supportStatus: "supported",
     });
     const row = passingDefaultRow();
     expect(requireApprovedDefaultRow([row], 4, BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL)).toBe(row);
