@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type JSX } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type JSX } from "react";
 import { Banner } from "@astryxdesign/core/Banner";
 import { Badge } from "@astryxdesign/core/Badge";
 import { CodeBlock } from "@astryxdesign/core/CodeBlock";
@@ -244,6 +244,19 @@ export function ChangesPanel({
     staleTime: 0,
     retry: false,
   });
+  const currentDetailRef = useRef<{
+    botId: string;
+    threadId: string | undefined;
+    selectedPath: string | undefined;
+    refetch: typeof detail.refetch;
+  } | undefined>(undefined);
+
+  useLayoutEffect(() => {
+    currentDetailRef.current = { botId, threadId, selectedPath, refetch: detail.refetch };
+    return () => {
+      currentDetailRef.current = undefined;
+    };
+  }, [botId, detail.refetch, selectedPath, threadId]);
 
   useEffect(() => {
     if (
@@ -259,19 +272,21 @@ export function ChangesPanel({
     setManualRefresh(true);
     try {
       const result = await changes.refetch({ cancelRefetch: true });
-      if (selectedPath === undefined) return;
+      const current = currentDetailRef.current;
       if (
-        result.data?.state !== "ready"
-        || !result.data.files.some((file) => file.path === selectedPath)
-      ) {
-        onSelectedPathChange(undefined);
-        return;
-      }
-      await detail.refetch({ cancelRefetch: true });
+        current === undefined
+        || current.botId !== botId
+        || current.threadId !== threadId
+        || current.selectedPath === undefined
+        || result.data?.state !== "ready"
+        || !result.data.files.some((file) => file.path === current.selectedPath)
+      ) return;
+      // Selection invalidation belongs to the effect above, using the latest props.
+      await current.refetch({ cancelRefetch: true });
     } finally {
       setManualRefresh(false);
     }
-  }, [changes, detail, onSelectedPathChange, selectedPath]);
+  }, [botId, changes, threadId]);
 
   let content: JSX.Element;
   if (changes.isPending) {

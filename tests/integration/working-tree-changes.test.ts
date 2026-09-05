@@ -237,6 +237,82 @@ describe("working-tree Changes HTTP API", () => {
     expect(repositorySnapshot(root)).toEqual(before);
   });
 
+  test("treats authorized tracked pathspec-looking filenames literally", async () => {
+    const botId = await makeBot(h, "Literal Path Detail Bot");
+    const root = initRepository();
+    const literalPath = ":(glob)*";
+    writeFileSync(path.join(root, literalPath), "literal before\n");
+    writeFileSync(path.join(root, "unrelated.txt"), "unrelated before\n");
+    commitAll(root);
+    writeFileSync(path.join(root, literalPath), "literal after\n");
+    writeFileSync(path.join(root, "unrelated.txt"), "unrelated after\n");
+    const threadId = threadFor(botId, root);
+    const before = repositorySnapshot(root);
+
+    const result = await detail(botId, threadId, literalPath);
+
+    expect(result).toMatchObject({ kind: "text", path: literalPath, status: "modified", truncated: false });
+    if (result.kind !== "text") throw new Error(`expected literal-path text, received ${result.kind}`);
+    expect(result.patch).toContain("-literal before");
+    expect(result.patch).toContain("+literal after");
+    expect(result.patch).not.toContain("unrelated");
+    expect(repositorySnapshot(root)).toEqual(before);
+  });
+
+  test("compares unborn staged and unstaged changes with the final working tree against an empty baseline", async () => {
+    const botId = await makeBot(h, "Unborn Combined Detail Bot");
+    const root = initRepository();
+    const filePath = ":(glob)*";
+    writeFileSync(path.join(root, filePath), "staged only\n");
+    writeFileSync(path.join(root, "removed.txt"), "staged then removed\n");
+    writeFileSync(path.join(root, "binary.dat"), "staged text\n");
+    git(root, "add", "--all");
+    writeFileSync(path.join(root, filePath), "final first\nfinal second\nfinal third\n");
+    unlinkSync(path.join(root, "removed.txt"));
+    writeFileSync(path.join(root, "binary.dat"), Buffer.from([0, 1, 2, 3]));
+    const threadId = threadFor(botId, root);
+    const snapshot = () => ({
+      head: readFileSync(path.join(root, ".git", "HEAD")),
+      status: git(root, "status", "--porcelain=v1", "-z"),
+      index: readFileSync(path.join(root, ".git", "index")),
+      objects: git(root, "count-objects", "-v"),
+    });
+    const before = snapshot();
+
+    const result = await summary(botId, threadId);
+    const currentDetail = await detail(botId, threadId, filePath);
+    const removedDetail = await detail(botId, threadId, "removed.txt");
+    const binaryDetail = await detail(botId, threadId, "binary.dat");
+
+    expect(result).toMatchObject({ state: "ready", changedFileCount: 3, additions: 3, deletions: 0 });
+    if (result.state !== "ready") throw new Error(`expected unborn summary, received ${result.state}`);
+    expect(result.files).toContainEqual({
+      path: filePath,
+      status: "added",
+      counts: { kind: "known", additions: 3, deletions: 0 },
+    });
+    expect(result.files).toContainEqual({
+      path: "removed.txt",
+      status: "added",
+      counts: { kind: "known", additions: 0, deletions: 0 },
+    });
+    expect(result.files).toContainEqual({
+      path: "binary.dat",
+      status: "added",
+      counts: { kind: "binary" },
+    });
+    expect(currentDetail).toMatchObject({ kind: "text", path: filePath, status: "added", truncated: false });
+    if (currentDetail.kind !== "text") throw new Error(`expected unborn text, received ${currentDetail.kind}`);
+    expect(currentDetail.patch).toContain("@@ -0,0 +1,3 @@");
+    expect(currentDetail.patch).toContain("+final first");
+    expect(currentDetail.patch).toContain("+final second");
+    expect(currentDetail.patch).toContain("+final third");
+    expect(currentDetail.patch).not.toContain("staged only");
+    expect(removedDetail).toMatchObject({ kind: "unknown", path: "removed.txt", status: "added" });
+    expect(binaryDetail).toEqual({ kind: "binary", path: "binary.dat", status: "added" });
+    expect(snapshot()).toEqual(before);
+  });
+
   test("combines staged and unstaged edits against HEAD", async () => {
     const botId = await makeBot(h, "Combined Detail Bot");
     const root = initRepository();

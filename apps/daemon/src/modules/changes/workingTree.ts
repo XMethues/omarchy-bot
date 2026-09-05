@@ -1,4 +1,6 @@
 import type { Database } from "bun:sqlite";
+import { lstat } from "node:fs/promises";
+import path from "node:path";
 import type {
   WorkingTreeDetailDto,
   WorkingTreeFileCountsDto,
@@ -121,7 +123,7 @@ function parseNumstat(output: Uint8Array): Map<string, WorkingTreeFileCountsDto>
   return counts;
 }
 
-function parseUntrackedPatchCounts(patch: string): WorkingTreeFileCountsDto | undefined {
+function parseEmptyBaselinePatchCounts(patch: string): WorkingTreeFileCountsDto | undefined {
   if (/^Binary files? .+ differ$/m.test(patch)) return { kind: "binary" };
 
   let additions = 0;
@@ -240,19 +242,22 @@ export class WorkingTreeService {
       if (files.length === 0) return { state: "clean", generatedAt };
 
       const head = await this.#git(repositoryRoot, ["rev-parse", "--verify", "--quiet", "HEAD"]);
-      const diffArgs = head.exitCode === 0
-        ? ["diff", "--numstat", "-z", "--find-renames", "--no-ext-diff", "--no-textconv", "HEAD", "--"]
-        : ["diff", "--cached", "--numstat", "-z", "--find-renames", "--no-ext-diff", "--no-textconv", "--"];
-      const numstat = await this.#git(repositoryRoot, diffArgs);
-      if (numstat.exitCode !== 0) return this.#unavailable(generatedAt, "Git failed while reading change counts.");
-      const countByPath = parseNumstat(numstat.stdout);
+      let countByPath: Map<string, WorkingTreeFileCountsDto> | undefined;
+      if (head.exitCode === 0) {
+        const numstat = await this.#git(
+          repositoryRoot,
+          ["diff", "--numstat", "-z", "--find-renames", "--no-ext-diff", "--no-textconv", "HEAD", "--"],
+        );
+        if (numstat.exitCode !== 0) return this.#unavailable(generatedAt, "Git failed while reading change counts.");
+        countByPath = parseNumstat(numstat.stdout);
+      }
       let additions = 0;
       let deletions = 0;
       let hasKnownCounts = false;
       for (const [index, file] of files.entries()) {
-        let counts = countByPath.get(file.path);
-        if (counts === undefined && file.status === "untracked" && index < this.#maxFiles) {
-          counts = await this.#untrackedCounts(repositoryRoot, file.path);
+        let counts = countByPath?.get(file.path);
+        if (counts === undefined && (file.status === "untracked" || head.exitCode !== 0) && index < this.#maxFiles) {
+          counts = await this.#emptyBaselineCounts(repositoryRoot, file.path);
         }
         if (counts === undefined) continue;
         file.counts = counts;
@@ -299,15 +304,15 @@ export class WorkingTreeService {
       if (repositoryRoot.length === 0) throw new HttpError(503, "Git returned no repository root.");
 
       const head = await this.#git(repositoryRoot, ["rev-parse", "--verify", "--quiet", "HEAD"]);
-      const useNoIndex = file.status === "untracked" || (head.exitCode !== 0 && file.status === "added");
-      const diffOptions = ["--no-ext-diff", "--no-textconv", "--no-color", "--src-prefix=a/", "--dst-prefix=b/"];
+      const useNoIndex = file.status === "untracked" || head.exitCode !== 0;
       const pathspecs = file.previousPath === undefined ? [file.path] : [file.previousPath, file.path];
-      const diffArgs = useNoIndex
-        ? ["diff", "--no-index", ...diffOptions, "--", "/dev/null", file.path]
-        : head.exitCode === 0
-          ? ["diff", ...diffOptions, "--find-renames", "HEAD", "--", ...pathspecs]
-          : ["diff", "--cached", ...diffOptions, "--find-renames", "--", ...pathspecs];
-      const diff = await this.#git(repositoryRoot, diffArgs, { truncateStdoutAt: this.#maxDiffBytes });
+      const diff = useNoIndex
+        ? await this.#emptyBaselineDiff(repositoryRoot, file.path)
+        : await this.#git(
+          repositoryRoot,
+          ["diff", "--no-ext-diff", "--no-textconv", "--no-color", "--src-prefix=a/", "--dst-prefix=b/", "--find-renames", "HEAD", "--", ...pathspecs],
+          { truncateStdoutAt: this.#maxDiffBytes },
+        );
       const successfulExit = useNoIndex ? diff.exitCode === 0 || diff.exitCode === 1 : diff.exitCode === 0;
       if (!diff.stdoutTruncated && !successfulExit) {
         throw new HttpError(503, "Git failed while reading changed-file detail.");
@@ -333,16 +338,12 @@ export class WorkingTreeService {
     }
   }
 
-  async #untrackedCounts(
+  async #emptyBaselineCounts(
     repositoryRoot: string,
     filePath: string,
   ): Promise<WorkingTreeFileCountsDto | undefined> {
     try {
-      const diff = await this.#git(
-        repositoryRoot,
-        ["diff", "--no-index", "--no-ext-diff", "--no-textconv", "--no-color", "--", "/dev/null", filePath],
-        { truncateStdoutAt: this.#maxDiffBytes },
-      );
+      const diff = await this.#emptyBaselineDiff(repositoryRoot, filePath);
       if (diff.stdoutTruncated || (diff.exitCode !== 0 && diff.exitCode !== 1)) return undefined;
       const patch = decoder.decode(diff.stdout);
       if (patch.length === 0) {
@@ -350,10 +351,26 @@ export class WorkingTreeService {
           ? { kind: "known", additions: 0, deletions: 0 }
           : undefined;
       }
-      return parseUntrackedPatchCounts(patch);
+      return parseEmptyBaselinePatchCounts(patch);
     } catch {
       return undefined;
     }
+  }
+
+  async #emptyBaselineDiff(repositoryRoot: string, filePath: string): Promise<GitResult> {
+    let comparisonPath = filePath;
+    try {
+      await lstat(path.join(repositoryRoot, filePath));
+    } catch (error) {
+      if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOENT") throw error;
+      // A staged addition deleted before the first commit has no final content.
+      comparisonPath = "/dev/null";
+    }
+    return this.#git(
+      repositoryRoot,
+      ["diff", "--no-index", "--no-ext-diff", "--no-textconv", "--no-color", "--src-prefix=a/", "--dst-prefix=b/", "--", "/dev/null", comparisonPath],
+      { truncateStdoutAt: this.#maxDiffBytes },
+    );
   }
 
   #effectiveRoot(botId: string, threadId: string | undefined): string {
@@ -380,6 +397,7 @@ export class WorkingTreeService {
     const processHandle = Bun.spawn({
       cmd: [
         this.#gitBin,
+        "--literal-pathspecs",
         "-c",
         "core.quotepath=false",
         "-c",

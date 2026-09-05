@@ -231,6 +231,66 @@ test.describe("working-tree Changes capability", () => {
     expect(summaryRequests).toBe(4);
   });
 
+  test("keeps the current file selected when an older refresh removes the previous selection", async ({ page }) => {
+    await page.clock.install({ time: new Date(GENERATED_AT) });
+    const refreshStarted = Promise.withResolvers<void>();
+    const releaseRefresh = Promise.withResolvers<void>();
+    let summaryRequests = 0;
+    let detailVersion = 1;
+    await page.route(/\/api\/bots\/[^/]+\/changes(?:\/detail)?(?:\?|$)/, async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname.endsWith("/detail")) {
+        const path = url.searchParams.get("path")!;
+        await fulfillJson(route, {
+          kind: "text",
+          path,
+          status: "modified",
+          patch: `+${path} detail version ${detailVersion}\n`,
+          truncated: false,
+        } satisfies WorkingTreeDetailDto);
+        return;
+      }
+      summaryRequests += 1;
+      if (summaryRequests === 1) {
+        await fulfillJson(route, {
+          state: "ready",
+          generatedAt: GENERATED_AT,
+          truncated: false,
+          changedFileCount: 2,
+          additions: 2,
+          files: [
+            { path: "src/a.ts", status: "modified", counts: { kind: "known", additions: 1, deletions: 0 } },
+            { path: "src/b.ts", status: "modified", counts: { kind: "known", additions: 1, deletions: 0 } },
+          ],
+        } satisfies WorkingTreeSummaryDto);
+        return;
+      }
+      refreshStarted.resolve();
+      await releaseRefresh.promise;
+      await fulfillJson(route, workspaceSummary("b"));
+    });
+
+    await createBot(page, "Refresh Selection Bot");
+    await page.getByRole("button", { name: "Open Computer Surface", exact: true }).click();
+    const capabilities = page.getByRole("complementary", { name: "Workspace capabilities" });
+    await capabilities.getByRole("tab", { name: "Changes" }).click();
+    await capabilities.getByText("src/a.ts", { exact: true }).click();
+    await expect(capabilities.getByLabel("File detail for src/a.ts")).toContainText("src/a.ts detail version 1");
+
+    await capabilities.getByRole("button", { name: "Refresh changes", exact: true }).click();
+    await refreshStarted.promise;
+    await capabilities.getByText("src/b.ts", { exact: true }).click();
+    const selectedDetail = capabilities.getByLabel("File detail for src/b.ts");
+    await expect(selectedDetail).toContainText("src/b.ts detail version 1");
+
+    detailVersion = 2;
+    releaseRefresh.resolve();
+    await expect(capabilities.getByText("1 changed file", { exact: true })).toBeVisible();
+    await expect(capabilities.getByText("src/a.ts", { exact: true })).toHaveCount(0);
+    await expect(selectedDetail).toContainText("src/b.ts detail version 2");
+    await expect(capabilities.getByLabel("File detail for src/a.ts")).toHaveCount(0);
+  });
+
   test("isolates late Changes responses across Threads and Bots while keeping one right region", async ({ page }) => {
     const botAId = await createBot(page, "Isolation Bot A");
     const threadOneId = await sendMessage(page, "say: Thread one workspace");
