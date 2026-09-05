@@ -73,9 +73,10 @@ describe("agent capability inventory", () => {
       capabilities: AgentCapabilityInventory;
     };
     expect(initialProbe.capabilities).toEqual({
-      version: 2,
+      version: 3,
       steering: true,
       abort: true,
+      botMail: true,
       nativeThreadActions: ["resume", "history", "close"],
       thinking: { supported: true, streaming: true },
       attachments: { text: true, image: true },

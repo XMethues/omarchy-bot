@@ -14,6 +14,8 @@
  *   attachment-echo validates the daemon's managed worker paths and echoes metadata/content
  *   computer:<action> invokes the daemon-owned Bot Screen tool bridge
  *
+ *   send_bot_message:<targetBotId>:<text>[:retry] invokes the daemon-owned mailbox bridge
+ *   send_bot_message_after_release:<file>:<targetBotId>:<text> delays that bridge for readiness tests
  * Stays alive until stdin closes (daemon lifecycle contract).
  */
 import { appendFileSync, existsSync, readFileSync } from "node:fs";
@@ -79,7 +81,8 @@ function emitThinking(
 
 
 
-write({ type: "hello", v: 1, worker: "agent:pi", pid: process.pid });
+const AGENT_ID = process.env.OMARCHY_BOT_FAKE_AGENT_ID === "omp" ? "omp" : "pi";
+write({ type: "hello", v: 1, worker: `agent:${AGENT_ID}`, pid: process.pid });
 const heartbeat = setInterval(() => write({ type: "heartbeat" }), 5_000);
 heartbeat.unref?.();
 const workerHome = dataDir();
@@ -89,7 +92,7 @@ if (workerHome !== undefined) {
 
 const nativeSessionLog = workerHome === undefined
   ? undefined
-  : path.join(workerHome, "fake-agent-native-sessions.log");
+  : path.join(workerHome, `fake-agent-${AGENT_ID}-native-sessions.log`);
 const nativeSessions = new Set(
   nativeSessionLog !== undefined && existsSync(nativeSessionLog)
     ? readFileSync(nativeSessionLog, "utf8").split("\n").filter((id) => id.length > 0)
@@ -102,7 +105,7 @@ function rememberNativeSession(nativeSessionId: string): void {
   if (nativeSessionLog !== undefined) appendFileSync(nativeSessionLog, `${nativeSessionId}\n`);
 }
 
-const AGENT_VERSION = "fake-pi-1";
+const AGENT_VERSION = `fake-${AGENT_ID}-1`;
 
 interface FakeProbeControl {
   ok?: unknown;
@@ -111,6 +114,7 @@ interface FakeProbeControl {
   fakeCapabilities?: {
     steering?: boolean;
     abort?: boolean;
+    botMail?: boolean;
     nativeThreadActions?: Array<"resume" | "history" | "close" | "rename" | "delete" | "fork" | "compact">;
     thinking?: {
       supported: boolean;
@@ -130,7 +134,7 @@ function probeControl(): FakeProbeControl {
   try {
     const root = dataDir();
     if (root === undefined) return {};
-    return JSON.parse(readFileSync(path.join(root, "conformance", `pi-${AGENT_VERSION}.json`), "utf8")) as FakeProbeControl;
+    return JSON.parse(readFileSync(path.join(root, "conformance", `${AGENT_ID}-${AGENT_VERSION}.json`), "utf8")) as FakeProbeControl;
   } catch {
     return {};
   }
@@ -142,6 +146,7 @@ function capabilitiesFor(control: FakeProbeControl): AgentCapabilityInventory {
     version: AGENT_CAPABILITY_INVENTORY_VERSION,
     steering: control.fakeCapabilities?.steering ?? true,
     abort: control.fakeCapabilities?.abort ?? true,
+    botMail: control.fakeCapabilities?.botMail ?? true,
     nativeThreadActions: control.fakeCapabilities?.nativeThreadActions ?? ["resume", "history", "close"],
     thinking: {
       supported: thinkingSupported,
@@ -163,6 +168,16 @@ function recordCommand(command: "message.steer" | "turn.abort"): void {
   if (root !== undefined) appendFileSync(path.join(root, "fake-worker-commands.log"), `${command}\n`);
 }
 
+function recordObservation(observation: Record<string, unknown>): void {
+  const root = dataDir();
+  if (root !== undefined) {
+    appendFileSync(
+      path.join(root, "fake-agent-observations.ndjson"),
+      `${JSON.stringify(observation)}\n`,
+    );
+  }
+}
+
 let sessionCounter = nativeSessions.size;
 interface FakeAttachment {
   id: string;
@@ -176,6 +191,12 @@ interface ComputerTurnContext {
   turnId: string;
   workerSessionId: string;
   surfaceId: string;
+}
+
+interface BotMessageTurnContext {
+  botId: string;
+  turnId: string;
+  workerSessionId: string;
 }
 
 interface FakeSession {
@@ -201,6 +222,30 @@ const computerRequests = new Map<string, {
   resolve: (payload: unknown) => void;
   reject: (error: Error) => void;
 }>();
+
+const botMessageRequests = new Map<string, {
+  resolve: (payload: { deliveryId: string; queued: true }) => void;
+  reject: (error: Error) => void;
+}>();
+
+function requestBotMessage(
+  context: BotMessageTurnContext,
+  toolCallId: string,
+  targetBotId: string,
+  text: string,
+): Promise<{ deliveryId: string; queued: true }> {
+  const requestId = crypto.randomUUID();
+  const pending = Promise.withResolvers<{ deliveryId: string; queued: true }>();
+  botMessageRequests.set(requestId, { resolve: pending.resolve, reject: pending.reject });
+  write({
+    type: "bot-message.request",
+    requestId,
+    context: { ...context, toolCallId },
+    targetBotId,
+    text,
+  });
+  return pending.promise;
+}
 
 async function requestComputer(
   context: ComputerTurnContext,
@@ -251,6 +296,25 @@ function computerTurnContext(value: unknown): ComputerTurnContext | undefined {
   };
 }
 
+function botMessageTurnContext(value: unknown): BotMessageTurnContext | undefined {
+  if (value === null || typeof value !== "object") return undefined;
+  if (
+    !("botId" in value)
+    || !("turnId" in value)
+    || !("workerSessionId" in value)
+    || typeof value.botId !== "string"
+    || typeof value.turnId !== "string"
+    || typeof value.workerSessionId !== "string"
+  ) {
+    return undefined;
+  }
+  return {
+    botId: value.botId,
+    turnId: value.turnId,
+    workerSessionId: value.workerSessionId,
+  };
+}
+
 readJsonl(Bun.stdin.stream(), (raw) => {
   const msg = raw as Record<string, unknown> & { type: string; requestId?: string };
   switch (msg.type) {
@@ -262,6 +326,17 @@ readJsonl(Bun.stdin.stream(), (raw) => {
       else pending.reject(new Error(String(msg.error)));
       break;
     }
+    case "bot-message.result": {
+      const pending = msg.requestId === undefined ? undefined : botMessageRequests.get(msg.requestId);
+      if (pending === undefined) break;
+      botMessageRequests.delete(msg.requestId!);
+      if (msg.ok === true) {
+        pending.resolve(msg.payload as { deliveryId: string; queued: true });
+      } else {
+        pending.reject(new Error(String(msg.error)));
+      }
+      break;
+    }
     case "probe": {
       const control = probeControl();
       if (control.fakeProbe === "offline") {
@@ -270,7 +345,7 @@ readJsonl(Bun.stdin.stream(), (raw) => {
       }
       if (control.fakeProbe === "invalid") {
         respond(msg.requestId!, {
-          agentId: "pi",
+          agentId: AGENT_ID,
           installed: true,
           sdkOk: true,
           agentVersion: AGENT_VERSION,
@@ -280,7 +355,7 @@ readJsonl(Bun.stdin.stream(), (raw) => {
       }
       currentCapabilities = capabilitiesFor(control);
       respond(msg.requestId!, {
-        agentId: "pi",
+        agentId: AGENT_ID,
         installed: true,
         sdkOk: true,
         agentVersion: AGENT_VERSION,
@@ -289,10 +364,28 @@ readJsonl(Bun.stdin.stream(), (raw) => {
       break;
     }
     case "session.open": {
+      if (
+        typeof msg.options === "object"
+        && msg.options !== null
+        && "instructions" in msg.options
+        && msg.options.instructions === "fake-session-open-failure"
+      ) {
+        respondError(msg.requestId!, "fake worker secret: session.open rejected");
+        break;
+      }
       const id = `s${++sessionCounter}`;
       const nativeSessionId = `fake://${id}`;
       sessions.set(id, { aborted: false, streaming: false });
       rememberNativeSession(nativeSessionId);
+      recordObservation({
+        type: msg.type,
+        requestId: msg.requestId,
+        botId: msg.botId,
+        threadId: msg.threadId,
+        options: msg.options,
+        sessionId: id,
+        nativeSessionId,
+      });
       respond(msg.requestId!, { sessionId: id, nativeSessionId });
       break;
     }
@@ -304,6 +397,15 @@ readJsonl(Bun.stdin.stream(), (raw) => {
       }
       const id = `s${++sessionCounter}`;
       sessions.set(id, { aborted: false, streaming: false });
+      recordObservation({
+        type: msg.type,
+        requestId: msg.requestId,
+        botId: msg.botId,
+        threadId: msg.threadId,
+        options: msg.options,
+        sessionId: id,
+        nativeSessionId,
+      });
       respond(msg.requestId!, { sessionId: id, nativeSessionId });
       break;
     }
@@ -313,13 +415,186 @@ readJsonl(Bun.stdin.stream(), (raw) => {
         turnId: string;
         message: { text: string; attachments?: FakeAttachment[] };
       };
+      recordObservation({
+        type: msg.type,
+        requestId: msg.requestId,
+        sessionId: command.sessionId,
+        turnId: command.turnId,
+        message: command.message,
+        computer: msg.computer,
+        botMessage: msg.botMessage,
+      });
       const { sessionId, message } = command;
-      const text = message.text;
+      let text = message.text;
       const s = sessions.get(sessionId)!;
       s.aborted = false;
       s.directive = undefined;
       s.steerReply = undefined;
       void (async () => {
+        let mailboxReleasePath: string | undefined;
+        if (text.startsWith("send_bot_message_after_release:")) {
+          const delayed = text.slice("send_bot_message_after_release:".length);
+          const separator = delayed.indexOf(":");
+          const releaseFile = separator < 0 ? "" : delayed.slice(0, separator);
+          const mailboxCommand = separator < 0 ? "" : delayed.slice(separator + 1);
+          const root = dataDir();
+          mailboxReleasePath = root === undefined || releaseFile.length === 0
+            ? undefined
+            : path.join(root, releaseFile);
+          text = `send_bot_message:${mailboxCommand}`;
+        }
+        if (text.startsWith("send_bot_message:")) {
+          const binding = botMessageTurnContext(msg.botMessage);
+          const commandText = text.slice("send_bot_message:".length);
+          const separator = commandText.indexOf(":");
+          const targetBotId = separator < 0 ? "" : commandText.slice(0, separator);
+          const rawBody = separator < 0 ? "" : commandText.slice(separator + 1);
+          const retry = rawBody.endsWith(":retry");
+          const forgeSource = rawBody.endsWith(":forge-source");
+          const suffix = retry ? ":retry" : forgeSource ? ":forge-source" : "";
+          const body = suffix === "" ? rawBody : rawBody.slice(0, -suffix.length);
+          const toolCallId = `bot-message-${command.turnId}`;
+          write({
+            type: "event",
+            event: {
+              type: "tool.started",
+              sessionId,
+              id: toolCallId,
+              name: "send_bot_message",
+              status: "running",
+              target: targetBotId,
+            },
+          });
+          while (mailboxReleasePath !== undefined && !existsSync(mailboxReleasePath)) {
+            await Bun.sleep(10);
+          }
+          try {
+            if (binding === undefined) throw new Error("Bot message tool binding missing");
+            const requestBinding = forgeSource
+              ? { ...binding, botId: targetBotId }
+              : binding;
+            const acknowledgements = [
+              await requestBotMessage(requestBinding, toolCallId, targetBotId, body),
+            ];
+            if (retry) {
+              acknowledgements.push(
+                await requestBotMessage(binding, toolCallId, targetBotId, body),
+              );
+            }
+            if (mailboxReleasePath !== undefined) {
+              appendFileSync(`${mailboxReleasePath}.ack`, "");
+            }
+            write({
+              type: "event",
+              event: {
+                type: "tool.completed",
+                sessionId,
+                id: toolCallId,
+                name: "send_bot_message",
+                status: "completed",
+                target: targetBotId,
+              },
+            });
+            emitResponse(
+              sessionId,
+              command.turnId,
+              `Bot message acknowledgements: ${acknowledgements.map(
+                (acknowledgement) => `${acknowledgement.deliveryId} queued`,
+              ).join("; ")}.`,
+            );
+            write({ type: "event", event: { type: "turn.completed", sessionId } });
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            write({
+              type: "event",
+              event: {
+                type: "tool.completed",
+                sessionId,
+                id: toolCallId,
+                name: "send_bot_message",
+                status: "error",
+                target: targetBotId,
+                errorSummary: redactToolErrorSummary(message),
+              },
+            });
+            write({
+              type: "event",
+              event: { type: "error", sessionId, message, retryable: false },
+            });
+          }
+          respond(msg.requestId!, { accepted: true });
+          return;
+        }
+        const peerMail =
+          /^Message from Bot (.+?)(?: \((bot_[0-9a-f]{32})\))?:\n\n([\s\S]*)$/.exec(text);
+        if (peerMail !== null) {
+          const body = peerMail[3]!;
+          respond(msg.requestId!, { accepted: true });
+          if (body === "mailbox-ordered-output") {
+            emitThinking(sessionId, command.turnId, "Review the isolated peer mail.", { durationMs: 25 });
+            const toolCallId = `peer-mail-${command.turnId}`;
+            write({
+              type: "event",
+              event: {
+                type: "tool.started",
+                sessionId,
+                id: toolCallId,
+                name: "read",
+                status: "running",
+                target: "mailbox-input",
+              },
+            });
+            write({
+              type: "event",
+              event: {
+                type: "tool.completed",
+                sessionId,
+                id: toolCallId,
+                name: "read",
+                status: "completed",
+                target: "mailbox-input",
+                durationMs: 4,
+              },
+            });
+            write({
+              type: "event",
+              event: {
+                type: "native",
+                sessionId,
+                agentId: AGENT_ID,
+                capability: "fake.progress",
+                payload: { stage: "peer-mail" },
+                sensitivity: "public",
+              },
+            });
+            emitResponse(sessionId, command.turnId, "Peer mail handled.");
+            write({ type: "event", event: { type: "turn.completed", sessionId } });
+            return;
+          }
+          if (body === "mailbox-fail-after-acceptance") {
+            // The test releases this independently after observing the durable
+            // accepted state, matching adapters that emit later Turn events.
+            const root = dataDir();
+            const release = root === undefined
+              ? undefined
+              : path.join(root, "fake-peer-mail-failure.release");
+            while (release !== undefined && !existsSync(release)) {
+              await Bun.sleep(10);
+            }
+            write({
+              type: "event",
+              event: {
+                type: "error",
+                sessionId,
+                message: "fake peer-mail failure",
+                retryable: false,
+              },
+            });
+            return;
+          }
+          write({ type: "event", event: { type: "turn.completed", sessionId } });
+          return;
+        }
         if (text.startsWith("computer:")) {
           const binding = computerTurnContext(msg.computer);
           const parts = text.split(":");
@@ -502,7 +777,7 @@ readJsonl(Bun.stdin.stream(), (raw) => {
             event: {
               type: "native",
               sessionId,
-              agentId: "pi",
+              agentId: AGENT_ID,
               capability: "fake.progress",
               payload: { stage: "ordered-boundary" },
               sensitivity: "public",
@@ -547,7 +822,7 @@ readJsonl(Bun.stdin.stream(), (raw) => {
             event: {
               type: "native",
               sessionId,
-              agentId: "pi",
+              agentId: AGENT_ID,
               capability: "fake.progress",
               payload: { stage: "process-only" },
               sensitivity: "public",
@@ -668,7 +943,7 @@ readJsonl(Bun.stdin.stream(), (raw) => {
             event: {
               type: "native",
               sessionId,
-              agentId: "pi",
+              agentId: AGENT_ID,
               capability: "fake.secret-progress",
               payload: { token: "must-not-leak" },
               sensitivity: "secret",
@@ -679,7 +954,7 @@ readJsonl(Bun.stdin.stream(), (raw) => {
             event: {
               type: "native",
               sessionId,
-              agentId: "pi",
+              agentId: AGENT_ID,
               capability: "fake.diagnostic-progress",
               payload: { trace: "must-not-leak" },
               sensitivity: "diagnostic",
@@ -728,7 +1003,7 @@ readJsonl(Bun.stdin.stream(), (raw) => {
               event: {
                 type: "native",
                 sessionId,
-                agentId: "pi",
+                agentId: AGENT_ID,
                 capability: "fake.progress",
                 payload: { stage: "tool-running" },
                 sensitivity: "public",

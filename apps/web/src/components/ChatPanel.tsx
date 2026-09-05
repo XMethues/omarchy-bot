@@ -24,6 +24,7 @@ import { Icon } from "@astryxdesign/core/Icon";
 import { Markdown, type MarkdownComponents } from "@astryxdesign/core/Markdown";
 import { Item } from "@astryxdesign/core/Item";
 import { Token } from "@astryxdesign/core/Token";
+import { Text } from "@astryxdesign/core/Text";
 import { VStack } from "@astryxdesign/core/VStack";
 import { VisuallyHidden } from "@astryxdesign/core/VisuallyHidden";
 import type {
@@ -220,6 +221,17 @@ function ThinkingDisclosure({ message }: { message: MessageDto }): JSX.Element |
         />
       </Collapsible>
     </ChatMessage>
+  );
+}
+
+function PeerMailSystemMessage({ message }: { message: MessageDto }): JSX.Element {
+  return (
+    <ChatSystemMessage>
+      <VStack gap={1} data-testid="peer-mail-message">
+        <Text type="label-lg">{`From ${message.peerMail!.sourceName}`}</Text>
+        <Text>{message.text ?? ""}</Text>
+      </VStack>
+    </ChatSystemMessage>
   );
 }
 
@@ -894,7 +906,11 @@ export function ChatPanel({
         continue;
       }
       if (message.author.kind === "system") {
-        out.push(<ChatSystemMessage key={message.id}>{message.text ?? ""}</ChatSystemMessage>);
+        out.push(
+          message.peerMail === undefined
+            ? <ChatSystemMessage key={message.id}>{message.text ?? ""}</ChatSystemMessage>
+            : <PeerMailSystemMessage key={message.id} message={message} />,
+        );
         continue;
       }
 
@@ -1117,12 +1133,12 @@ export function ChatPanel({
             />
           }
           {...(attachmentDrawer !== undefined ? { drawer: attachmentDrawer } : {})}
-          headerActions={
+          footerActions={
             <Button
               label="Attach files"
               icon={<Icon icon={Paperclip} size="sm" />}
               variant="ghost"
-              size="sm"
+              size="md"
               isIconOnly
               isDisabled={bot === undefined || isAgentNotReady || activeTurnCannotSteer}
               onClick={() => fileInputRef.current?.click()}
@@ -1130,6 +1146,8 @@ export function ChatPanel({
             />
           }
           sendActions={dictationButton}
+          density="compact"
+          elevation="low"
           placeholder={
             bot === undefined
               ? "Select or create a bot"

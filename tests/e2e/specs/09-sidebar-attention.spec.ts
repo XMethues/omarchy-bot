@@ -16,12 +16,34 @@ function composerInput(page: Page): Locator {
   return page.getByRole("textbox", { name: "Message input" });
 }
 
-async function sendAndWait(page: Page, text: string): Promise<void> {
+async function sendAndWait(page: Page, text: string): Promise<string> {
   const priorReplies = await page.getByTestId("assistant-message").count();
+  const sendResponsePromise = page.waitForResponse((response) =>
+    response.request().method() === "POST"
+    && /^\/api\/(?:bots|threads)\/[^/]+\/messages$/u.test(new URL(response.url()).pathname)
+  );
   await composerInput(page).fill(text);
   await composerInput(page).press("Enter");
+
+  const sendResponse = await sendResponsePromise;
+  expect(sendResponse.status()).toBe(202);
+  const result = await sendResponse.json() as {
+    action: "sent" | "steered";
+    threadId: string;
+    turnId: string;
+  };
+  expect(result.action).toBe("sent");
   await expect(page.getByTestId("assistant-message")).toHaveCount(priorReplies + 1, { timeout: 15_000 });
+  await expect.poll(async () => {
+    const response = await page.request.get(`/api/threads/${result.threadId}`);
+    if (!response.ok()) return undefined;
+    const thread = await response.json() as { latestTurn?: { id: string; status: string } };
+    return thread.latestTurn === undefined
+      ? undefined
+      : `${thread.latestTurn.id}:${thread.latestTurn.status}`;
+  }, { timeout: 15_000 }).toBe(`${result.turnId}:completed`);
   await expect(page.getByTestId("working-avatar")).toHaveCount(0, { timeout: 15_000 });
+  return result.threadId;
 }
 
 async function currentThreadId(page: Page): Promise<string> {
@@ -85,8 +107,15 @@ test.describe("Sidebar attention", () => {
   test("keeps unread above the latest output and clears it through the native latest control", async ({ page }) => {
     await page.goto("/");
     const botId = await createBot(page, `Unread boundary ${Date.now()}`);
+    let selectedThreadId: string | undefined;
     for (let index = 0; index < 5; index += 1) {
-      await sendAndWait(page, `say: ${index} ${"long transcript output ".repeat(20)}`);
+      const completedThreadId = await sendAndWait(
+        page,
+        `say: ${index} ${"long transcript output ".repeat(20)}`,
+      );
+      selectedThreadId ??= completedThreadId;
+      expect(completedThreadId).toBe(selectedThreadId);
+      expect(new URL(page.url()).searchParams.get("thread")).toBe(selectedThreadId);
     }
     const threadId = await currentThreadId(page);
     await scrollTranscriptToTop(page);

@@ -21,6 +21,10 @@ import {
   writeJsonl,
   AGENT_CAPABILITY_INVENTORY_VERSION,
   type AgentCommand,
+  type AgentBotMessageToolContext,
+  type AgentBotMessageToolOutput,
+  type AgentBotMessageToolResult,
+  type AgentBotMessageTurnContext,
   type AgentComputerToolContext,
   type AgentComputerToolOutput,
   type AgentComputerToolResult,
@@ -35,6 +39,7 @@ import { isSurfaceId, type ComputerAction } from "@omarchy-bot/domain";
 import { normalizeSessionEvent, toNormalizedMessages, type SessionRuntime } from "./normalize.ts";
 import { sdkVersion } from "./sdk-version.ts";
 import { createComputerTool } from "./computer-tool.ts";
+import { createBotMessageTool } from "./bot-message-tool.ts";
 import { thinkingCapabilityForProbe } from "./thinking-capability.ts";
 
 const AGENT_ID = "pi";
@@ -43,6 +48,7 @@ interface SessionEntry extends SessionRuntime {
   session: AgentSession;
   botId: string;
   computer?: AgentComputerTurnContext;
+  botMessage?: AgentBotMessageTurnContext;
 }
 
 const sessions = new Map<string, SessionEntry>();
@@ -90,6 +96,51 @@ function handleComputerResult(result: AgentComputerToolResult): void {
   const pending = computerRequests.get(result.requestId);
   if (pending === undefined) return;
   computerRequests.delete(result.requestId);
+  if (pending.signal !== undefined && pending.onAbort !== undefined) {
+    pending.signal.removeEventListener("abort", pending.onAbort);
+  }
+  if (result.ok === true) pending.resolve(result.payload);
+  else pending.reject(new Error(result.error));
+}
+
+interface PendingBotMessageRequest {
+  resolve: (output: AgentBotMessageToolOutput) => void;
+  reject: (error: Error) => void;
+  signal?: AbortSignal;
+  onAbort?: () => void;
+}
+
+const botMessageRequests = new Map<string, PendingBotMessageRequest>();
+
+function requestBotMessage(
+  context: AgentBotMessageToolContext,
+  targetBotId: string,
+  text: string,
+  signal: AbortSignal | undefined,
+): Promise<AgentBotMessageToolOutput> {
+  signal?.throwIfAborted();
+  const requestId = crypto.randomUUID();
+  return new Promise<AgentBotMessageToolOutput>((resolve, reject) => {
+    const pending: PendingBotMessageRequest = { resolve, reject };
+    if (signal !== undefined) {
+      pending.signal = signal;
+      pending.onAbort = () => {
+        if (botMessageRequests.delete(requestId)) {
+          writeJsonl({ type: "bot-message.cancel", requestId });
+          reject(new Error("Bot message tool call cancelled"));
+        }
+      };
+      signal.addEventListener("abort", pending.onAbort, { once: true });
+    }
+    botMessageRequests.set(requestId, pending);
+    writeJsonl({ type: "bot-message.request", requestId, context, targetBotId, text });
+  });
+}
+
+function handleBotMessageResult(result: AgentBotMessageToolResult): void {
+  const pending = botMessageRequests.get(result.requestId);
+  if (pending === undefined) return;
+  botMessageRequests.delete(result.requestId);
   if (pending.signal !== undefined && pending.onAbort !== undefined) {
     pending.signal.removeEventListener("abort", pending.onAbort);
   }
@@ -163,6 +214,7 @@ function attachSubscription(entry: SessionEntry): void {
       entry.running = false;
       entry.finished = true;
       delete entry.computer;
+      delete entry.botMessage;
       if (entry.aborted) emit({ type: "turn.cancelled", sessionId });
       else emit({ type: "turn.completed", sessionId });
     }
@@ -178,6 +230,10 @@ async function openSession(
   const computerTool = createComputerTool(
     () => newEntry?.computer,
     { request: requestComputer },
+  );
+  const botMessageTool = createBotMessageTool(
+    () => newEntry?.botMessage,
+    { request: requestBotMessage },
   );
   const sessionId = `s_${crypto.randomUUID()}`;
 
@@ -207,7 +263,7 @@ async function openSession(
     modelRuntime: rt,
     ...(model !== undefined ? { model } : {}),
     resourceLoader: loader,
-    customTools: [computerTool],
+    customTools: [computerTool, botMessageTool],
   });
 
   const nativeSessionId = session.sessionFile ?? `mem:${sessionId}`;
@@ -249,6 +305,7 @@ async function handleMessage(cmd: AgentCommand): Promise<void> {
             version: AGENT_CAPABILITY_INVENTORY_VERSION,
             steering: true,
             abort: true,
+            botMail: true,
             nativeThreadActions: ["resume", "history", "close"],
             thinking,
             attachments: {
@@ -298,6 +355,16 @@ async function handleMessage(cmd: AgentCommand): Promise<void> {
         ) {
           throw new Error("Bot Screen binding is required and must match the Agent command");
         }
+        if (
+          cmd.botMessage !== undefined
+          && (
+            cmd.botMessage.botId !== entry.botId
+            || cmd.botMessage.workerSessionId !== cmd.sessionId
+            || cmd.botMessage.turnId !== cmd.turnId
+          )
+        ) {
+          throw new Error("Bot message binding is required and must match the Agent command");
+        }
         const images =
           cmd.message.attachments && cmd.message.attachments.length > 0
             ? await Promise.all(
@@ -320,6 +387,8 @@ async function handleMessage(cmd: AgentCommand): Promise<void> {
           promptText += `\n\n[attachment ${a.name}]\n${content}\n[/attachment ${a.name}]`;
         }
         entry.computer = cmd.computer;
+        if (cmd.botMessage === undefined) delete entry.botMessage;
+        else entry.botMessage = cmd.botMessage;
         entry.running = true;
         entry.finished = false;
         entry.aborted = false;
@@ -329,6 +398,7 @@ async function handleMessage(cmd: AgentCommand): Promise<void> {
             entry.running = false;
             entry.finished = true;
             delete entry.computer;
+            delete entry.botMessage;
             emit({ type: "error", sessionId: entry.sessionId, message: String(err), retryable: false });
           });
         reply({ requestId: cmd.requestId, ok: true, payload: { accepted: true } });
@@ -397,6 +467,8 @@ await readJsonl(
     if (msg && typeof msg === "object" && "type" in msg) {
       if (msg.type === "computer.result") {
         handleComputerResult(msg as AgentComputerToolResult);
+      } else if (msg.type === "bot-message.result") {
+        handleBotMessageResult(msg as AgentBotMessageToolResult);
       } else {
         void handleMessage(msg as AgentCommand);
       }
@@ -406,6 +478,10 @@ await readJsonl(
     for (const pending of computerRequests.values()) {
       pending.reject(new Error("daemon connection closed during computer tool call"));
     }
+    for (const pending of botMessageRequests.values()) {
+      pending.reject(new Error("daemon connection closed during Bot message tool call"));
+    }
+    botMessageRequests.clear();
     computerRequests.clear();
     process.exit(0);
   },

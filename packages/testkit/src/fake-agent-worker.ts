@@ -93,6 +93,7 @@ readJsonl(Bun.stdin.stream(), async (raw) => {
           version: AGENT_CAPABILITY_INVENTORY_VERSION,
           steering: true,
           abort: true,
+          botMail: false,
           nativeThreadActions: ["resume", "history", "close"],
           thinking: { supported: true, streaming: true },
           attachments: { text: false, image: false },

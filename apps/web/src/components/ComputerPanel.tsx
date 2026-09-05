@@ -4,7 +4,6 @@ import type {
   KeyboardEvent as ReactKeyboardEvent,
   MouseEvent as ReactMouseEvent,
   PointerEvent as ReactPointerEvent,
-  RefObject,
   WheelEvent as ReactWheelEvent,
 } from "react";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
@@ -15,9 +14,7 @@ import { useAppShellMobile } from "@astryxdesign/core/AppShell";
 import { Banner } from "@astryxdesign/core/Banner";
 import { Button } from "@astryxdesign/core/Button";
 import { IconButton } from "@astryxdesign/core/IconButton";
-import { LayoutPanel } from "@astryxdesign/core/Layout";
 import { EmptyState } from "@astryxdesign/core/EmptyState";
-import { Heading } from "@astryxdesign/core/Heading";
 import { HStack } from "@astryxdesign/core/HStack";
 import { Icon } from "@astryxdesign/core/Icon";
 import { Text } from "@astryxdesign/core/Text";
@@ -29,20 +26,19 @@ import {
   type ScreenProjectionState,
 } from "../lib/screenProjection.ts";
 
-export interface ComputerPanelProps {
+export interface ComputerSurfaceProps {
   bot: Pick<BotViewDto, "id" | "name">;
   view: ComputerViewDto;
   projectionUrl: string;
-  open: boolean;
-  returnFocusRef: RefObject<HTMLButtonElement | null>;
   busy?: boolean;
   error?: string;
   loading?: boolean;
   onRetry?: () => void;
-  onClose: () => void;
+  onRequestClose: () => void;
   onTakeControl: () => Promise<boolean>;
   onReturnToBot: () => Promise<boolean>;
 }
+
 
 const STATE_LABELS: Record<ComputerViewDto["state"], string> = {
   starting: "Screen starting",
@@ -142,9 +138,9 @@ const localStyles = stylex.create({
     backgroundColor: "rgba(0, 0, 0, 0.32)",
   },
 });
-interface ComputerPanelContentProps extends Omit<
-  ComputerPanelProps,
-  "open" | "returnFocusRef" | "onClose" | "projectionUrl" | "onTakeControl" | "onReturnToBot"
+interface ComputerSurfaceContentProps extends Omit<
+  ComputerSurfaceProps,
+  "projectionUrl" | "onRequestClose" | "onTakeControl" | "onReturnToBot"
 > {
   previewOnly: boolean;
   projectionState: ScreenProjectionState;
@@ -158,7 +154,7 @@ interface ComputerPanelContentProps extends Omit<
   onContinueTakeover: () => void;
 }
 
-function ComputerPanelContent({
+function ComputerSurfaceContent({
   bot,
   view,
   busy = false,
@@ -175,7 +171,7 @@ function ComputerPanelContent({
   onProjectionRetry,
   onRetryScreen,
   onExpandPreview,
-}: ComputerPanelContentProps): JSX.Element {
+}: ComputerSurfaceContentProps): JSX.Element {
   const projectionUnavailable = projectionState === "snapshot" || projectionState === "unavailable";
   const canTakeControl = !previewOnly && view.takeover === "available" && !projectionUnavailable;
   const projectionWaiting =
@@ -287,18 +283,19 @@ function ComputerPanelContent({
   );
 }
 
-/** Right-side computer panel at every window width. */
-export function ComputerPanel({
-  open,
-  onClose,
-  returnFocusRef,
+/**
+ * Computer Surface content and projection lifecycle without outer panel chrome.
+ * Hosts mount this module only while its containing surface is active.
+ */
+export function ComputerSurface({
   projectionUrl,
   bot,
   view,
+  onRequestClose,
   onTakeControl,
   onReturnToBot,
   ...contentProps
-}: ComputerPanelProps): JSX.Element | null {
+}: ComputerSurfaceProps): JSX.Element {
   const { isMobile: isSmallScreen } = useAppShellMobile();
   const [previewExpanded, setPreviewExpanded] = useState(false);
   const [projectionState, setProjectionState] = useState<ScreenProjectionState>("closed");
@@ -357,17 +354,16 @@ export function ComputerPanel({
     setControlReady(false);
     clearBrowserHeldInput();
   }, [clearBrowserHeldInput, view.surfaceId]);
-  const closePanel = useCallback((): void => {
+  const requestClose = useCallback((): void => {
     setPreviewExpanded(false);
     setControlReady(false);
     setScreenRetrying(false);
-    onClose();
     setProjectionError(undefined);
-    requestAnimationFrame(() => returnFocusRef.current?.focus());
-  }, [onClose, returnFocusRef]);
+    onRequestClose();
+  }, [onRequestClose]);
 
   useEffect(() => {
-    if (!open || (view.state === "unavailable" && (!screenRetrying || view.unavailableReason === "capacity"))) {
+    if (view.state === "unavailable" && (!screenRetrying || view.unavailableReason === "capacity")) {
       connectionRef.current?.close();
       connectionRef.current = undefined;
       replaceFrame(view.surfaceId, undefined);
@@ -415,7 +411,6 @@ export function ComputerPanel({
   }, [
     bot.id,
     clearBrowserHeldInput,
-    open,
     projectionAttempt,
     projectionUrl,
     screenRetrying,
@@ -441,10 +436,10 @@ export function ComputerPanel({
   useEffect(() => {
     const dialog = expandedRef.current;
     if (dialog === null) return;
-    const shouldOpen = open && !isSmallScreen && previewExpanded && videoStream !== undefined;
+    const shouldOpen = !isSmallScreen && previewExpanded && videoStream !== undefined;
     if (shouldOpen && !dialog.open) dialog.showModal();
     else if (!shouldOpen && dialog.open) dialog.close();
-  }, [isSmallScreen, open, previewExpanded, videoStream]);
+  }, [isSmallScreen, previewExpanded, videoStream]);
 
   useEffect(() => {
     const video = expandedVideoRef.current;
@@ -475,7 +470,7 @@ export function ComputerPanel({
   }, [previewExpanded, videoStream]);
 
   useEffect(() => {
-    if (!open || isSmallScreen || !previewExpanded) return;
+    if (isSmallScreen || !previewExpanded) return;
     const connection = connectionRef.current;
     requestAnimationFrame(() => expandedRef.current?.focus());
     clearBrowserHeldInput();
@@ -509,20 +504,19 @@ export function ComputerPanel({
       document.removeEventListener("visibilitychange", handleVisibility);
       connection?.suspend("teardown");
     };
-  }, [clearBrowserHeldInput, isSmallScreen, open, previewExpanded]);
+  }, [clearBrowserHeldInput, isSmallScreen, previewExpanded]);
 
   useEffect(() => {
-    if (!open) return;
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.key !== "Escape") return;
       event.preventDefault();
       event.stopImmediatePropagation();
       if (previewExpanded) setPreviewExpanded(false);
-      else closePanel();
+      else requestClose();
     };
     window.addEventListener("keydown", onKeyDown, true);
     return () => window.removeEventListener("keydown", onKeyDown, true);
-  }, [closePanel, open, previewExpanded]);
+  }, [previewExpanded, requestClose]);
 
   const sendExpandedMotion = (event: ReactPointerEvent<HTMLDialogElement>): void => {
     const video = event.currentTarget.querySelector("video");
@@ -627,7 +621,7 @@ export function ComputerPanel({
   }, [view.unavailableReason]);
 
   const content = (
-    <ComputerPanelContent
+    <ComputerSurfaceContent
       {...contentProps}
       bot={bot}
       view={view}
@@ -721,35 +715,11 @@ export function ComputerPanel({
     </dialog>
   );
 
-  if (!open) return null;
-
   return (
     <>
-      <LayoutPanel
-        width="min(560px, 100vw)"
-        padding={0}
-        hasDivider
-        isScrollable
-        label="Computer Surface"
-        role="complementary"
-        style={{ width: "min(560px, 100vw)", minWidth: 0, maxWidth: "100vw" }}
-      >
-        <HStack gap={2} padding={4} vAlign="center">
-          <StackItem size="fill">
-            <Heading level={2}>{bot.name}’s screen</Heading>
-          </StackItem>
-          <IconButton
-            label="Close Computer Surface"
-            tooltip="Close Computer Surface"
-            icon={<Icon icon="close" size="md" />}
-            variant="ghost"
-            onClick={closePanel}
-            data-testid="computer-drawer-close"
-          />
-        </HStack>
-        {content}
-      </LayoutPanel>
+      {content}
       {expandedDialog}
     </>
   );
 }
+

@@ -32,6 +32,7 @@ interface BotStateRow {
 }
 
 
+
 /** A new Bot ships with a deterministic generated avatar recipe. */
 export function defaultAvatarRecipe(botId: string): string {
   return JSON.stringify({ rendererVersion: AVATAR_RENDERER_ID, style: DEFAULT_AVATAR_STYLE_ID, seed: botId, options: {} });
@@ -197,6 +198,7 @@ export class BotsService {
     this.events.append("bot", id, "bot.updated", payload);
     return updated;
   }
+
 
   /** Pinning changes navigation placement only; it never touches a Thread. */
   pin(id: string, pinned: boolean): BotDto {

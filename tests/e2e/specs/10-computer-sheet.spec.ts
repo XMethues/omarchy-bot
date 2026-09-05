@@ -317,6 +317,100 @@ async function fulfillProjection(route: Route): Promise<boolean> {
   return true;
 }
 test.describe("contextual computer sheet", () => {
+  test("unifies Browser, Bot Settings, responsive navigation, and projection cleanup in one right region", async ({ page }) => {
+    await installProjectionPeer(page);
+    let closedProjectionCount = 0;
+    await page.route("**/api/computer/**", async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname === "/api/computer/projection" && route.request().method() === "DELETE") {
+        closedProjectionCount += 1;
+      }
+      if (await fulfillProjection(route)) return;
+      if (url.pathname === "/api/computer/snapshot") {
+        await route.fulfill({ status: 200, contentType: "image/png", body: PNG });
+        return;
+      }
+      await fulfillJson(route, {
+        botId: url.searchParams.get("botId"),
+        surfaceId: url.searchParams.get("surfaceId"),
+        state: "bot-using",
+        takeover: "unavailable",
+        activity: "Bot using screen.",
+      });
+    });
+
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto("/");
+    await createBot(page, "Capability Browser Bot");
+    await createBot(page, "Capability Other Bot");
+    await page.getByRole("button", { name: "Capability Browser Bot", exact: true }).click();
+
+    const conversation = page.getByLabel("Conversation workspace");
+    const capabilities = page.getByRole("complementary", { name: "Workspace capabilities" });
+    const settings = page.getByRole("complementary", { name: "Bot settings" });
+    const computerTrigger = page.getByRole("button", { name: "Open Computer Surface", exact: true });
+    await expect(conversation).toBeVisible();
+    await expect(capabilities).toHaveCount(0);
+    await expect(settings).toHaveCount(0);
+    const fullConversation = await conversation.boundingBox();
+    if (fullConversation === null) throw new Error("closed conversation has no rendered box");
+
+    await page.getByRole("button", { name: "Open settings for Capability Browser Bot" }).click();
+    await expect(settings).toBeVisible();
+    await expect(capabilities).toHaveCount(0);
+    await computerTrigger.click();
+    await expect(settings).toHaveCount(0);
+    await expect(capabilities).toBeVisible();
+    await expect(capabilities.getByRole("tab", { name: "Browser" })).toHaveAttribute("aria-selected", "true");
+    await expect(capabilities.getByRole("tabpanel", { name: "Browser" })).toBeVisible();
+    await expect(capabilities.getByAltText("Capability Browser Bot screen")).toBeVisible();
+    await expect(page.getByRole("complementary", { name: "Computer Surface" })).toHaveCount(0);
+
+    await page.getByRole("button", { name: "Open settings for Capability Browser Bot" }).click();
+    await expect(capabilities).toHaveCount(0);
+    await expect(settings).toBeVisible();
+    await computerTrigger.click();
+    await expect(settings).toHaveCount(0);
+    await expect(capabilities).toBeVisible();
+    await expect(capabilities.getByAltText("Capability Browser Bot screen")).toBeVisible();
+
+    const [splitConversation, capabilityBox] = await Promise.all([
+      conversation.boundingBox(),
+      capabilities.boundingBox(),
+    ]);
+    if (splitConversation === null || capabilityBox === null) {
+      throw new Error("desktop workspace regions have no rendered boxes");
+    }
+    expect(splitConversation.width).toBeLessThan(fullConversation.width);
+    expect(splitConversation.x + splitConversation.width).toBeLessThanOrEqual(capabilityBox.x + 1);
+
+    const closeCapabilities = capabilities.getByRole("button", { name: "Close capabilities" });
+    await closeCapabilities.click();
+    await expect(capabilities).toHaveCount(0);
+    await expect(conversation).toBeVisible();
+    await expect(computerTrigger).toBeFocused();
+    await expect.poll(() => conversation.evaluate((element) => element.getBoundingClientRect().width))
+      .toBeGreaterThan(splitConversation.width);
+    await expect.poll(() => closedProjectionCount).toBeGreaterThan(0);
+
+    await page.setViewportSize({ width: 390, height: 780 });
+    await computerTrigger.click();
+    await expect(capabilities).toBeVisible();
+    await expect(conversation).toHaveCount(0);
+    await closeCapabilities.click();
+    await expect(capabilities).toHaveCount(0);
+    await expect(conversation).toBeVisible();
+
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await computerTrigger.click();
+    await expect(capabilities.getByAltText("Capability Browser Bot screen")).toBeVisible();
+    const closedBeforeSwitch = closedProjectionCount;
+    await page.getByRole("button", { name: "Capability Other Bot", exact: true }).click();
+    await expect.poll(() => closedProjectionCount).toBeGreaterThan(closedBeforeSwitch);
+    await expect(capabilities.getByAltText("Capability Browser Bot screen")).toHaveCount(0);
+    await expect(capabilities.getByAltText("Capability Other Bot screen")).toBeVisible();
+  });
+
   test("offers tool-scoped Takeover while close and reconnect leave the same tool pending", async ({ page }) => {
     await installProjectionPeer(page);
     let state: ComputerState = "ready";
@@ -371,7 +465,11 @@ test.describe("contextual computer sheet", () => {
     await expect(trigger).toHaveAttribute("aria-expanded", "false");
     await expect(trigger.locator("svg.lucide-monitor")).toBeVisible();
     await trigger.click();
-    const drawer = page.getByRole("complementary", { name: "Computer Surface", exact: true });
+    const drawer = page.getByRole("complementary", { name: "Workspace capabilities", exact: true });
+    await expect(page.getByRole("complementary", { name: "Workspace capabilities", exact: true })).toHaveCount(1);
+    await expect(
+      drawer.getByRole("heading", { name: "Computer Bot’s screen", exact: true }),
+    ).toHaveCount(1);
     const closeTrigger = page.getByTestId("header-computer");
     await expect(closeTrigger).toHaveAttribute("aria-expanded", "true");
     await expect(drawer).toBeVisible();
@@ -464,7 +562,7 @@ test.describe("contextual computer sheet", () => {
 
     await page.getByRole("button", { name: "First Screen Bot", exact: true }).click();
     await page.getByRole("button", { name: "Open Computer Surface", exact: true }).click();
-    const computer = page.getByRole("complementary", { name: "Computer Surface", exact: true });
+    const computer = page.getByRole("complementary", { name: "Workspace capabilities", exact: true });
     await expect(computer.getByAltText("First Screen Bot screen")).toBeVisible();
     await computer.getByRole("button", { name: "Open Web Control" }).click();
     await expect(page.getByTestId("computer-expanded-video")).toBeVisible();
@@ -619,7 +717,7 @@ test.describe("contextual computer sheet", () => {
     await page.goto("/");
     await createBot(page, "Authority Boundary Bot");
     await page.getByRole("button", { name: "Open Computer Surface", exact: true }).click();
-    const sheet = page.getByRole("complementary", { name: "Computer Surface", exact: true });
+    const sheet = page.getByRole("complementary", { name: "Workspace capabilities", exact: true });
     await sheet.getByRole("button", { name: "Open Web Control" }).click();
     const expanded = page.getByTestId("computer-expanded-video");
     await expect(expanded).toBeVisible();
@@ -850,7 +948,7 @@ test.describe("contextual computer sheet", () => {
     await createBot(page, "Mobile Computer Bot");
     await page.setViewportSize({ width: 390, height: 780 });
     await page.getByRole("button", { name: "Open Computer Surface", exact: true }).click();
-    const mobilePanel = page.getByRole("complementary", { name: "Computer Surface", exact: true });
+    const mobilePanel = page.getByRole("complementary", { name: "Workspace capabilities", exact: true });
     await expect(mobilePanel).toBeVisible();
     await expect(page.getByRole("dialog", { name: "Computer Surface" })).toHaveCount(0);
     await expect.poll(() => mobilePanel.evaluate((element) => element.getBoundingClientRect().right)).toBe(390);
@@ -874,7 +972,7 @@ test.describe("contextual computer sheet", () => {
     takeover = "active";
     await page.reload();
     await page.getByRole("button", { name: "Open Computer Surface", exact: true }).click();
-    const activeMobilePanel = page.getByRole("complementary", { name: "Computer Surface", exact: true });
+    const activeMobilePanel = page.getByRole("complementary", { name: "Workspace capabilities", exact: true });
     await expect(activeMobilePanel.getByAltText("Mobile Computer Bot screen")).toBeVisible();
     await expect(activeMobilePanel.getByRole("button", { name: "Take control" })).toHaveCount(0);
     await expect(activeMobilePanel.getByRole("button", { name: "Continue takeover" })).toHaveCount(0);
@@ -902,7 +1000,7 @@ test.describe("contextual computer sheet", () => {
     await page.goto("/");
     await createBot(page, "No Frame Bot");
     await page.getByRole("button", { name: "Open Computer Surface", exact: true }).click();
-    const panel = page.getByRole("complementary", { name: "Computer Surface", exact: true });
+    const panel = page.getByRole("complementary", { name: "Workspace capabilities", exact: true });
     await expect(panel.getByAltText("No Frame Bot screen")).toBeVisible({ timeout: 7_000 });
     await expect(panel).toContainText("Read-only snapshot");
     await expect(panel).toContainText("No image arrived from the Bot Screen.");
@@ -942,7 +1040,7 @@ test.describe("contextual computer sheet", () => {
     await page.goto("/");
     await createBot(page, "Unsupported Codec Bot");
     await page.getByRole("button", { name: "Open Computer Surface", exact: true }).click();
-    const panel = page.getByRole("complementary", { name: "Computer Surface", exact: true });
+    const panel = page.getByRole("complementary", { name: "Workspace capabilities", exact: true });
     await expect(panel.getByAltText("Unsupported Codec Bot screen")).toBeVisible();
     await expect(panel).toContainText("Read-only snapshot");
     await expect(panel).toContainText("H.264 Baseline");
@@ -971,7 +1069,7 @@ test.describe("contextual computer sheet", () => {
     await page.goto("/");
     await createBot(page, "Decode Failure Bot");
     await page.getByRole("button", { name: "Open Computer Surface", exact: true }).click();
-    const panel = page.getByRole("complementary", { name: "Computer Surface", exact: true });
+    const panel = page.getByRole("complementary", { name: "Workspace capabilities", exact: true });
     await panel.getByRole("button", { name: "Open Web Control" }).click();
     await expect(page.getByTestId("expanded-web-control")).toBeVisible();
     await page.evaluate(() => {
@@ -1008,7 +1106,7 @@ test.describe("contextual computer sheet", () => {
     await page.goto("/");
     await createBot(page, "Reconnect Media Bot");
     await page.getByRole("button", { name: "Open Computer Surface", exact: true }).click();
-    const panel = page.getByRole("complementary", { name: "Computer Surface", exact: true });
+    const panel = page.getByRole("complementary", { name: "Workspace capabilities", exact: true });
     await panel.getByRole("button", { name: "Open Web Control" }).click();
     await expect(page.getByTestId("expanded-web-control")).toContainText("Click, scroll, or type to control");
     await page.evaluate(() => {
@@ -1058,7 +1156,7 @@ test.describe("contextual computer sheet", () => {
     await page.goto("/");
     await createBot(page, "Retry Screen Bot");
     await page.getByRole("button", { name: "Open Computer Surface", exact: true }).click();
-    const panel = page.getByRole("complementary", { name: "Computer Surface", exact: true });
+    const panel = page.getByRole("complementary", { name: "Workspace capabilities", exact: true });
     const retry = panel.getByRole("button", { name: "Retry", exact: true });
     await expect(panel.getByRole("heading", { name: "Screen unavailable", exact: true })).toBeVisible();
 
@@ -1101,7 +1199,7 @@ test.describe("contextual computer sheet", () => {
     const trigger = page.getByRole("button", { name: "Open Computer Surface", exact: true });
     await expect(trigger).toHaveAttribute("data-state", "unavailable");
     await trigger.click();
-    const panel = page.getByRole("complementary", { name: "Computer Surface", exact: true });
+    const panel = page.getByRole("complementary", { name: "Workspace capabilities", exact: true });
     await expect(panel).toContainText("Bot Screen capacity is full (4/4).");
     await expect(panel).not.toContainText("Bot Screen status could not be loaded.");
     await expect(panel.getByRole("button", { name: "Retry", exact: true })).toHaveCount(0);

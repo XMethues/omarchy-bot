@@ -23,7 +23,7 @@ import { CreateBotDialog } from "../components/CreateBotDialog.tsx";
 import { HistoryDialog } from "../components/HistoryDialog.tsx";
 import { BotSettingsPanel } from "../components/BotSettingsPanel.tsx";
 import { SettingsDialog } from "../components/SettingsDialog.tsx";
-import { ComputerPanel } from "../components/ComputerPanel.tsx";
+import { CapabilityPanel, type WorkspaceCapability } from "../components/CapabilityPanel.tsx";
 import { useVoiceAutoSendSetting } from "../components/VoiceSettingsControl.tsx";
 import { TranscriptAttention } from "../components/TranscriptAttention.tsx";
 
@@ -47,6 +47,11 @@ const QUERY_KEYS: Tags = {
   computer: ["computer"],
 };
 
+type RightRegionState =
+  | { mode: "closed" }
+  | { mode: "bot-settings" }
+  | { mode: "capabilities"; activeCapability: WorkspaceCapability };
+
 interface ConversationWorkspaceProps {
   children: ReactNode;
   panelOpen: boolean;
@@ -68,8 +73,10 @@ function HomeScreen(): JSX.Element {
   const { bot: selectedBotId, thread: selectedThreadId } = Route.useSearch();
   const [createOpen, setCreateOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
-  const [botSettingsOpen, setBotSettingsOpen] = useState(false);
-  const [computerOpen, setComputerOpen] = useState(false);
+  const [rightRegion, setRightRegion] = useState<RightRegionState>({ mode: "closed" });
+  const botSettingsOpen = rightRegion.mode === "bot-settings";
+  const computerOpen =
+    rightRegion.mode === "capabilities" && rightRegion.activeCapability === "browser";
   const [computerError, setComputerError] = useState<string | undefined>(undefined);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [pendingDeleteBot, setPendingDeleteBot] = useState<BotViewDto | undefined>(undefined);
@@ -210,11 +217,16 @@ function HomeScreen(): JSX.Element {
   const selectBot = useCallback(
     (botId: string): void => {
       invalidate("computer");
-      // Drop the thread param: the resolution effect below opens the newly
-      // selected bot's most recent thread or a genuinely blank composer.
-      void navigate({ search: { bot: botId } });
+      setComputerError(undefined);
+      const unreadThreadId = bots.data?.find((candidate) => candidate.id === botId)?.unreadThreadId;
+      void navigate({
+        search: {
+          bot: botId,
+          ...(unreadThreadId === undefined ? {} : { thread: unreadThreadId }),
+        },
+      });
     },
-    [navigate, invalidate],
+    [bots.data, navigate, invalidate],
   );
 
   const onMessageSent = useCallback(
@@ -455,8 +467,7 @@ function HomeScreen(): JSX.Element {
 
       if (selectedBotId === target.id) {
         setHistoryOpen(false);
-        setBotSettingsOpen(false);
-        setComputerOpen(false);
+        setRightRegion({ mode: "closed" });
         const fallback = mostRecentlyActiveBot(remaining);
         await navigate({
           search: fallback === undefined ? {} : { bot: fallback.id },
@@ -484,12 +495,12 @@ function HomeScreen(): JSX.Element {
       {...(selectedBotId !== undefined ? { selectedBotId } : {})}
       onSelectBot={selectBot}
       onOpenBotSettings={(botId) => {
-        setComputerOpen(false);
+        setRightRegion({ mode: "closed" });
         if (selectedBotId === botId) {
-          setBotSettingsOpen(true);
+          setRightRegion({ mode: "bot-settings" });
           return;
         }
-        void navigate({ search: { bot: botId } }).then(() => setBotSettingsOpen(true));
+        void navigate({ search: { bot: botId } }).then(() => setRightRegion({ mode: "bot-settings" }));
       }}
       onDeleteBot={requestBotDeletion}
       onCreateBot={() => setCreateOpen(true)}
@@ -523,15 +534,18 @@ function HomeScreen(): JSX.Element {
             onOpenHistory={() => setHistoryOpen(true)}
             botSettingsOpen={botSettingsOpen}
             onToggleBotSettings={() => {
-              const nextOpen = !botSettingsOpen;
-              setBotSettingsOpen(nextOpen);
-              if (nextOpen) setComputerOpen(false);
+              setRightRegion((current) =>
+                current.mode === "bot-settings" ? { mode: "closed" } : { mode: "bot-settings" }
+              );
             }}
             computerState={computer.data?.state ?? "unavailable"}
             computerOpen={computerOpen}
             onToggleComputer={() => {
-              setBotSettingsOpen(false);
-              setComputerOpen((open) => !open);
+              if (computerOpen) {
+                setRightRegion({ mode: "closed" });
+                return;
+              }
+              setRightRegion({ mode: "capabilities", activeCapability: "browser" });
             }}
             mobileNavigationTriggerRef={mobileNavigationTriggerRef}
             computerTriggerRef={computerTriggerRef}
@@ -539,19 +553,19 @@ function HomeScreen(): JSX.Element {
           />
         }
         content={
-          <ConversationWorkspace panelOpen={botSettingsOpen || computerOpen}>
+          <ConversationWorkspace panelOpen={rightRegion.mode !== "closed"}>
             {workspaceContent}
           </ConversationWorkspace>
         }
         end={
           bot !== undefined ? (
-            botSettingsOpen ? (
+            rightRegion.mode === "bot-settings" ? (
               <BotSettingsPanel
                 bot={bot}
                 agentDisplayName={selectedAgent?.displayName ?? bot.agentId}
                 open
                 returnFocusRef={botSettingsTriggerRef}
-                onClose={() => setBotSettingsOpen(false)}
+                onClose={() => setRightRegion({ mode: "closed" })}
                 onUpdated={(updated) => {
                   qc.setQueryData<BotViewDto[]>(["bots"], (currentBots) =>
                     currentBots?.map((candidate) =>
@@ -560,10 +574,11 @@ function HomeScreen(): JSX.Element {
                   );
                 }}
               />
-            ) : (
-              <ComputerPanel
-                key={bot.surfaceId}
+            ) : rightRegion.mode === "capabilities" ? (
+              <CapabilityPanel
+                key={`${bot.id}:${bot.surfaceId}`}
                 bot={bot}
+                {...(thread !== undefined ? { threadId: thread.id } : {})}
                 view={
                   computer.data
                     ?? {
@@ -578,17 +593,20 @@ function HomeScreen(): JSX.Element {
                     }
                 }
                 projectionUrl={api.computerProjectionUrl({ botId: bot.id, surfaceId: bot.surfaceId })}
-                open={computerOpen}
+                activeCapability={rightRegion.activeCapability}
+                onCapabilityChange={(activeCapability) =>
+                  setRightRegion({ mode: "capabilities", activeCapability })
+                }
                 returnFocusRef={computerTriggerRef}
                 busy={computerAction.isPending}
                 {...(computer.isPending ? { loading: true } : {})}
                 {...(computer.error !== null ? { onRetry: () => void computer.refetch() } : {})}
                 {...(computerError !== undefined ? { error: computerError } : {})}
-                onClose={() => setComputerOpen(false)}
+                onClose={() => setRightRegion({ mode: "closed" })}
                 onTakeControl={() => computerAction.mutateAsync("take").then(() => true, () => false)}
                 onReturnToBot={() => computerAction.mutateAsync("return").then(() => true, () => false)}
               />
-            )
+            ) : null
           ) : undefined
         }
       />

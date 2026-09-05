@@ -6,6 +6,7 @@ import { AgentsRegistry } from "../modules/agents/registry.ts";
 import { BotsService } from "../modules/bots/bots.ts";
 import { BotDeletionService } from "../modules/bots/botDeletion.ts";
 import { TurnService } from "../modules/turns/turns.ts";
+import { MailboxService } from "../modules/mailbox/mailbox.ts";
 import { ComputerBroker } from "../modules/computer/broker.ts";
 import { BotScreenManager, type BotScreenRuntimeAdapter } from "../modules/computer/botScreenManager.ts";
 import { CageBotScreenRuntimeAdapter } from "../modules/computer/cageBotScreenRuntime.ts";
@@ -15,6 +16,7 @@ import { InputDiagnostics } from "../modules/computer/inputDiagnostics.ts";
 import { AvatarService } from "../modules/avatars/avatarService.ts";
 import { DictationService } from "../modules/dictation/dictationService.ts";
 import { AttachmentsService } from "../modules/attachments/attachments.ts";
+import { WorkingTreeService, type WorkingTreeOptions } from "../modules/changes/workingTree.ts";
 import { Supervisor } from "../supervision/supervisor.ts";
 import { startHttp, type DaemonServices } from "../api/http.ts";
 import { writeFileSync, renameSync } from "node:fs";
@@ -33,6 +35,8 @@ export interface MainOptions {
   useHostApplicationUnits?: boolean;
   /** Test-only private runtime root; production uses the configured XDG runtime. */
   botScreenRuntimeDir?: string;
+  /** Integration-only process bounds/binary override; production uses safe defaults. */
+  workingTree?: WorkingTreeOptions;
 }
 
 export async function main(options: MainOptions = {}): Promise<{
@@ -50,6 +54,7 @@ export async function main(options: MainOptions = {}): Promise<{
   const applicationUnitRuntimeDir = options.useHostApplicationUnits === false ? undefined : runtimeDir;
   const workersDir = process.env.OMARCHY_BOT_WORKERS_DIR ?? path.resolve(import.meta.dir, "../../../../workers");
   const agentsDir = path.resolve(workersDir);
+  let mailbox!: MailboxService;
   const supervisor: Supervisor = new Supervisor(
     {
       onAgentEvent: (agentId, event) => {
@@ -62,6 +67,8 @@ export async function main(options: MainOptions = {}): Promise<{
       },
       onAgentComputerRequest: (agentId, request, signal) =>
         turns.onAgentComputerRequest(agentId, request, computer, signal),
+      onAgentBotMessageRequest: (agentId, request) =>
+        turns.onAgentBotMessageRequest(agentId, request, mailbox),
     },
     {
       agents: agentsDir,
@@ -112,8 +119,10 @@ export async function main(options: MainOptions = {}): Promise<{
   const bots = new BotsService(db, events, agents, threads);
   const attachments = new AttachmentsService(db, cfg.attachmentsDir, agents);
   attachments.gcStaged();
+  const workingTrees = new WorkingTreeService(db, options.workingTree);
   const avatars = new AvatarService(bots, supervisor, cfg.avatarsDir);
   const turns: TurnService = new TurnService(db, events, threads, agents, bots, attachments, supervisor, cfg);
+  mailbox = new MailboxService(db, events, threads, agents, turns);
   const computer = new ComputerBroker(
     db,
     events,
@@ -147,6 +156,7 @@ export async function main(options: MainOptions = {}): Promise<{
   await screens.recover();
 
   agents.init();
+  mailbox.reconcileStartup();
 
   // Recheck every agent in the background: probe + conformance gate.
   for (const a of agents.list()) {
@@ -165,6 +175,7 @@ export async function main(options: MainOptions = {}): Promise<{
     avatars,
     attachments,
     dictation,
+    workingTrees,
     computer,
     screens,
     projections,

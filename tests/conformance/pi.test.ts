@@ -57,7 +57,7 @@ afterAll(async () => {
 async function send(sessionId: string, text: string, attachments?: { id: string; name: string; path: string; mediaType: string }[]): Promise<number> {
   const before = events.length;
   const turnId = crypto.randomUUID();
-  await pi.request({
+  const acceptance = await pi.request({
     type: "message.send",
     requestId: crypto.randomUUID(),
     sessionId,
@@ -70,6 +70,7 @@ async function send(sessionId: string, text: string, attachments?: { id: string;
       surfaceId: conformanceBot.surfaceId,
     },
   }, 15_000);
+  expect(acceptance).toEqual({ accepted: true });
   return before;
 }
 
@@ -139,6 +140,30 @@ describe("pi conformance (10 steps, real model)", () => {
       };
       expect(opened.sessionId).toBeTruthy();
       expect(opened.nativeSessionId).toBeTruthy();
+
+      // Ordinary sends require only their existing Computer binding. If a
+      // Bot-message binding is supplied, however, it must remain immutable.
+      const forgedBindingTurnId = crypto.randomUUID();
+      await expect(pi.request({
+        type: "message.send",
+        requestId: crypto.randomUUID(),
+        sessionId: opened.sessionId,
+        turnId: forgedBindingTurnId,
+        message: { text: "This forged Bot-message binding must not start a Turn." },
+        computer: {
+          botId: conformanceBot.id,
+          turnId: forgedBindingTurnId,
+          workerSessionId: opened.sessionId,
+          surfaceId: conformanceBot.surfaceId,
+        },
+        botMessage: {
+          botId: conformanceBot.id,
+          turnId: crypto.randomUUID(),
+          workerSessionId: opened.sessionId,
+        },
+      }, 15_000)).rejects.toThrow(
+        "Bot message binding is required and must match the Agent command",
+      );
       console.log("conformance: step 1 ok — session", opened.nativeSessionId);
 
       // ---- Step 2: streamed fixed text ----
@@ -317,9 +342,10 @@ describe("pi conformance (10 steps, real model)", () => {
       }
       const capabilities = probePayload.capabilities;
       expect(capabilities).toMatchObject({
-        version: 2,
+        version: 3,
         steering: true,
         abort: true,
+        botMail: true,
         nativeThreadActions: ["resume", "history", "close"],
         attachments: { text: true, maxTextBytes: 64 * 1024 },
         nativeEventFamilies: [],
@@ -328,6 +354,7 @@ describe("pi conformance (10 steps, real model)", () => {
       expect(Object.keys(capabilities ?? {}).sort()).toEqual([
         "abort",
         "attachments",
+        "botMail",
         "nativeEventFamilies",
         "nativeThreadActions",
         "steering",

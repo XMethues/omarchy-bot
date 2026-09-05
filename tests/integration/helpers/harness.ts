@@ -9,6 +9,7 @@ import type { DaemonServices } from "../../../apps/daemon/src/api/http.ts";
 import { FakeBotScreenRuntimeAdapter } from "../../../apps/daemon/src/modules/computer/fakeBotScreenRuntime.ts";
 import type { BotScreenRuntimeAdapter } from "../../../apps/daemon/src/modules/computer/botScreenManager.ts";
 import type { MessageDto } from "../../../packages/protocol/src/index.ts";
+import type { WorkingTreeOptions } from "../../../apps/daemon/src/modules/changes/workingTree.ts";
 
 export interface Harness {
   baseUrl: string;
@@ -25,6 +26,8 @@ export interface HarnessOptions {
   useProductionBotScreen?: boolean;
   botScreenAdapter?: BotScreenRuntimeAdapter;
   botScreenCapacity?: number;
+  waitForAgentReady?: boolean;
+  workingTree?: WorkingTreeOptions;
 }
 
 export async function startDaemon(existingHome?: string, options: HarnessOptions = {}): Promise<Harness> {
@@ -59,12 +62,14 @@ export async function startDaemon(existingHome?: string, options: HarnessOptions
         useHostApplicationUnits: false,
         botScreenRuntimeDir: path.join(home, "r"),
         ...(options.botScreenCapacity === undefined ? {} : { botScreenCapacity: options.botScreenCapacity }),
+        ...(options.workingTree === undefined ? {} : { workingTree: options.workingTree }),
       })
     : await main({
         useHostApplicationUnits: false,
         botScreenRuntimeDir: path.join(home, "r"),
         botScreenAdapter: options.botScreenAdapter ?? new FakeBotScreenRuntimeAdapter(options.botScreenFailure),
         botScreenCapacity: options.botScreenCapacity ?? 8,
+        ...(options.workingTree === undefined ? {} : { workingTree: options.workingTree }),
       });
   const { stop, disconnectForRestart, port, svc } = daemon;
   const base: Harness = {
@@ -75,14 +80,16 @@ export async function startDaemon(existingHome?: string, options: HarnessOptions
     stop,
     disconnectForRestart,
   };
-  // Wait until the fake pi agent finishes its probe and reports ready.
-  const deadline = Date.now() + 20_000;
-  for (;;) {
-    const agents = (await fetch(`${base.baseUrl}/api/agents`).then((r) => r.json())) as { id: string; status: string }[];
-    const pi = agents.find((a) => a.id === "pi");
-    if (pi?.status === "ready") break;
-    if (Date.now() > deadline) throw new Error(`pi agent never became ready (status: ${pi?.status ?? "none"})`);
-    await Bun.sleep(150);
+  if (options.waitForAgentReady !== false) {
+    // Wait until the fake pi agent finishes its probe and reports ready.
+    const deadline = Date.now() + 20_000;
+    for (;;) {
+      const agents = (await fetch(`${base.baseUrl}/api/agents`).then((r) => r.json())) as { id: string; status: string }[];
+      const pi = agents.find((a) => a.id === "pi");
+      if (pi?.status === "ready") break;
+      if (Date.now() > deadline) throw new Error(`pi agent never became ready (status: ${pi?.status ?? "none"})`);
+      await Bun.sleep(150);
+    }
   }
   return base;
 }

@@ -2,6 +2,9 @@ import { randomUUID } from "node:crypto";
 import {
   HEARTBEAT_MS,
   readJsonl,
+  type AgentBotMessageToolOutput,
+  isAgentBotMessageToolRequest,
+  type AgentBotMessageToolRequest,
   type AgentComputerToolOutput,
   type AgentComputerToolRequest,
 } from "@omarchy-bot/agent-contract";
@@ -21,6 +24,10 @@ export interface WorkerClientOptions {
     request: AgentComputerToolRequest,
     signal: AbortSignal,
   ) => Promise<AgentComputerToolOutput>;
+  onBotMessageRequest?: (
+    request: AgentBotMessageToolRequest,
+    signal: AbortSignal,
+  ) => Promise<AgentBotMessageToolOutput>;
 }
 
 interface Pending {
@@ -133,7 +140,26 @@ export class WorkerClient {
       void this.#handleComputerRequest(msg as AgentComputerToolRequest);
       return;
     }
+    if (msg?.type === "bot-message.request") {
+      if (!isAgentBotMessageToolRequest(msg)) {
+        if (typeof msg.requestId === "string" && this.alive) {
+          this.write({
+            type: "bot-message.result",
+            requestId: msg.requestId,
+            ok: false,
+            error: "invalid Bot message tool request",
+          });
+        }
+        return;
+      }
+      void this.#handleBotMessageRequest(msg);
+      return;
+    }
     if (msg?.type === "computer.cancel" && typeof msg.requestId === "string") {
+      this.#incoming.get(msg.requestId)?.abort("tool call cancelled");
+      return;
+    }
+    if (msg?.type === "bot-message.cancel" && typeof msg.requestId === "string") {
       this.#incoming.get(msg.requestId)?.abort("tool call cancelled");
       return;
     }
@@ -166,6 +192,30 @@ export class WorkerClient {
       if (this.alive) {
         const message = error instanceof Error ? error.message : String(error);
         this.write({ type: "computer.result", requestId: request.requestId, ok: false, error: message });
+      }
+    } finally {
+      if (this.#incoming.get(request.requestId) === controller) {
+        this.#incoming.delete(request.requestId);
+      }
+    }
+  }
+
+  async #handleBotMessageRequest(request: AgentBotMessageToolRequest): Promise<void> {
+    const controller = new AbortController();
+    this.#incoming.set(request.requestId, controller);
+    try {
+      if (this.opts.onBotMessageRequest === undefined) {
+        throw new Error(`${this.opts.name} cannot route Bot messages`);
+      }
+      const payload = await this.opts.onBotMessageRequest(request, controller.signal);
+      if (controller.signal.aborted) throw new Error("Bot message tool call cancelled");
+      if (this.alive) {
+        this.write({ type: "bot-message.result", requestId: request.requestId, ok: true, payload });
+      }
+    } catch (error) {
+      if (this.alive) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.write({ type: "bot-message.result", requestId: request.requestId, ok: false, error: message });
       }
     } finally {
       if (this.#incoming.get(request.requestId) === controller) {

@@ -3,6 +3,8 @@ import type { Database } from "bun:sqlite";
 import {
   isAgentToolCallEvent,
   toolCallSummaryFromEvent,
+  type AgentBotMessageToolOutput,
+  type AgentBotMessageToolRequest,
   type AgentComputerToolOutput,
   type AgentComputerToolRequest,
   type AgentEvent,
@@ -19,6 +21,7 @@ import type { AttachmentsService } from "../attachments/attachments.ts";
 import type { Supervisor } from "../../supervision/supervisor.ts";
 import { HttpError } from "../bots/bots.ts";
 import type { ComputerBroker } from "../computer/broker.ts";
+import type { MailboxService } from "../mailbox/mailbox.ts";
 
 interface TurnContext {
   turnId: string;
@@ -28,6 +31,7 @@ interface TurnContext {
   workerSessionId: string;
   computerToolSurfaces: Map<string, SurfaceId>;
   startedComputerToolCalls: Set<string>;
+  startedBotMessageToolCalls: Set<string>;
   turnTimeout: ReturnType<typeof setTimeout>;
   /** Present only when cancellation came from the explicit abort path. */
   abortReason?: string;
@@ -212,6 +216,58 @@ export class TurnService {
     return { threadId: result.threadId, messageId: result.messageId, turnId, action: "sent" };
   }
 
+  /**
+   * Start a daemon-authored peer-mail Turn that was already persisted by the
+   * mailbox claim transaction. It always opens a fresh Native Session and
+   * resolves only when the worker accepts message.send, not when the Turn ends.
+   */
+  async startPeerMailTurn(input: {
+    turnId: string;
+    threadId: string;
+    botId: string;
+    agentId: AgentId;
+    envelope: string;
+    acceptanceFailureReason: string;
+  }): Promise<void> {
+    this.events.append("turn", input.turnId, "turn.created", {
+      turnId: input.turnId,
+      threadId: input.threadId,
+      botId: input.botId,
+    });
+    this.bots.recordActivityStatus(input.botId, input.threadId, input.turnId);
+    const start = this.#startTurn(
+      input.turnId,
+      input.threadId,
+      input.botId,
+      input.agentId,
+      input.envelope,
+      [],
+      {
+        freshSession: true,
+        awaitAcceptance: true,
+        acceptanceFailureReason: input.acceptanceFailureReason,
+      },
+    );
+    this.#turnStarts.set(input.turnId, start);
+    try {
+      await start;
+    } catch (err) {
+      console.error(
+        `peer-mail Turn ${input.turnId} failed before worker acceptance`,
+        err,
+      );
+      const row = this.threads.turnRow(input.turnId);
+      if (row !== undefined && !isTerminalTurn(row.status as TurnStatus)) {
+        this.#setTurnStatus(input.turnId, "failed", input.acceptanceFailureReason);
+      }
+      throw err;
+    } finally {
+      if (this.#turnStarts.get(input.turnId) === start) {
+        this.#turnStarts.delete(input.turnId);
+      }
+    }
+  }
+
   async #startTurn(
     turnId: string,
     threadId: string,
@@ -219,11 +275,18 @@ export class TurnService {
     agentId: AgentId,
     text: string,
     attachments: NonNullable<WorkerUserMessage["attachments"]>,
+    startOptions: {
+      freshSession?: boolean;
+      awaitAcceptance?: boolean;
+      acceptanceFailureReason?: string;
+    } = {},
   ): Promise<TurnContext> {
     const botRow = this.db.query(`SELECT instructions FROM bots WHERE id = ?`).get(botId) as { instructions: string } | undefined;
     const thread = this.threads.getThread(threadId)!;
     const worker = await this.supervisor.agentWorker(agentId);
-    const nativeSessionId = this.threads.getNativeSession(threadId);
+    const nativeSessionId = startOptions.freshSession
+      ? undefined
+      : this.threads.getNativeSession(threadId);
     const options = { cwd: thread.cwd ?? process.cwd(), instructions: botRow?.instructions ?? "" };
     if (
       nativeSessionId !== undefined
@@ -231,9 +294,9 @@ export class TurnService {
     ) {
       throw new HttpError(409, `session resume is not supported by ${agentId}`);
     }
-    const opened = nativeSessionId
-      ? await worker.request({ type: "session.resume", botId, threadId, nativeSessionId, options }, 30_000)
-      : await worker.request({ type: "session.open", botId, threadId, options }, 30_000);
+    const opened = nativeSessionId === undefined
+      ? await worker.request({ type: "session.open", botId, threadId, options }, 30_000)
+      : await worker.request({ type: "session.resume", botId, threadId, nativeSessionId, options }, 30_000);
 
     this.threads.setNativeSession(threadId, opened.nativeSessionId);
     const surface = this.db
@@ -256,19 +319,20 @@ export class TurnService {
       workerSessionId: opened.sessionId,
       computerToolSurfaces: new Map(),
       startedComputerToolCalls: new Set(),
+      startedBotMessageToolCalls: new Set(),
       turnTimeout,
     };
     this.#turns.set(opened.sessionId, ctx);
     this.#setTurnStatus(turnId, "working");
 
-    // Dispatch without awaiting turn completion. A worker acknowledges send
-    // independently, while this resolved start promise makes immediate steering
-    // wait only for the worker session to become drivable.
+    // Worker acceptance is separate from terminal Turn output. Conversational
+    // starts remain steerable as soon as the session opens; peer mail awaits
+    // only message.send acceptance so its durable delivery boundary is exact.
     const message: WorkerUserMessage = {
       text,
       ...(attachments.length > 0 ? { attachments } : {}),
     };
-    void worker.request({
+    const acceptance = worker.request({
       type: "message.send",
       sessionId: opened.sessionId,
       turnId,
@@ -279,7 +343,13 @@ export class TurnService {
         workerSessionId: opened.sessionId,
         surfaceId: surface.surface_id,
       },
-    }, 60_000).catch((err: unknown) => {
+      botMessage: {
+        botId,
+        turnId,
+        workerSessionId: opened.sessionId,
+      },
+    }, 60_000);
+    const failSend = (err: unknown): void => {
       if (this.#turns.get(opened.sessionId) !== ctx) return;
       this.#routeTurnEvent(ctx, {
         type: "error",
@@ -287,7 +357,21 @@ export class TurnService {
         message: errorMessage(err),
         retryable: false,
       });
-    });
+    };
+    if (startOptions.awaitAcceptance) {
+      try {
+        await acceptance;
+      } catch (err) {
+        this.#finishTurn(
+          ctx,
+          "failed",
+          startOptions.acceptanceFailureReason ?? errorMessage(err),
+        );
+        throw err;
+      }
+    } else {
+      void acceptance.catch(failSend);
+    }
     return ctx;
   }
 
@@ -378,6 +462,44 @@ export class TurnService {
     }
     active.computerToolSurfaces.set(context.toolCallId, owner.surfaceId);
     return computer.agentToolAct(owner, context.turnId, context.toolCallId, request.action, signal);
+  }
+
+  /** Authenticate a reverse Bot-message request against one active native Tool Call. */
+  async onAgentBotMessageRequest(
+    agentId: AgentId,
+    request: AgentBotMessageToolRequest,
+    mailbox: MailboxService,
+  ): Promise<AgentBotMessageToolOutput> {
+    const requested = request.context;
+    const active = this.#turns.get(requested.workerSessionId);
+    if (
+      active === undefined
+      || active.agentId !== agentId
+      || active.botId !== requested.botId
+      || active.turnId !== requested.turnId
+      || active.workerSessionId !== requested.workerSessionId
+    ) {
+      throw new Error("Bot message tool context is stale or mismatched");
+    }
+    if (!this.agents.capabilityInventory(agentId)?.botMail) {
+      throw new Error(`Bot mail is not supported by ${agentId}`);
+    }
+    if (requested.toolCallId.length === 0) {
+      throw new Error("Bot message tool context has no tool-call identity");
+    }
+    if (!active.startedBotMessageToolCalls.has(requested.toolCallId)) {
+      throw new Error("Bot message tool context has no active native tool call");
+    }
+    return mailbox.enqueue(
+      {
+        botId: active.botId,
+        turnId: active.turnId,
+        workerSessionId: active.workerSessionId,
+        toolCallId: requested.toolCallId,
+      },
+      request.targetBotId,
+      request.text,
+    );
   }
 
   /** Central agent-event router: worker events become ordered transcript records and Turn transitions. */
@@ -554,6 +676,9 @@ export class TurnService {
         if (event.name === "computer") {
           ctx.startedComputerToolCalls.add(event.id);
         }
+        if (event.name === "send_bot_message") {
+          ctx.startedBotMessageToolCalls.add(event.id);
+        }
         break;
       }
       case "tool.updated":
@@ -568,7 +693,10 @@ export class TurnService {
             toolCall: updated.toolCall,
           });
         }
-        if (event.type === "tool.completed") ctx.startedComputerToolCalls.delete(event.id);
+        if (event.type === "tool.completed") {
+          ctx.startedComputerToolCalls.delete(event.id);
+          ctx.startedBotMessageToolCalls.delete(event.id);
+        }
         break;
       }
       case "turn.completed": {

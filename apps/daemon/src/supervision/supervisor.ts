@@ -1,5 +1,7 @@
 import path from "node:path";
 import type {
+  AgentBotMessageToolOutput,
+  AgentBotMessageToolRequest,
   AgentComputerToolOutput,
   AgentComputerToolRequest,
   AgentEvent,
@@ -17,6 +19,11 @@ export interface SupervisorHooks {
     request: AgentComputerToolRequest,
     signal: AbortSignal,
   ) => Promise<AgentComputerToolOutput>;
+  onAgentBotMessageRequest: (
+    agentId: AgentId,
+    request: AgentBotMessageToolRequest,
+    signal: AbortSignal,
+  ) => Promise<AgentBotMessageToolOutput>;
 }
 
 type ComputerActCommand = Extract<ComputerCommand, { type: "act" }>;
@@ -77,6 +84,8 @@ export class Supervisor {
       onEvent: (e) => this.hooks.onAgentEvent(agentId, e),
       onRequest: (request, signal) =>
         this.hooks.onAgentComputerRequest(agentId, request, signal),
+      onBotMessageRequest: (request, signal) =>
+        this.hooks.onAgentBotMessageRequest(agentId, request, signal),
       onExit: (code) => {
         this.hooks.onWorkerCrash(
           agentId,

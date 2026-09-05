@@ -17,6 +17,14 @@ const DISPLAY_NAMES: Record<AgentId, string> = {
 
 interface AgentRow { id: string; display_name: string; agent_version: string; status: string; reason: string | null; updated_at: string }
 
+export interface AgentStatusTransition {
+  agentId: AgentId;
+  from: AgentStatus;
+  to: AgentStatus;
+}
+
+export type AgentStatusTransitionListener = (transition: AgentStatusTransition) => void;
+
 /**
  * AgentRegistry: installation/version/readiness per supported Agent backend.
  * `ready` requires a conformance record for the running agent version — never
@@ -32,6 +40,7 @@ export class AgentsRegistry {
 
   readonly #capabilityInventories = new Map<AgentId, AgentCapabilityInventory>();
   readonly #recheckGenerations = new Map<AgentId, number>();
+  readonly #listeners = new Set<AgentStatusTransitionListener>();
 
   init(): void {
     const now = new Date().toISOString();
@@ -57,6 +66,11 @@ export class AgentsRegistry {
     }
   }
 
+  subscribe(listener: AgentStatusTransitionListener): () => void {
+    this.#listeners.add(listener);
+    return () => this.#listeners.delete(listener);
+  }
+
   #adapterPresent(id: AgentId): boolean {
     return existsSync(path.join(this.cfg.workersAgentsDir, id, "src", "worker.ts"));
   }
@@ -66,11 +80,16 @@ export class AgentsRegistry {
   }
 
   #setStatus(id: AgentId, status: AgentStatus, reason?: string, agentVersion?: string): void {
+    const previous = this.status(id);
     if (status !== "ready") this.#capabilityInventories.delete(id);
     this.db
       .query(`UPDATE agents SET status = ?, reason = ?, agent_version = COALESCE(?, agent_version), updated_at = ? WHERE id = ?`)
       .run(status, reason ?? null, agentVersion ?? null, new Date().toISOString(), id);
     this.events.append("agent", id, "agent.status", { agentId: id, status, ...(reason !== undefined ? { reason } : {}) });
+    if (previous !== status) {
+      const transition = { agentId: id, from: previous, to: status };
+      for (const listener of this.#listeners) listener(transition);
+    }
   }
 
   toDto(row: AgentRow): AgentDto {

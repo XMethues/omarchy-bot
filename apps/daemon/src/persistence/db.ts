@@ -871,6 +871,31 @@ WHERE author_kind = 'bot'
   AND kind = 'text';
 `,
   },
+  {
+    // Durable Bot mail is a queue with an explicit crash boundary, not an
+    // event-log projection. One source Tool Call owns at most one exchange.
+    name: "0018-durable-bot-mail",
+    sql: `
+CREATE TABLE bot_mail_deliveries (
+  id TEXT PRIMARY KEY,
+  source_bot_id TEXT REFERENCES bots(id) ON DELETE SET NULL,
+  source_turn_id TEXT NOT NULL,
+  source_tool_call_id TEXT NOT NULL,
+  source_name TEXT NOT NULL,
+  target_bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+  thread_id TEXT NOT NULL UNIQUE REFERENCES threads(id) ON DELETE CASCADE,
+  message_id TEXT NOT NULL UNIQUE REFERENCES messages(id) ON DELETE CASCADE,
+  state TEXT NOT NULL CHECK (state IN ('queued', 'dispatching', 'delivered', 'failed')),
+  target_turn_id TEXT REFERENCES turns(id) ON DELETE SET NULL,
+  failure_reason TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(source_turn_id, source_tool_call_id)
+);
+CREATE INDEX idx_bot_mail_deliveries_dispatch
+  ON bot_mail_deliveries(target_bot_id, state, created_at);
+`,
+  },
 ];
 export function openDb(cfg: Config): Database {
   const db = new Database(cfg.dbPath, { create: true });

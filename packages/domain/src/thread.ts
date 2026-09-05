@@ -8,6 +8,33 @@ export interface Thread {
 }
 
 /** The thread owns the Bot; messages carry no per-author Bot/Role identity. */
+
+export const PEER_MAIL_TEXT_MAX_LENGTH = 32_000;
+
+export interface PeerMailMessage {
+  deliveryId: string;
+  sourceBotId?: string;
+  sourceName: string;
+}
+
+export interface StoredPeerMailPayload extends PeerMailMessage {
+  type: "peer-mail";
+}
+
+export function isStoredPeerMailPayload(value: unknown): value is StoredPeerMailPayload {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const payload = value as Record<string, unknown>;
+  const keys = Object.keys(payload);
+  return (
+    keys.every((key) => ["type", "deliveryId", "sourceBotId", "sourceName"].includes(key))
+    && payload.type === "peer-mail"
+    && typeof payload.deliveryId === "string"
+    && /^delivery_[0-9a-f]{32}$/.test(payload.deliveryId)
+    && (payload.sourceBotId === undefined || typeof payload.sourceBotId === "string")
+    && typeof payload.sourceName === "string"
+    && payload.sourceName.length > 0
+  );
+}
 export type Author = { kind: "user" } | { kind: "bot" } | { kind: "system" };
 
 export type MessageKind = "text" | "response" | "thinking" | "tool" | "event";
@@ -120,9 +147,16 @@ interface MessageBase {
 /** Ordered transcript records. Bot output can never use the user/system text shape. */
 export type Message =
   | (MessageBase & {
-      author: { kind: "user" } | { kind: "system" };
+      author: { kind: "user" };
       kind: "text";
       text: string;
+      payload?: unknown;
+    })
+  | (MessageBase & {
+      author: { kind: "system" };
+      kind: "text";
+      text: string;
+      peerMail?: PeerMailMessage;
       payload?: unknown;
     })
   | (MessageBase & {

@@ -222,9 +222,10 @@ async function seedWorkspaceApi(page: Page, options: SeedOptions = {}): Promise<
         version: "fixture",
         status: "ready",
         capabilities: {
-          version: 2,
+          version: 3,
           steering: true,
           abort: true,
+          botMail: true,
           nativeThreadActions: ["resume", "history", "close"],
           thinking: { supported: true, streaming: true },
           attachments: { text: true, image: false, maxTextBytes: 64 * 1024 },
@@ -311,6 +312,39 @@ async function seedWorkspaceApi(page: Page, options: SeedOptions = {}): Promise<
             },
           ],
     );
+  });
+  await page.route("**/api/bots/*/changes*", async (route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname.endsWith("/detail")) {
+      await fulfillJson(route, {
+        kind: "text",
+        path: "src/release-checklist.ts",
+        status: "modified",
+        patch: "+export const releaseReady = true;\n",
+        truncated: false,
+      });
+      return;
+    }
+    await fulfillJson(route, {
+      state: "ready",
+      generatedAt: FIXED_LATE,
+      changedFileCount: 2,
+      additions: 5,
+      deletions: 1,
+      truncated: false,
+      files: [
+        {
+          path: "src/release-checklist.ts",
+          status: "modified",
+          counts: { kind: "known", additions: 4, deletions: 1 },
+        },
+        {
+          path: "notes/release plan.txt",
+          status: "untracked",
+          counts: { kind: "known", additions: 1, deletions: 0 },
+        },
+      ],
+    });
   });
   await page.route("**/api/dictation", (route) => fulfillJson(route, { state: "idle" }));
   await page.route("**/api/computer/state**", (route) => {
@@ -541,7 +575,7 @@ test.describe("ticket 13 responsive, accessible, and visual QA", () => {
     await expect(botSettingsPanel).toBeHidden();
 
     await page.getByRole("button", { name: "Open Computer Surface", exact: true }).click();
-    const computer = page.getByRole("complementary", { name: "Computer Surface", exact: true });
+    const computer = page.getByRole("complementary", { name: "Workspace capabilities", exact: true });
     await expectInsideViewport(page, computer);
     await page.keyboard.press("Escape");
     await expect(computer).toBeHidden();
@@ -560,6 +594,51 @@ test.describe("ticket 13 responsive, accessible, and visual QA", () => {
     await expectInsideViewport(page, settings);
     await page.keyboard.press("Escape");
     await expect(settings).toBeHidden();
+  });
+
+  test("keeps the final Changes rail compact, themed, focusable, and responsive beside the Composer", async ({ page }) => {
+    await page.setViewportSize(desktopViewport);
+    await page.emulateMedia({ colorScheme: "light", reducedMotion: "no-preference" });
+    await seedWorkspaceApi(page);
+    await gotoSeededWorkspace(page);
+
+    const conversation = page.getByLabel("Conversation workspace");
+    await page.getByRole("button", { name: "Open Computer Surface", exact: true }).click();
+    const capabilities = page.getByRole("complementary", { name: "Workspace capabilities", exact: true });
+    await capabilities.getByRole("tab", { name: "Changes" }).click();
+    await expect(capabilities.getByText("2 changed files", { exact: true })).toBeVisible();
+    await expectInsideViewport(page, capabilities);
+    await expect(conversation).toBeVisible();
+    await expect(page.getByTestId("composer")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Attach files" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Start voice recording" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Send", exact: true })).toBeVisible();
+    const desktopBox = await capabilities.boundingBox();
+    expect(desktopBox).not.toBeNull();
+    expect(desktopBox!.width).toBeLessThanOrEqual(560);
+    await expect(page.getByRole("complementary")).toHaveCount(1);
+
+    const refresh = capabilities.getByRole("button", { name: "Refresh changes" });
+    await refresh.focus();
+    await expect(refresh).toBeFocused();
+    const capabilityHeading = capabilities.getByRole("heading", { name: "Capabilities", exact: true });
+    const lightText = await capabilityHeading.evaluate((element) => getComputedStyle(element).color);
+    await page.emulateMedia({ colorScheme: "dark", reducedMotion: "reduce" });
+    await expect.poll(
+      () => capabilityHeading.evaluate((element) => getComputedStyle(element).color),
+    ).not.toBe(lightText);
+    await expectNoSeriousOrCriticalViolations(page, "Desktop Changes capability");
+
+    await page.setViewportSize(narrowViewport);
+    await expect(conversation).toHaveCount(0);
+    await expectInsideViewport(page, capabilities);
+    const narrowBox = await capabilities.boundingBox();
+    expect(narrowBox?.width).toBe(narrowViewport.width);
+    await expect(capabilities.getByRole("button", { name: "Close capabilities" })).toBeVisible();
+    await expectNoSeriousOrCriticalViolations(page, "Narrow dark reduced-motion Changes capability");
+    await capabilities.getByRole("button", { name: "Close capabilities" }).click();
+    await expect(conversation).toBeVisible();
+    await expect(page.getByTestId("composer")).toBeVisible();
   });
 
   test("shows contextual loading and unavailable states", async ({ page }) => {
@@ -589,7 +668,7 @@ test.describe("ticket 13 responsive, accessible, and visual QA", () => {
     await expect(page.getByRole("textbox", { name: "Message input" })).toHaveAttribute("contenteditable", "false");
 
     await page.getByRole("button", { name: "Open Computer Surface", exact: true }).click();
-    const computer = page.getByRole("complementary", { name: "Computer Surface", exact: true });
+    const computer = page.getByRole("complementary", { name: "Workspace capabilities", exact: true });
     await expect(computer.getByRole("heading", { name: "Screen unavailable", exact: true })).toBeVisible();
     await expect(computer.getByAltText("Computer Preview for Offline Researcher")).toHaveCount(0);
   });
@@ -687,9 +766,9 @@ test.describe("ticket 13 responsive, accessible, and visual QA", () => {
     const computerTrigger = page.getByRole("button", { name: "Open Computer Surface", exact: true });
     await computerTrigger.focus();
     await computerTrigger.press("Enter");
-    await expect(page.getByRole("complementary", { name: "Computer Surface", exact: true })).toBeVisible();
+    await expect(page.getByRole("complementary", { name: "Workspace capabilities", exact: true })).toBeVisible();
     await page.keyboard.press("Escape");
-    await expect(page.getByRole("complementary", { name: "Computer Surface", exact: true })).toBeHidden();
+    await expect(page.getByRole("complementary", { name: "Workspace capabilities", exact: true })).toBeHidden();
     await expect(computerTrigger).toBeFocused();
 
     const mobileNavigationTrigger = page.getByRole("button", { name: "Open bot navigation" });
@@ -824,7 +903,7 @@ test.describe("ticket 13 responsive, accessible, and visual QA", () => {
     await gotoSeededWorkspace(page);
 
     await page.getByRole("button", { name: "Open Computer Surface", exact: true }).click();
-    const computer = page.getByRole("complementary", { name: "Computer Surface", exact: true });
+    const computer = page.getByRole("complementary", { name: "Workspace capabilities", exact: true });
     await expect(computer).toBeVisible();
     await expect(computer.getByText("Bot using screen", { exact: true })).toBeVisible();
     await expect(page.getByRole("dialog", { name: "Computer Surface" })).toHaveCount(0);

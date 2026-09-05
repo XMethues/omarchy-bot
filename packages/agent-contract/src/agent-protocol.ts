@@ -6,6 +6,11 @@ import {
   type ToolCallSummary,
 } from "@omarchy-bot/domain";
 import type { Hello, OpenSessionOptionsLike } from "./shared.ts";
+import type {
+  AgentBotMessageToolCancel,
+  AgentBotMessageToolRequest,
+  AgentBotMessageTurnContext,
+} from "./bot-message-protocol.ts";
 
 /**
  * Normalized agent events (agents-integration.md §2). Adapters may only emit a
@@ -117,6 +122,7 @@ export type AgentCommand =
       turnId: string;
       message: WorkerUserMessage;
       computer: AgentComputerTurnContext;
+      botMessage?: AgentBotMessageTurnContext;
     }
   | { type: "message.steer"; requestId: string; sessionId: string; text: string }
   | { type: "turn.abort"; requestId: string; sessionId: string }
@@ -177,9 +183,11 @@ export type WorkerOutbound =
   | { type: "event"; event: AgentEvent }
   | AgentComputerToolRequest
   | AgentComputerToolCancel
+  | AgentBotMessageToolRequest
+  | AgentBotMessageToolCancel
   | AgentResult;
 
-export const AGENT_CAPABILITY_INVENTORY_VERSION = 2 as const;
+export const AGENT_CAPABILITY_INVENTORY_VERSION = 3 as const;
 
 export const NATIVE_THREAD_ACTIONS = ["resume", "history", "close", "rename", "delete", "fork", "compact"] as const;
 export type NativeThreadAction = (typeof NATIVE_THREAD_ACTIONS)[number];
@@ -189,6 +197,8 @@ export interface AgentCapabilityInventory {
   version: typeof AGENT_CAPABILITY_INVENTORY_VERSION;
   steering: boolean;
   abort: boolean;
+  /** Whether the adapter exposes the exact bounded send_bot_message tool contract. */
+  botMail: boolean;
   nativeThreadActions: NativeThreadAction[];
   thinking: {
     supported: boolean;
@@ -208,6 +218,7 @@ const AGENT_CAPABILITY_INVENTORY_KEYS: Record<string, true> = {
   version: true,
   steering: true,
   abort: true,
+  botMail: true,
   nativeThreadActions: true,
   thinking: true,
   attachments: true,
@@ -230,6 +241,7 @@ export function isAgentCapabilityInventory(value: unknown): value is AgentCapabi
     inventory.version === AGENT_CAPABILITY_INVENTORY_VERSION &&
     typeof inventory.steering === "boolean" &&
     typeof inventory.abort === "boolean" &&
+    typeof inventory.botMail === "boolean" &&
     Array.isArray(inventory.nativeThreadActions) &&
     inventory.nativeThreadActions.every((action) => NATIVE_THREAD_ACTIONS.includes(action)) &&
     new Set(inventory.nativeThreadActions).size === inventory.nativeThreadActions.length &&

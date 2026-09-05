@@ -95,6 +95,122 @@ test.describe("chat through a bot", () => {
     expect(await response.json()).toEqual([]);
   });
 
+  test("keeps the Composer compact with accessible circular footer actions", async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.emulateMedia({ colorScheme: "light", reducedMotion: "no-preference" });
+    await page.goto("/");
+    await createBot(page, "Composer Dock Bot");
+
+    const composer = page.getByTestId("composer");
+    const input = composerInput(page);
+    const attach = composer.getByRole("button", { name: "Attach files" });
+    const microphone = composer.getByRole("button", { name: "Start voice recording" });
+    const sendButton = composer.getByRole("button", { name: "Send", exact: true });
+    await expect(composer).toHaveAttribute("data-density", "compact");
+    await expect(attach).toHaveAttribute("data-size", "md");
+    await expect(microphone).toHaveAttribute("data-size", "md");
+    await expect(sendButton).toHaveAttribute("data-size", "md");
+
+    const dockPresentation = async (): Promise<{
+      actionBoxes: Array<{
+        x: number;
+        width: number;
+        height: number;
+        centerY: number;
+        radius: number;
+        transitionDuration: string;
+      }>;
+      backgroundColor: string;
+      borderWidth: string;
+      boxShadow: string;
+    }> => composer.evaluate((root) => {
+      const editable = root.querySelector<HTMLElement>('[role="textbox"]');
+      const actions = ["Attach files", "Start voice recording", "Send"].map((label) =>
+        [...root.querySelectorAll<HTMLButtonElement>("button")].find(
+          (button) => button.getAttribute("aria-label") === label || button.textContent?.trim() === label,
+        ),
+      );
+      if (editable === null || actions.some((action) => action === undefined)) {
+        throw new Error("Composer controls are incomplete");
+      }
+      let surface: HTMLElement | null = editable.parentElement;
+      while (surface !== null && !actions.every((action) => action !== undefined && surface?.contains(action))) {
+        surface = surface.parentElement;
+      }
+      if (surface === null) throw new Error("Composer controls do not share one dock surface");
+      const style = getComputedStyle(surface);
+      return {
+        actionBoxes: actions.map((action) => {
+          const box = action!.getBoundingClientRect();
+          const actionStyle = getComputedStyle(action!);
+          return {
+            x: box.x,
+            width: box.width,
+            height: box.height,
+            centerY: box.y + box.height / 2,
+            radius: Number.parseFloat(actionStyle.borderTopLeftRadius),
+            transitionDuration: actionStyle.transitionDuration,
+          };
+        }),
+        backgroundColor: style.backgroundColor,
+        borderWidth: style.borderTopWidth,
+        boxShadow: style.boxShadow,
+      };
+    });
+
+    const lightDock = await dockPresentation();
+    expect(lightDock.borderWidth).toBe("0px");
+    expect(lightDock.boxShadow).not.toBe("none");
+    expect(lightDock.backgroundColor).not.toBe("rgba(0, 0, 0, 0)");
+    for (const action of lightDock.actionBoxes) {
+      expect(action.width).toBe(action.height);
+      expect(action.radius).toBeGreaterThanOrEqual(action.height / 2);
+    }
+    expect(lightDock.actionBoxes[0]!.centerY).toBeCloseTo(lightDock.actionBoxes[1]!.centerY, 0);
+    expect(lightDock.actionBoxes[1]!.centerY).toBeCloseTo(lightDock.actionBoxes[2]!.centerY, 0);
+    expect(lightDock.actionBoxes[0]!.x).toBeLessThan(lightDock.actionBoxes[1]!.x);
+    expect(lightDock.actionBoxes[1]!.x).toBeLessThan(lightDock.actionBoxes[2]!.x);
+
+    const fileChooserPromise = page.waitForEvent("filechooser");
+    await attach.click();
+    expect((await fileChooserPromise).isMultiple()).toBe(true);
+
+    await input.fill("say: first line");
+    await input.focus();
+    await page.keyboard.press("Tab");
+    await expect(attach).toBeFocused();
+    const attachFocusStyle = await attach.evaluate((button) => {
+      const style = getComputedStyle(button);
+      return { outlineStyle: style.outlineStyle, outlineWidth: style.outlineWidth };
+    });
+    expect(attachFocusStyle.outlineStyle).not.toBe("none");
+    expect(attachFocusStyle.outlineWidth).not.toBe("0px");
+    await page.keyboard.press("Tab");
+    await expect(microphone).toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(sendButton).toBeFocused();
+
+    const userMessagesBeforeNewline = await page.getByTestId("user-message").count();
+    await input.press("Shift+Enter");
+    await expect(page.getByTestId("user-message")).toHaveCount(userMessagesBeforeNewline);
+    await input.pressSequentially("second line");
+    await input.press("Enter");
+    await expect(page.getByTestId("user-message").last()).toContainText("first line");
+    await expect(page.getByTestId("user-message").last()).toContainText("second line");
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.emulateMedia({ colorScheme: "dark", reducedMotion: "reduce" });
+    const darkNarrowDock = await dockPresentation();
+    expect(darkNarrowDock.borderWidth).toBe("0px");
+    expect(darkNarrowDock.boxShadow).not.toBe("none");
+    expect(darkNarrowDock.backgroundColor).not.toBe(lightDock.backgroundColor);
+    for (const action of darkNarrowDock.actionBoxes) {
+      expect(action.width).toBe(action.height);
+      expect(action.radius).toBeGreaterThanOrEqual(action.height / 2);
+      expect(action.transitionDuration).toBe("0s");
+    }
+  });
+
   test("lazily creates a thread, streams, completes, restores URL state, and reopens the recent thread", async ({ page }) => {
     await page.goto("/");
     const botId = await createBot(page, "Streaming Bot");

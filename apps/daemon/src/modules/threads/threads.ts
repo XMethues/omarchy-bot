@@ -4,8 +4,10 @@ import type { AgentCapabilityInventory } from "@omarchy-bot/agent-contract";
 import {
   TOOL_CALL_INTERRUPTED_ERROR_SUMMARY,
   canTransitionToolCall,
+  isStoredPeerMailPayload,
   isToolCallSummary,
   type AgentId,
+  type PeerMailMessage,
   type ToolCallSummary,
 } from "@omarchy-bot/domain";
 import { MessageDto, type AttachmentDto, type ThreadDto, type TurnDto } from "@omarchy-bot/protocol";
@@ -34,6 +36,7 @@ interface MessageInput {
   kind: MessageDto["kind"];
   text?: string;
   payload?: unknown;
+  peerMail?: PeerMailMessage;
   turnId?: string;
   response?: NonNullable<MessageDto["response"]>;
   thinking?: NonNullable<MessageDto["thinking"]>;
@@ -47,6 +50,17 @@ function assertMessageInput(message: MessageInput): void {
     }
   } else if (message.author.kind !== "bot") {
     throw new Error("ordered Agent transcript records must be Bot-authored");
+  }
+  if (message.peerMail !== undefined) {
+    if (
+      message.kind !== "text"
+      || message.author.kind !== "system"
+      || message.payload !== undefined
+      || message.peerMail.deliveryId.length === 0
+      || message.peerMail.sourceName.trim().length === 0
+    ) {
+      throw new Error("peer mail requires a typed system text projection");
+    }
   }
 
   if (message.kind === "response") {
@@ -258,6 +272,24 @@ export class ThreadsService {
       url: `/api/attachments/${attachment.id}`,
     }));
     const storedPayload: unknown = m.payload === null ? undefined : JSON.parse(m.payload);
+    const peerMailPayload =
+      m.kind === "text" && m.author_kind === "system" && isStoredPeerMailPayload(storedPayload)
+        ? storedPayload
+        : undefined;
+    const livePeerSource = peerMailPayload === undefined
+      ? undefined
+      : this.db.query(
+          `SELECT source_bot_id FROM bot_mail_deliveries WHERE id = ?`,
+        ).get(peerMailPayload.deliveryId) as { source_bot_id: string | null } | null;
+    const peerMail = peerMailPayload === undefined
+      ? undefined
+      : {
+          deliveryId: peerMailPayload.deliveryId,
+          ...(livePeerSource?.source_bot_id !== null && livePeerSource?.source_bot_id !== undefined
+            ? { sourceBotId: livePeerSource.source_bot_id }
+            : {}),
+          sourceName: peerMailPayload.sourceName,
+        };
     const toolCall = m.kind === "tool" && isToolCallSummary(storedPayload)
       ? storedPayload
       : undefined;
@@ -284,8 +316,9 @@ export class ThreadsService {
       ...(m.kind === "response" && block !== undefined ? { response: block } : {}),
       ...(m.kind === "thinking" && block !== undefined ? { thinking: block } : {}),
       ...(toolCall !== undefined ? { toolCall } : {}),
+      ...(peerMail !== undefined ? { peerMail } : {}),
       ...(attachments.length > 0 ? { attachments } : {}),
-      ...(m.kind !== "tool" && storedPayload !== undefined ? { payload: storedPayload } : {}),
+      ...(m.kind !== "tool" && peerMail === undefined && storedPayload !== undefined ? { payload: storedPayload } : {}),
       createdAt: m.created_at,
     });
   }
@@ -315,9 +348,11 @@ export class ThreadsService {
         m.text ?? null,
         m.kind === "tool"
           ? JSON.stringify(m.toolCall)
-          : m.payload === undefined
-            ? null
-            : JSON.stringify(m.payload),
+          : m.peerMail !== undefined
+            ? JSON.stringify({ type: "peer-mail", ...m.peerMail })
+            : m.payload === undefined
+              ? null
+              : JSON.stringify(m.payload),
         now,
         m.turnId ?? null,
         (m.response ?? m.thinking)?.blockId ?? null,

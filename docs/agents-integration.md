@@ -50,9 +50,10 @@ Every adapter owns a machine-readable record tied to the exact Agent version:
 
 ```ts
 interface AgentCapabilityInventory {
-  version: 2;
+  version: 3;
   steering: boolean;
   abort: boolean;
+  botMail: boolean;
   thinking: {
     supported: boolean;
     streaming: boolean;
@@ -71,7 +72,7 @@ interface AgentCapabilityInventory {
 
 Rules:
 
-1. A claimed operation or modality means the official interface was exercised by conformance, not merely documented.
+1. A claimed operation or modality means the official interface was exercised by conformance, not merely documented. `botMail: true` specifically means the adapter exposes the exact bounded `send_bot_message` custom tool; adapters without that contract report `false`.
 2. `false` or an absent action is honest unavailability and must not trigger an emulated substitute.
 3. Response, Thinking, Tool Call, Turn, and error semantics are normalized before an event may be classified as Native.
 4. Unknown public Native Event payloads may be retained for fidelity. Diagnostic and secret payloads retain redacted metadata only, and no generic raw Native Event renderer appears in the Thread.

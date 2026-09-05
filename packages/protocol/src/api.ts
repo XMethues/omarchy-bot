@@ -246,6 +246,13 @@ export const ToolCallSummaryDto = z.object({
 });
 export type ToolCallSummaryDto = z.infer<typeof ToolCallSummaryDto>;
 
+export const PeerMailMessageDto = z.object({
+  deliveryId: z.string().regex(/^delivery_[0-9a-f]{32}$/),
+  sourceBotId: z.string().optional(),
+  sourceName: z.string().min(1),
+}).strict();
+export type PeerMailMessageDto = z.infer<typeof PeerMailMessageDto>;
+
 
 export const MessageKindSchema = z.enum(["text", "response", "thinking", "tool", "event"]);
 export type MessageKindDto = z.infer<typeof MessageKindSchema>;
@@ -261,6 +268,7 @@ export const MessageDto = z.object({
   thinking: ThinkingBlockDto.optional(),
   toolCall: ToolCallSummaryDto.optional(),
   attachments: z.array(AttachmentDto).optional(),
+  peerMail: PeerMailMessageDto.optional(),
   payload: z.unknown().optional(),
   createdAt: z.string(),
 }).strict().superRefine((message, context) => {
@@ -273,6 +281,15 @@ export const MessageDto = z.object({
     }
   } else if (message.author.kind !== "bot") {
     context.addIssue({ code: z.ZodIssueCode.custom, message: "ordered Agent transcript records must be Bot-authored", path: ["author"] });
+  }
+
+  if (message.peerMail !== undefined) {
+    if (message.kind !== "text" || message.author.kind !== "system") {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "only system text messages carry peer mail", path: ["peerMail"] });
+    }
+    if (message.payload !== undefined) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "peer mail cannot expose its stored payload", path: ["payload"] });
+    }
   }
 
   if (message.kind === "response") {
@@ -337,6 +354,95 @@ export const DictationResultDto = z.object({
   text: z.string().optional(),
 });
 export type DictationResultDto = z.infer<typeof DictationResultDto>;
+
+// ----- Working tree changes -----
+
+const RepositoryRelativePathDto = z.string().min(1).max(4096).refine(
+  (value) =>
+    !value.includes("\0")
+    && !value.startsWith("/")
+    && !value.split("/").includes(".."),
+  "invalid repository-relative path",
+);
+
+export const WorkingTreeFileCountsDto = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("known"),
+    additions: z.number().int().nonnegative(),
+    deletions: z.number().int().nonnegative(),
+  }).strict(),
+  z.object({ kind: z.literal("binary") }).strict(),
+  z.object({ kind: z.literal("unknown") }).strict(),
+]);
+export type WorkingTreeFileCountsDto = z.infer<typeof WorkingTreeFileCountsDto>;
+
+export const WorkingTreeFileDto = z.object({
+  path: RepositoryRelativePathDto,
+  previousPath: RepositoryRelativePathDto.optional(),
+  status: z.enum(["modified", "added", "deleted", "renamed", "conflicted", "untracked"]),
+  counts: WorkingTreeFileCountsDto,
+}).strict();
+export type WorkingTreeFileDto = z.infer<typeof WorkingTreeFileDto>;
+
+const WorkingTreeGeneratedDto = { generatedAt: z.string().datetime() };
+
+export const WorkingTreeSummaryDto = z.discriminatedUnion("state", [
+  z.object({ state: z.literal("clean"), ...WorkingTreeGeneratedDto }).strict(),
+  z.object({ state: z.literal("not_repository"), ...WorkingTreeGeneratedDto }).strict(),
+  z.object({
+    state: z.literal("unavailable"),
+    ...WorkingTreeGeneratedDto,
+    message: z.string().min(1).max(500),
+    retryable: z.boolean(),
+  }).strict(),
+  z.object({
+    state: z.literal("ready"),
+    ...WorkingTreeGeneratedDto,
+    changedFileCount: z.number().int().positive(),
+    additions: z.number().int().nonnegative().optional(),
+    deletions: z.number().int().nonnegative().optional(),
+    files: z.array(WorkingTreeFileDto).max(200),
+    truncated: z.boolean(),
+  }).strict(),
+]);
+export type WorkingTreeSummaryDto = z.infer<typeof WorkingTreeSummaryDto>;
+
+export const WorkingTreeQueryDto = z.object({
+  threadId: z.string().min(1).max(200).regex(/^[\w-]+$/).optional(),
+}).strict();
+export type WorkingTreeQueryDto = z.infer<typeof WorkingTreeQueryDto>;
+
+export const WorkingTreeDetailQueryDto = z.object({
+  threadId: z.string().min(1).max(200).regex(/^[\w-]+$/).optional(),
+  path: RepositoryRelativePathDto,
+}).strict();
+export type WorkingTreeDetailQueryDto = z.infer<typeof WorkingTreeDetailQueryDto>;
+
+const WorkingTreeDetailFileDto = {
+  path: RepositoryRelativePathDto,
+  previousPath: RepositoryRelativePathDto.optional(),
+  status: z.enum(["modified", "added", "deleted", "renamed", "conflicted", "untracked"]),
+};
+
+export const WorkingTreeDetailDto = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("text"),
+    ...WorkingTreeDetailFileDto,
+    patch: z.string(),
+    truncated: z.boolean(),
+  }).strict(),
+  z.object({
+    kind: z.literal("binary"),
+    ...WorkingTreeDetailFileDto,
+  }).strict(),
+  z.object({
+    kind: z.literal("unknown"),
+    ...WorkingTreeDetailFileDto,
+    message: z.string().min(1).max(500),
+  }).strict(),
+]);
+export type WorkingTreeDetailDto = z.infer<typeof WorkingTreeDetailDto>;
+
 
 
 // ----- Computer -----
@@ -608,6 +714,7 @@ export type PatchBotBodyDto = z.infer<typeof PatchBotBody>;
 
 export const PinBody = z.object({ pinned: z.boolean() });
 export type PinBodyDto = z.infer<typeof PinBody>;
+
 
 export const DeleteBotBody = z.object({}).strict();
 export type DeleteBotBodyDto = z.infer<typeof DeleteBotBody>;

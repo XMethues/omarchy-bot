@@ -6,23 +6,27 @@ import {
   redactToolErrorSummary,
   toolCallSummaryFromEvent,
 } from "./agent-protocol.ts";
+import { isAgentBotMessageToolRequest } from "./bot-message-protocol.ts";
 
 describe("Agent capability inventory", () => {
   const inventory = {
-    version: 2,
+    version: 3,
     steering: true,
     abort: true,
+    botMail: true,
     nativeThreadActions: ["resume", "history", "close"],
     thinking: { supported: true, streaming: true },
     attachments: { text: true, image: false },
     nativeEventFamilies: ["pi.progress"],
   };
 
-  test("requires version 2 Thinking support and streaming metadata", () => {
+  test("requires version 3 Thinking and Bot-mail support metadata", () => {
     expect(isAgentCapabilityInventory(inventory)).toBeTrue();
-    expect(isAgentCapabilityInventory({ ...inventory, version: 1 })).toBeFalse();
+    expect(isAgentCapabilityInventory({ ...inventory, version: 2 })).toBeFalse();
     const { thinking: _thinking, ...withoutThinking } = inventory;
     expect(isAgentCapabilityInventory(withoutThinking)).toBeFalse();
+    const { botMail: _botMail, ...withoutBotMail } = inventory;
+    expect(isAgentCapabilityInventory(withoutBotMail)).toBeFalse();
     expect(isAgentCapabilityInventory({
       ...inventory,
       thinking: { supported: false, streaming: true },
@@ -35,6 +39,32 @@ describe("Agent capability inventory", () => {
       ...inventory,
       thinking: { ...inventory.thinking, source: "inferred" },
     })).toBeFalse();
+  });
+});
+
+describe("Agent Bot-message requests", () => {
+  const request = {
+    type: "bot-message.request" as const,
+    requestId: "request-1",
+    context: {
+      botId: "bot_0123456789abcdef0123456789abcdef",
+      turnId: "turn_0123456789abcdef0123456789abcdef",
+      workerSessionId: "worker-session-1",
+      toolCallId: "tool-call-1",
+    },
+    targetBotId: "bot_fedcba9876543210fedcba9876543210",
+    text: "Review this.",
+  };
+
+  test("accepts only exact bounded 1:1 text requests", () => {
+    expect(isAgentBotMessageToolRequest(request)).toBeTrue();
+    expect(isAgentBotMessageToolRequest({ ...request, attachments: ["/tmp/private"] })).toBeFalse();
+    expect(isAgentBotMessageToolRequest({
+      ...request,
+      targetBotIds: [request.targetBotId],
+    })).toBeFalse();
+    expect(isAgentBotMessageToolRequest({ ...request, targetBotId: "../../private" })).toBeFalse();
+    expect(isAgentBotMessageToolRequest({ ...request, text: "x".repeat(32_001) })).toBeFalse();
   });
 });
 

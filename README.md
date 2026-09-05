@@ -67,6 +67,26 @@ bun run dev
 
 Open <http://127.0.0.1:7322>.
 
+## Bot-to-Bot mail
+
+Bot mail is local, asynchronous, 1:1 text delivery. Create two Bots, select the
+target once, and copy its stable `bot_…` ID from the `bot` query parameter in
+the browser URL. Then ask the source Bot to use the native tool exactly once:
+
+```text
+Use send_bot_message with targetBotId "bot_0123456789abcdef0123456789abcdef"
+and text "Review the release checklist." Then conclude without waiting.
+```
+
+A successful Tool Call acknowledges only that the delivery was durably queued;
+it does not return the target’s eventual output. The target receives a new
+target-owned Thread, gains ordinary unread attention, and runs later with its
+own current Instructions and only the sender attribution plus delivered text.
+The source Thread, Native Session, memory, attachments, and filesystem paths
+remain private. Open the target’s unread Thread to inspect its normal ordered
+response and History. To reply, the target makes a separate
+`send_bot_message` call addressed to the original source Bot ID.
+
 For access from another machine on a trusted LAN, opt in to non-loopback listeners:
 
 ```bash
