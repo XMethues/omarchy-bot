@@ -7,7 +7,7 @@
 **Status:** resolved
 
 - [x] A delivery remains queued when the target Agent is not ready, while its visible Thread, Message, and unread attention remain available.
-- [x] Enqueue completion, Agent readiness transitions, daemon startup, and eligible Bot restore trigger bounded event-driven dispatch attempts.
+- [x] Enqueue completion, Agent readiness transitions, and daemon startup trigger bounded event-driven dispatch attempts; Bot lifecycle follows direct permanent deletion without archive or restore.
 - [x] Concurrent triggers cannot claim or dispatch the same queued delivery more than once.
 - [x] A daemon restart after source acknowledgement but before claim preserves the delivery and later starts exactly one target Turn.
 - [x] Startup reconciliation resets a `dispatching` delivery with no linked target Turn to queued.
