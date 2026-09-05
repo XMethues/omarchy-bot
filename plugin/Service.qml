@@ -4,13 +4,13 @@ import Quickshell.Io
 Item {
   id: root
 
-  readonly property string launcherPath: decodeURIComponent(
-    Qt.resolvedUrl("launch.sh").toString()
+  readonly property string supervisorPath: decodeURIComponent(
+    Qt.resolvedUrl("supervise.sh").toString()
   ).replace(/^file:\/\//, "")
 
   Process {
     id: omarchyBot
     running: true
-    command: ["bash", root.launcherPath]
+    command: ["bash", root.supervisorPath]
   }
 }
