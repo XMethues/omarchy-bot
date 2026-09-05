@@ -672,6 +672,7 @@ export class CageBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
       WLR_HEADLESS_OUTPUTS: "1",
       WLR_LIBINPUT_NO_DEVICES: "1",
       WLR_RENDERER_ALLOW_SOFTWARE: "1",
+      WLR_RENDERER: "pixman",
     };
     const cageProcess = Bun.spawn([
       ...this.#units.command(provision.surfaceId, provision.generation, "compositor", bootstrapEnv),

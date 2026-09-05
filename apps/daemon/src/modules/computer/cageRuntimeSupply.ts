@@ -110,7 +110,7 @@ function wrapper(binary: "cage" | "wlr-randr"): string {
 }
 
 /**
- * Lazily installs the pinned Linux x64 Cage runtime into an application-owned
+ * Lazily installs the pinned Cage runtime for Omarchy x64 into an application-owned
  * directory. Each process shares one in-flight promise; competing processes
  * publish only a fully verified and extracted directory through atomic rename.
  */
@@ -138,7 +138,7 @@ export class PortableCageRuntimeSupply implements CageRuntimeSupply {
   async #provision(): Promise<CageRuntimeBinaries> {
     if (process.platform !== "linux" || process.arch !== "x64") {
       throw new Error(
-        `portable Cage provisioning supports Linux x64 only (found ${process.platform} ${process.arch})`,
+        `portable Cage provisioning requires Omarchy on x64 (found ${process.platform} ${process.arch})`,
       );
     }
 
@@ -266,7 +266,7 @@ function findExecutable(candidate: string): string | undefined {
   return Bun.which(candidate) ?? undefined;
 }
 
-/** Keeps explicit overrides authoritative, then prefers a complete system pair. */
+/** Keeps explicit overrides authoritative, then prefers a complete installed pair. */
 export async function resolveCageRuntimeBinaries(
   options: ResolveCageRuntimeOptions,
 ): Promise<CageRuntimeBinaries> {

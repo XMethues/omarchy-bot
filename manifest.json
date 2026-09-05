@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.xmethues.omarchy-bot",
+  "name": "Omarchy Bot",
+  "version": "0.1.0",
+  "author": "XMethues",
+  "license": "MIT",
+  "description": "Local AI teammates with independent Bot Screens, built specifically for Omarchy.",
+  "kinds": ["service"],
+  "entryPoints": {
+    "service": "plugin/Service.qml"
+  }
+}

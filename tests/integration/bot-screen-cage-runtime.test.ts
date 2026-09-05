@@ -55,7 +55,7 @@ test("Cage runtime becomes ready only with explicit private geometry, Desktop, c
   const cage = executable(bin, "cage", `#!/usr/bin/env bun
 import { writeFileSync } from "node:fs";
 import path from "node:path";
-writeFileSync(${JSON.stringify(cageInvocation)}, [process.env.XDG_RUNTIME_DIR, process.env.WAYLAND_DISPLAY, process.env.WLR_BACKENDS].join("|"));
+writeFileSync(${JSON.stringify(cageInvocation)}, [process.env.XDG_RUNTIME_DIR, process.env.WAYLAND_DISPLAY, process.env.WLR_BACKENDS, process.env.WLR_RENDERER].join("|"));
 const separator = process.argv.indexOf("--");
 const application = process.argv.slice(separator + 1);
 const socket = path.join(process.env.XDG_RUNTIME_DIR, "wayland-0");
@@ -151,7 +151,7 @@ process.exit(status);
     path.join(profileDir, "config"),
     "--output HEADLESS-1 --on --custom-mode 2x1@15Hz --pos 0,0 --transform normal --scale 1",
   ].join("|"));
-  expect(readFileSync(cageInvocation, "utf8")).toBe(`${runtimeDir}|wayland-0|headless`);
+  expect(readFileSync(cageInvocation, "utf8")).toBe(`${runtimeDir}|wayland-0|headless|pixman`);
   expect(workerScope?.env).toMatchObject({
     XDG_RUNTIME_DIR: runtimeDir,
     WAYLAND_DISPLAY: "wayland-0",

@@ -1,6 +1,6 @@
 # Omarchy Bot
 
-A local AI teammate workspace for Omarchy. Users create named Bots, choose any supported Agent backend, and work with them through persistent conversations, rich input, native Agent capabilities, and contextual access to their Bot Screens through the Computer Surface.
+An Omarchy plugin for local AI teammates. Omarchy Bot is intentionally and deeply coupled to Omarchy: its Shell lifecycle, desktop services, application environment, Agent installations, and Bot Screen runtime are Omarchy contracts. It is not a general-purpose Linux application.
 
 ## Product model
 
@@ -35,6 +35,18 @@ docs/                     accepted design, ADRs, research, inventories
 
 The daemon is the only SQLite writer. Agent SDKs and native protocols run behind isolated workers. The browser talks only to the localhost daemon.
 
+## Installation
+
+Install and enable Omarchy Bot through Omarchy's official plugin manager:
+
+```bash
+omarchy plugin add https://github.com/XMethues/omarchy-bot.git --enable
+```
+
+The repository root is the plugin contract. Omarchy Shell loads `plugin/Service.qml`, which owns the daemon lifecycle. On first activation of each Git revision, the launcher copies the tracked source into a private versioned directory under `XDG_DATA_HOME`, installs the pinned Bun workspace dependencies there, and builds the web client and native Wayland helpers. The plugin checkout remains clean and fast-forwardable for `omarchy plugin update`; no Omarchy package files or host packages are modified.
+
+Omarchy Bot supports Omarchy on x86_64 only. Other Linux distributions, standalone service installation, and generic Linux release archives are outside the supported product contract.
+
 ## Development
 
 Requirements:
@@ -46,7 +58,7 @@ Requirements:
 - a configured Pi installation for real Pi conformance
 - Voxtype for Composer dictation
 
-On Linux x64, installed `cage` and `wlr-randr` binaries are preferred. When either is unavailable, the daemon lazily downloads the pinned Arch Linux archives, verifies their SHA-256 digests, and publishes a private portable runtime under `OMARCHY_BOT_HOME`; explicit binary overrides remain authoritative.
+Cage remains the internal compositor because each Bot needs an independent, pure-headless Wayland Screen; it is not a portability layer for other Linux distributions. On the first Bot Screen, the plugin uses an installed `cage`/`wlr-randr` pair when available, otherwise it downloads the pinned Arch packages appropriate to Omarchy, verifies every SHA-256 digest, and publishes them under `OMARCHY_BOT_HOME`. Explicit development overrides remain authoritative.
 
 ```bash
 bun install
