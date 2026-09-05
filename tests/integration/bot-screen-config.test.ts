@@ -53,6 +53,7 @@ test("selects the measured 720p Bot Screen fallback from configuration", () => {
     botScreenFrameRate: 15,
     botScreenWebRtcPort: 7433,
     botScreenFfmpegBin: "/opt/bot-screen/ffmpeg",
+    botScreenRuntimeSupplyDir: path.join(temporaryRoot, "data", "runtime", "cage"),
   });
 });
 

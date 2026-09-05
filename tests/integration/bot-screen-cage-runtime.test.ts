@@ -9,10 +9,13 @@ import type { SurfaceId } from "../../packages/domain/src/ids.ts";
 
 const SURFACE_ID = "surf_11111111111111111111111111111111" as SurfaceId;
 let root: string | undefined;
+const originalWaylandDisplay = process.env.WAYLAND_DISPLAY;
 
 afterEach(() => {
   if (root !== undefined) rmSync(root, { recursive: true, force: true });
   root = undefined;
+  if (originalWaylandDisplay === undefined) delete process.env.WAYLAND_DISPLAY;
+  else process.env.WAYLAND_DISPLAY = originalWaylandDisplay;
 });
 
 function executable(directory: string, name: string, body: string): string {
@@ -38,8 +41,10 @@ test("Cage runtime becomes ready only with explicit private geometry, Desktop, c
   const profileRoot = path.join(root, "profiles");
   mkdirSync(bin);
   const outputInvocation = path.join(root, "wlr-randr-invocation");
+  const cageInvocation = path.join(root, "cage-environment");
   const desktopPid = path.join(root, "bot-desktop-pid");
   const png = path.join(root, "screen.png");
+  process.env.WAYLAND_DISPLAY = "host-wayland-9";
   writeFileSync(
     png,
     Buffer.from(
@@ -48,7 +53,9 @@ test("Cage runtime becomes ready only with explicit private geometry, Desktop, c
     ),
   );
   const cage = executable(bin, "cage", `#!/usr/bin/env bun
+import { writeFileSync } from "node:fs";
 import path from "node:path";
+writeFileSync(${JSON.stringify(cageInvocation)}, [process.env.XDG_RUNTIME_DIR, process.env.WAYLAND_DISPLAY, process.env.WLR_BACKENDS].join("|"));
 const separator = process.argv.indexOf("--");
 const application = process.argv.slice(separator + 1);
 const socket = path.join(process.env.XDG_RUNTIME_DIR, "wayland-0");
@@ -144,6 +151,7 @@ process.exit(status);
     path.join(profileDir, "config"),
     "--output HEADLESS-1 --on --custom-mode 2x1@15Hz --pos 0,0 --transform normal --scale 1",
   ].join("|"));
+  expect(readFileSync(cageInvocation, "utf8")).toBe(`${runtimeDir}|wayland-0|headless`);
   expect(workerScope?.env).toMatchObject({
     XDG_RUNTIME_DIR: runtimeDir,
     WAYLAND_DISPLAY: "wayland-0",
@@ -221,9 +229,42 @@ test("Cage dependency failure happens before a Surface runtime or profile is cre
     logicalHeight: 1080,
     scale: 1,
     refreshRate: 16,
-  })).rejects.toThrow("Cage, wlr-randr, and grim are required");
+  })).rejects.toThrow("configured Cage executable is unavailable");
   expect(existsSync(path.join(runtimeRoot, SURFACE_ID))).toBeFalse();
   expect(existsSync(path.join(profileRoot, SURFACE_ID))).toBeFalse();
+});
+
+test("Cage rejects an overlong private socket path before launching the compositor", async () => {
+  root = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-cage-path-"));
+  const bin = path.join(root, "bin");
+  const runtimeRoot = path.join(root, "x".repeat(80));
+  const cageStarted = path.join(root, "cage-started");
+  mkdirSync(bin);
+  const inert = "#!/bin/sh\nexit 0\n";
+  const adapter = new CageBotScreenRuntimeAdapter({
+    runtimeRoot,
+    profileRoot: path.join(root, "profiles"),
+    cageBin: executable(bin, "cage", `#!/bin/sh\ntouch ${JSON.stringify(cageStarted)}\nexit 0\n`),
+    wlrRandrBin: executable(bin, "wlr-randr", inert),
+    grimBin: executable(bin, "grim", inert),
+    inputHelperBin: executable(bin, "input", inert),
+    captureHelperBin: executable(bin, "capture", inert),
+    botDesktopBin: executable(bin, "desktop", inert),
+    ffmpegBin: executable(bin, "ffmpeg", "#!/bin/sh\nprintf ' V..... libx264 H.264 encoder\\n'\n"),
+    computerWorkers: { startComputerWorker: async () => { throw new Error("worker should not start"); } },
+  });
+
+  await expect(adapter.start({
+    surfaceId: SURFACE_ID,
+    generation: 1,
+    geometryGeneration: 1,
+    logicalWidth: 1920,
+    logicalHeight: 1080,
+    scale: 1,
+    refreshRate: 16,
+  })).rejects.toThrow("runtime path is too long for a private Wayland socket");
+  expect(existsSync(cageStarted)).toBeFalse();
+  expect(existsSync(path.join(runtimeRoot, SURFACE_ID))).toBeFalse();
 });
 
 test("Cage rejects ffmpeg without libx264 before starting a Surface process", async () => {

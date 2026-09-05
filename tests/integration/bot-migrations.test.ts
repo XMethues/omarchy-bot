@@ -5,8 +5,8 @@ import path from "node:path";
 import { Database } from "bun:sqlite";
 import { applyMigration, MIGRATIONS, openDb } from "../../apps/daemon/src/persistence/db.ts";
 import { renderAvatarRecipe } from "../../apps/web/src/components/avatarRenderer.ts";
-import { AVATAR_RENDERER_ID, AvatarRecipeDto } from "../../packages/protocol/src/index.ts";
-import { api, startDaemon, type Harness } from "./helpers/harness.ts";
+import { AVATAR_RENDERER_ID, AvatarRecipeDto, type MessageDto } from "../../packages/protocol/src/index.ts";
+import { api, makeBot, startDaemon, type Harness } from "./helpers/harness.ts";
 import { BotScreenManager } from "../../apps/daemon/src/modules/computer/botScreenManager.ts";
 import { FakeBotScreenRuntimeAdapter } from "../../apps/daemon/src/modules/computer/fakeBotScreenRuntime.ts";
 
@@ -80,7 +80,7 @@ function deployedArchivelessDatabase(): { dbPath: string; home: string } {
 
 describe("integration: deployed schema convergence", () => {
   test("keeps Bot Screen and divergent-ledger migrations in dependency order", () => {
-    expect(MIGRATIONS.slice(-10, -1).map((migration) => migration.name)).toEqual([
+    expect(MIGRATIONS.slice(-11).map((migration) => migration.name)).toEqual([
       "0010-bot-computer-surfaces",
       "0011-redacted-input-diagnostics",
       "0012-bot-screen-contract",
@@ -90,6 +90,8 @@ describe("integration: deployed schema convergence", () => {
       "0013-restore-bot-archive-lifecycle",
       "0014-enforce-current-avatar-recipes",
       "0015-converge-bot-screen-persistence",
+      "0016-bot-display-settings",
+      "0017-ordered-transcript-repair",
     ]);
   });
 
@@ -238,6 +240,52 @@ describe("integration: deployed schema convergence", () => {
     } finally {
       await firstDaemon?.stop();
       await secondDaemon?.stop();
+      rmSync(home, { recursive: true, force: true });
+    }
+  }, 15_000);
+
+  test("upgrades deployed Bot-authored text into an ordered Response Block", async () => {
+    const home = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-transcript-migration-"));
+    let daemon: Harness | undefined;
+    try {
+      daemon = await startDaemon(home);
+      const botId = await makeBot(daemon, "Legacy Transcript Bot");
+      const thread = daemon.svc.threads.createThread(botId, { title: "Retained conversation" });
+      const createdAt = "2026-09-07T12:00:00.000Z";
+      daemon.svc.db.exec("PRAGMA ignore_check_constraints = ON");
+      daemon.svc.db.query(
+        `INSERT INTO messages (id, thread_id, seq, author_kind, kind, text, created_at)
+         VALUES ('message_legacy_bot_text', ?, 1, 'bot', 'text', 'Retained Bot response', ?)`,
+      ).run(thread.id, createdAt);
+      daemon.svc.db.query(
+        `DELETE FROM schema_migrations WHERE name = '0017-ordered-transcript-repair'`,
+      ).run();
+      daemon.svc.db.exec("PRAGMA ignore_check_constraints = OFF");
+      await daemon.disconnectForRestart();
+      daemon = undefined;
+
+      daemon = await startDaemon(home);
+      expect(await api<MessageDto[]>(
+        daemon,
+        "GET",
+        `/api/threads/${thread.id}/messages`,
+      )).toEqual([{
+        id: "message_legacy_bot_text",
+        threadId: thread.id,
+        seq: 1,
+        author: { kind: "bot" },
+        kind: "response",
+        text: "Retained Bot response",
+        response: {
+          blockId: "legacy-response-message_legacy_bot_text",
+          state: "completed",
+          startedAt: createdAt,
+          completedAt: createdAt,
+        },
+        createdAt,
+      }]);
+    } finally {
+      await daemon?.stop();
       rmSync(home, { recursive: true, force: true });
     }
   }, 15_000);

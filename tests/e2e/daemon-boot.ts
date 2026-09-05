@@ -81,5 +81,8 @@ db.query(
 db.query(`DELETE FROM schema_migrations WHERE name = '0014-enforce-current-avatar-recipes'`).run();
 db.close();
 
-const { port } = await main();
+const { port } = await main({
+  useHostApplicationUnits: false,
+  botScreenRuntimeDir: path.join(dataDir, "r"),
+});
 console.log(`E2E_DAEMON_READY ${port}`);

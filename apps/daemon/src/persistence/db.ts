@@ -832,6 +832,45 @@ ALTER TABLE bots ADD COLUMN show_thinking INTEGER NOT NULL DEFAULT 0
   CHECK (show_thinking IN (0, 1));
 `,
   },
+  {
+    // Bot-authored text predates the ordered transcript contract. Give each
+    // orphaned record a stable terminal Turn, then promote it in place so
+    // message identity, ordering, attachments, content, and time are retained.
+    name: "0017-ordered-transcript-repair",
+    sql: `
+INSERT INTO turns (
+  id, thread_id, bot_id, status, worker_session_id, native_session_id,
+  steer_count, started_at, finished_at, outcome_reason
+)
+SELECT
+  'legacy-turn-' || messages.id,
+  messages.thread_id,
+  threads.bot_id,
+  'completed',
+  NULL,
+  '',
+  0,
+  messages.created_at,
+  messages.created_at,
+  NULL
+FROM messages
+JOIN threads ON threads.id = messages.thread_id
+WHERE messages.author_kind = 'bot'
+  AND messages.kind = 'text'
+  AND messages.turn_id IS NULL;
+
+UPDATE messages
+SET kind = 'response',
+    payload = NULL,
+    turn_id = COALESCE(turn_id, 'legacy-turn-' || id),
+    block_id = 'legacy-response-' || id,
+    block_state = 'completed',
+    block_started_at = created_at,
+    block_completed_at = created_at
+WHERE author_kind = 'bot'
+  AND kind = 'text';
+`,
+  },
 ];
 export function openDb(cfg: Config): Database {
   const db = new Database(cfg.dbPath, { create: true });

@@ -40,11 +40,13 @@ The daemon is the only SQLite writer. Agent SDKs and native protocols run behind
 Requirements:
 
 - Bun 1.4+
-- Cage, `wlr-randr`, `grim`, and FFmpeg with `libx264` for Bot Screens
+- `grim`, FFmpeg with `libx264`, and `tar` with zstd archive support for Bot Screens
 - Wayland development headers, `wayland-scanner`, a C compiler, and `pkg-config` for the capture/input helpers
 - `computer-use-linux` for real desktop control
 - a configured Pi installation for real Pi conformance
 - Voxtype for Composer dictation
+
+On Linux x64, installed `cage` and `wlr-randr` binaries are preferred. When either is unavailable, the daemon lazily downloads the pinned Arch Linux archives, verifies their SHA-256 digests, and publishes a private portable runtime under `OMARCHY_BOT_HOME`; explicit binary overrides remain authoritative.
 
 ```bash
 bun install

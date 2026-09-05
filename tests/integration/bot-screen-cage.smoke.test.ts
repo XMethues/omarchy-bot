@@ -98,8 +98,14 @@ function inputFor(source: BotScreenProjectionSource, epoch: number): (action: Bo
 }
 
 platformTest("two real Cage Screens isolate pixels, focus, cursor, keyboard, profiles, and complete lifecycle cleanup", async () => {
-  for (const binary of ["cage", "wlr-randr", "grim", "zenity", "compare"]) {
-    if (Bun.which(binary) === null) throw new Error(`real Cage smoke requires ${binary}`);
+  for (const [binary, configured] of [
+    ["grim", process.env.OMARCHY_BOT_GRIM_BIN],
+    ["zenity", undefined],
+    ["compare", undefined],
+  ] as const) {
+    const candidate = configured ?? binary;
+    const available = candidate.includes("/") ? existsSync(candidate) : Bun.which(candidate) !== null;
+    if (!available) throw new Error(`real Cage smoke requires ${binary}`);
   }
   const previousProfile = process.env.OMARCHY_BOT_SCREEN_PROFILE;
   const selectedProfile = process.env.OMARCHY_BOT_CAGE_SMOKE_PROFILE ?? "720p";
@@ -111,6 +117,7 @@ platformTest("two real Cage Screens isolate pixels, focus, cursor, keyboard, pro
     if (previousProfile === undefined) delete process.env.OMARCHY_BOT_SCREEN_PROFILE;
     else process.env.OMARCHY_BOT_SCREEN_PROFILE = previousProfile;
   }
+  expect(harness.svc.cfg.botScreenRuntimeDir).toBe(path.join(harness.home, "r"));
 
   const runtimeDirs: string[] = [];
   const profileDirs: string[] = [];

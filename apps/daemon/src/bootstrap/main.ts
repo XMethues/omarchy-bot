@@ -9,6 +9,7 @@ import { TurnService } from "../modules/turns/turns.ts";
 import { ComputerBroker } from "../modules/computer/broker.ts";
 import { BotScreenManager, type BotScreenRuntimeAdapter } from "../modules/computer/botScreenManager.ts";
 import { CageBotScreenRuntimeAdapter } from "../modules/computer/cageBotScreenRuntime.ts";
+import { PortableCageRuntimeSupply } from "../modules/computer/cageRuntimeSupply.ts";
 import { ScreenProjectionService } from "../modules/computer/screenProjection.ts";
 import { InputDiagnostics } from "../modules/computer/inputDiagnostics.ts";
 import { AvatarService } from "../modules/avatars/avatarService.ts";
@@ -28,6 +29,10 @@ function writeStatusAtomic(statusPath: string, data: unknown): void {
 export interface MainOptions {
   botScreenAdapter?: BotScreenRuntimeAdapter;
   botScreenCapacity?: number;
+  /** Integration harnesses disable host user-systemd; production defaults to enabled. */
+  useHostApplicationUnits?: boolean;
+  /** Test-only private runtime root; production uses the configured XDG runtime. */
+  botScreenRuntimeDir?: string;
 }
 
 export async function main(options: MainOptions = {}): Promise<{
@@ -38,9 +43,11 @@ export async function main(options: MainOptions = {}): Promise<{
 }> {
   const cfg = loadConfig();
   if (options.botScreenCapacity !== undefined) cfg.botScreenCapacity = options.botScreenCapacity;
+  if (options.botScreenRuntimeDir !== undefined) cfg.botScreenRuntimeDir = options.botScreenRuntimeDir;
   const db = openDb(cfg);
   recoverOnStartup(db);
   const runtimeDir = process.env.XDG_RUNTIME_DIR;
+  const applicationUnitRuntimeDir = options.useHostApplicationUnits === false ? undefined : runtimeDir;
   const workersDir = process.env.OMARCHY_BOT_WORKERS_DIR ?? path.resolve(import.meta.dir, "../../../../workers");
   const agentsDir = path.resolve(workersDir);
   const supervisor: Supervisor = new Supervisor(
@@ -65,7 +72,8 @@ export async function main(options: MainOptions = {}): Promise<{
     runtimeRoot: cfg.botScreenRuntimeDir,
     profileRoot: cfg.botScreenProfileDir,
     computerWorkers: supervisor,
-    ...(runtimeDir === undefined ? {} : { hostRuntimeDir: runtimeDir }),
+    runtimeSupply: new PortableCageRuntimeSupply({ rootDir: cfg.botScreenRuntimeSupplyDir }),
+    ...(applicationUnitRuntimeDir === undefined ? {} : { hostRuntimeDir: applicationUnitRuntimeDir }),
     ...(process.env.OMARCHY_BOT_CAGE_BIN === undefined
       ? {}
       : { cageBin: process.env.OMARCHY_BOT_CAGE_BIN }),
@@ -122,7 +130,7 @@ export async function main(options: MainOptions = {}): Promise<{
     (owner) => computer.webControlReleased(owner),
     cfg.botScreenFrameRate,
     cfg.botScreenWebRtcPort,
-    runtimeDir,
+    applicationUnitRuntimeDir,
     cfg.botScreenFfmpegBin,
   );
   const botDeletions = new BotDeletionService(

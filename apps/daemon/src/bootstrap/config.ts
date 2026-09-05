@@ -18,6 +18,8 @@ export interface Config {
   /** Transient child sockets and retained Bot-owned application profiles. */
   botScreenRuntimeDir: string;
   botScreenProfileDir: string;
+  /** Lazily provisioned portable compositor files owned by this application. */
+  botScreenRuntimeSupplyDir: string;
   conformanceDir: string;
   statusPath: string;
   /** Voxtype binary override (defaults to `voxtype` on PATH). */
@@ -123,6 +125,7 @@ export function loadConfig(): Config {
       ? path.join(runtimeDir, "omarchy-bot", "screens")
       : path.join(stateDir, "screen-runtime"),
     botScreenProfileDir: path.join(dataDir, "screens"),
+    botScreenRuntimeSupplyDir: path.join(dataDir, "runtime", "cage"),
     conformanceDir: path.join(dataDir, "conformance"),
     statusPath: path.join(stateDir, "status.json"),
     ...(voxtypeBin !== undefined ? { voxtypeBin } : {}),

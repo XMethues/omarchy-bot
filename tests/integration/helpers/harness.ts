@@ -56,9 +56,13 @@ export async function startDaemon(existingHome?: string, options: HarnessOptions
   const { main } = await import("../../../apps/daemon/src/bootstrap/main.ts");
   const daemon = options.useProductionBotScreen
     ? await main({
+        useHostApplicationUnits: false,
+        botScreenRuntimeDir: path.join(home, "r"),
         ...(options.botScreenCapacity === undefined ? {} : { botScreenCapacity: options.botScreenCapacity }),
       })
     : await main({
+        useHostApplicationUnits: false,
+        botScreenRuntimeDir: path.join(home, "r"),
         botScreenAdapter: options.botScreenAdapter ?? new FakeBotScreenRuntimeAdapter(options.botScreenFailure),
         botScreenCapacity: options.botScreenCapacity ?? 8,
       });

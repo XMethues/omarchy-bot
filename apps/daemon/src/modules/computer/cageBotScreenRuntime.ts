@@ -16,6 +16,10 @@ import { ensureInputHelper } from "../../../native/pointer-helper/build.ts";
 import { ensureBotDesktop } from "../../../native/bot-desktop/build.ts";
 import { ApplicationUnits } from "../../supervision/applicationUnits.ts";
 import {
+  resolveCageRuntimeBinaries,
+  type CageRuntimeSupply,
+} from "./cageRuntimeSupply.ts";
+import {
   BotScreenInputRejectedError,
   type BotScreenActionResult,
   type BotScreenCapture,
@@ -39,6 +43,7 @@ export interface CageAdapterOptions {
   captureHelperBin?: string;
   ffmpegBin?: string;
   botDesktopBin?: string;
+  runtimeSupply?: CageRuntimeSupply;
   computerWorkers: Pick<Supervisor, "startComputerWorker">;
 }
 
@@ -603,11 +608,16 @@ export class CageBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
       this.#units.enabled ? this.#units.launcherEnvironment(encoderEnvironment) : undefined,
     );
     await this.#units.stop(provision.surfaceId, provision.generation);
-    const cage = executable(this.options.cageBin, "cage");
-    const wlrRandr = executable(this.options.wlrRandrBin, "wlr-randr");
+    const { cageBin: cage, wlrRandrBin: wlrRandr } = await resolveCageRuntimeBinaries({
+      ...(this.options.cageBin === undefined ? {} : { cageOverride: this.options.cageBin }),
+      ...(this.options.wlrRandrBin === undefined
+        ? {}
+        : { wlrRandrOverride: this.options.wlrRandrBin }),
+      ...(this.options.runtimeSupply === undefined ? {} : { supply: this.options.runtimeSupply }),
+    });
     const grim = executable(this.options.grimBin, "grim");
-    if (cage === undefined || wlrRandr === undefined || grim === undefined) {
-      throw new Error("Cage, wlr-randr, and grim are required for the Cage Bot Screen runtime");
+    if (grim === undefined) {
+      throw new Error("grim is required for the Cage Bot Screen runtime");
     }
     const [inputHelper, captureHelper, botDesktop] = await Promise.all([
       this.options.inputHelperBin === undefined
@@ -626,6 +636,12 @@ export class CageBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
 
     const runtimeSurfaceDir = path.join(this.options.runtimeRoot, provision.surfaceId);
     const runtimeDir = path.join(runtimeSurfaceDir, String(provision.generation));
+    const waylandSocketPath = path.join(runtimeDir, "wayland-0");
+    if (Buffer.byteLength(waylandSocketPath) > 107) {
+      throw new Error(
+        `Bot Screen runtime path is too long for a private Wayland socket: ${runtimeDir}`,
+      );
+    }
     const profileDir = path.join(this.options.profileRoot, provision.surfaceId);
     const configHome = path.join(profileDir, "config");
     const stateHome = path.join(profileDir, "state");
@@ -911,19 +927,25 @@ export class CageBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
   }
 
   async #discoverSocket(runtimeDir: string, cageProcess: CageProcess): Promise<string> {
-    const deadline = Date.now() + 10_000;
-    while (Date.now() < deadline) {
-      if (cageProcess.exitCode !== null) {
-        const stderr = await new Response(cageProcess.stderr).text();
-        throw new Error(`Cage exited before readiness${stderr.trim() === "" ? "" : `: ${stderr.trim()}`}`);
-      }
-      const socket = readdirSync(runtimeDir).find((entry) =>
-        /^wayland-\d+$/.test(entry) && isSocket(path.join(runtimeDir, entry))
+    const stderr = new Response(cageProcess.stderr).text();
+    const exited = cageProcess.exited.then(async (status) => {
+      const detail = (await stderr).trim().split("\n").slice(-3).join(" ");
+      throw new Error(
+        `Cage exited before readiness with status ${status}${detail === "" ? "" : `: ${detail}`}`,
       );
-      if (socket !== undefined) return socket;
-      await Bun.sleep(20);
-    }
-    throw new Error("Cage did not create its private Wayland socket");
+    });
+    const socketReady = (async (): Promise<string> => {
+      const deadline = Date.now() + 10_000;
+      while (Date.now() < deadline) {
+        const socket = readdirSync(runtimeDir).find((entry) =>
+          /^wayland-\d+$/.test(entry) && isSocket(path.join(runtimeDir, entry))
+        );
+        if (socket !== undefined) return socket;
+        await Bun.sleep(20);
+      }
+      throw new Error("Cage did not create its private Wayland socket");
+    })();
+    return Promise.race([socketReady, exited]);
   }
 
   async #waitForDesktop(
