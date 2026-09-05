@@ -37,17 +37,32 @@ The daemon is the only SQLite writer. Agent SDKs and native protocols run behind
 
 ## Installation
 
-Install and enable Omarchy Bot through Omarchy's official plugin manager:
+Omarchy Bot is one complete Omarchy plugin. The prebuilt runtime is how that same plugin ships its web client, native helpers, and production `node_modules` — not a second product or a multi-distro Linux app.
+
+Install and enable it through Omarchy's official plugin manager on **Omarchy x86_64**:
 
 ```bash
 omarchy plugin add https://github.com/XMethues/omarchy-bot.git --enable
 ```
 
-The repository root is the plugin contract. Omarchy Shell loads `plugin/Service.qml`, which owns the daemon lifecycle. On first activation of each Git revision, the launcher copies the tracked source into a private versioned directory under `XDG_DATA_HOME`, installs the pinned Bun workspace dependencies there, and builds the web client and native Wayland helpers. The plugin checkout remains clean and fast-forwardable for `omarchy plugin update`; no Omarchy package files or host packages are modified.
+The repository root is the plugin contract. Omarchy Shell loads `plugin/Service.qml`, which owns the daemon lifecycle. On first activation of each Git revision, `plugin/launch.sh` resolves Bun (PATH, then `mise`, then a pinned official Bun binary under `OMARCHY_BOT_HOME`) and prefers the published runtime for that exact HEAD SHA:
 
-Omarchy Bot supports Omarchy on x86_64 only. Other Linux distributions, standalone service installation, and generic Linux release archives are outside the supported product contract.
+```text
+https://github.com/XMethues/omarchy-bot/releases/download/runtime-<gitsha>/omarchy-bot-runtime-<gitsha>-x86_64.tar.zst
+https://github.com/XMethues/omarchy-bot/releases/download/runtime-<gitsha>/omarchy-bot-runtime-<gitsha>-x86_64.tar.zst.sha256
+```
+
+Downloads are HTTPS-only and SHA-256 verified, then extracted into `$XDG_DATA_HOME/omarchy-bot/app/<sha>/`. CI also uploads a GitHub Actions artifact with the same basename; launch uses the public release URL above for main SHAs. If no artifact exists for that SHA (local or unpublished checkouts), the launcher falls back to a source-build. The plugin checkout remains clean and fast-forwardable for `omarchy plugin update`; no Omarchy package files or host packages are modified.
+
+Plugin users do not need Bun, a C/Wayland toolchain, or Vite on PATH. Bun is self-supplied when missing. `grim` and FFmpeg are host applications already present on Omarchy and are not fetched at enable time. Cage stays lazy: it is resolved on the first Bot Screen, not during plugin enable.
+
+Launch failures are written to `$XDG_STATE_HOME/omarchy-bot/plugin-launch.log` and surfaced with `notify-send` when available.
+
+Other Linux distributions, standalone service installation, and generic Linux release archives are outside the supported product contract.
 
 ## Development
+
+Source-build and local development still need a compile toolchain. That list applies to Development and to the unpublished-SHA fallback, not to plugin users on a published `main` revision.
 
 Requirements:
 
