@@ -112,6 +112,29 @@ function coordination(h: Harness, surfaceId: ComputerSurfaceOwner["surfaceId"]):
     } | null;
 }
 
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function until<T>(
+  probe: () => T | undefined | Promise<T | undefined>,
+  timeoutMs: number,
+  message: string,
+): Promise<T> {
+  const deadline = performance.now() + timeoutMs;
+  for (;;) {
+    const value = await probe();
+    if (value !== undefined) return value;
+    if (performance.now() >= deadline) throw new Error(message);
+    await Bun.sleep(20);
+  }
+}
+
 function waitFor<T>(
   description: string,
   subscribe: (resolve: (value: T) => void, reject: (error: Error) => void) => void,
@@ -573,6 +596,366 @@ describe("WebRTC Screen Projection signaling", () => {
     });
   }, 15_000);
 
+  test("expanding one viewer does not tear down another client's preview of the same Screen", async () => {
+    const owner = await ownerFor(h, await makeBot(h, "Shared preview viewers"));
+    const preview = await connectProjection(h, owner, "remaining-preview-viewer");
+    const expanded = await connectProjection(h, owner, "expanded-sibling-viewer");
+    peer = expanded.peer;
+
+    const firstPreviewFrame = waitFor<void>(
+      "remaining preview first frame",
+      (resolve) => preview.frames.onMessage((raw) => {
+        if (typeof raw === "string") resolve();
+      }),
+    );
+    expect(preview.control.sendMessage(JSON.stringify({
+      version: SCREEN_PROJECTION_PROTOCOL_VERSION,
+      type: "view",
+      surfaceId: owner.surfaceId,
+      runtimeGeneration: preview.answer.runtimeGeneration,
+      mode: "preview",
+    }))).toBeTrue();
+    await firstPreviewFrame;
+
+    const expandedFrame = waitFor<void>(
+      "sibling expanded video frame",
+      (resolve) => expanded.video.onMessage(() => resolve()),
+    );
+    expect(expanded.control.sendMessage(JSON.stringify({
+      version: SCREEN_PROJECTION_PROTOCOL_VERSION,
+      type: "view",
+      surfaceId: owner.surfaceId,
+      runtimeGeneration: expanded.answer.runtimeGeneration,
+      mode: "expanded",
+    }))).toBeTrue();
+    await expandedFrame;
+
+    expect(preview.control.isOpen()).toBeTrue();
+    expect(preview.frames.isOpen()).toBeTrue();
+    expect(h.svc.projections.status(owner, preview.answer.sessionId)).toMatchObject({
+      state: "preview",
+      mode: "preview",
+    });
+
+    const laterPreviewFrame = waitFor<void>(
+      "remaining preview frame after sibling expanded",
+      (resolve) => preview.frames.onMessage((raw) => {
+        if (typeof raw === "string") resolve();
+      }),
+    );
+    await laterPreviewFrame;
+    expect(preview.control.isOpen()).toBeTrue();
+    await closePeer(preview.peer);
+  }, 15_000);
+
+  test("the last viewer releases capture and encoding without stopping the Bot Desktop", async () => {
+    const owner = await ownerFor(h, await makeBot(h, "Last viewer media release"));
+    const connection = await connectProjection(h, owner, "last-viewer-browser");
+    peer = connection.peer;
+    const firstFrame = waitFor<void>(
+      "last-viewer expanded frame",
+      (resolve) => connection.video.onMessage(() => resolve()),
+    );
+    expect(connection.control.sendMessage(JSON.stringify({
+      version: SCREEN_PROJECTION_PROTOCOL_VERSION,
+      type: "view",
+      surfaceId: owner.surfaceId,
+      runtimeGeneration: connection.answer.runtimeGeneration,
+      mode: "expanded",
+    }))).toBeTrue();
+    await firstFrame;
+
+    const whileViewed = h.svc.projections.surfaceMedia(owner.surfaceId);
+    expect(whileViewed).toMatchObject({
+      viewers: 1,
+      expandedViewers: 1,
+      captureActive: true,
+      encodingActive: true,
+    });
+    expect(whileViewed.encoderPids.length).toBeGreaterThan(0);
+    const encoderPids = [...whileViewed.encoderPids];
+    expect(encoderPids.every(processAlive)).toBeTrue();
+    expect(adapter.running(owner.surfaceId)).toEqual({ generation: 1 });
+
+    const closed = await fetch(
+      `${h.baseUrl}/api/computer/projection?botId=${encodeURIComponent(owner.botId)}&surfaceId=${encodeURIComponent(owner.surfaceId)}`,
+      {
+        method: "DELETE",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ sessionId: connection.answer.sessionId }),
+      },
+    );
+    expect(closed.status).toBe(204);
+    await adapter.waitForCaptureStreamsClosed(1);
+    await until(
+      () => {
+        const idle = h.svc.projections.surfaceMedia(owner.surfaceId);
+        if (idle.viewers !== 0 || idle.captureActive || idle.encodingActive || idle.encoderPids.length !== 0) {
+          return undefined;
+        }
+        return encoderPids.some(processAlive) ? undefined : idle;
+      },
+      5_000,
+      "last viewer did not release capture and encoding",
+    );
+    expect(adapter.running(owner.surfaceId)).toEqual({ generation: 1 });
+    expect(adapter.stops).toEqual([]);
+
+    const snapshot = await fetch(
+      `${h.baseUrl}/api/computer/snapshot?botId=${encodeURIComponent(owner.botId)}&surfaceId=${encodeURIComponent(owner.surfaceId)}`,
+    );
+    expect(snapshot.status).toBe(200);
+    expect(snapshot.headers.get("content-type")).toBe("image/png");
+    const screenshot = await h.svc.screens.act(owner, { name: "screenshot", args: {} });
+    expect(screenshot.image?.mediaType).toBe("image/png");
+    expect(screenshot.image?.bytes.byteLength).toBeGreaterThan(0);
+    await h.svc.screens.act(
+      owner,
+      { name: "open_app", args: { app: "fixture-after-viewer.desktop" } },
+      { ...owner, turnId: "after-last-viewer" },
+    );
+    expect(adapter.running(owner.surfaceId)).toEqual({ generation: 1 });
+    expect(h.svc.screens.status(owner)).toEqual({ state: "ready" });
+  }, 15_000);
+
+  test("leaving expanded releases encoding while another preview viewer keeps capture", async () => {
+    const owner = await ownerFor(h, await makeBot(h, "Expanded encode release"));
+    const preview = await connectProjection(h, owner, "compact-preview-viewer");
+    const expanded = await connectProjection(h, owner, "leaving-expanded-viewer");
+    peer = expanded.peer;
+
+    const previewFrame = waitFor<void>(
+      "compact preview frame before expand exit",
+      (resolve) => preview.frames.onMessage((raw) => {
+        if (typeof raw === "string") resolve();
+      }),
+    );
+    expect(preview.control.sendMessage(JSON.stringify({
+      version: SCREEN_PROJECTION_PROTOCOL_VERSION,
+      type: "view",
+      surfaceId: owner.surfaceId,
+      runtimeGeneration: preview.answer.runtimeGeneration,
+      mode: "preview",
+    }))).toBeTrue();
+    await previewFrame;
+
+    const expandedFrame = waitFor<void>(
+      "expanded frame before encode release",
+      (resolve) => expanded.video.onMessage(() => resolve()),
+    );
+    expect(expanded.control.sendMessage(JSON.stringify({
+      version: SCREEN_PROJECTION_PROTOCOL_VERSION,
+      type: "view",
+      surfaceId: owner.surfaceId,
+      runtimeGeneration: expanded.answer.runtimeGeneration,
+      mode: "expanded",
+    }))).toBeTrue();
+    await expandedFrame;
+    const encoderPids = [...h.svc.projections.surfaceMedia(owner.surfaceId).encoderPids];
+    expect(encoderPids.length).toBeGreaterThan(0);
+    expect(h.svc.projections.surfaceMedia(owner.surfaceId)).toMatchObject({
+      viewers: 2,
+      previewViewers: 1,
+      expandedViewers: 1,
+      encodingActive: true,
+      captureActive: true,
+    });
+
+    expect(expanded.control.sendMessage(JSON.stringify({
+      version: SCREEN_PROJECTION_PROTOCOL_VERSION,
+      type: "view",
+      surfaceId: owner.surfaceId,
+      runtimeGeneration: expanded.answer.runtimeGeneration,
+      mode: "preview",
+    }))).toBeTrue();
+    await until(
+      () => {
+        const media = h.svc.projections.surfaceMedia(owner.surfaceId);
+        if (media.encodingActive || media.expandedViewers !== 0 || media.previewViewers !== 2) return undefined;
+        return encoderPids.some(processAlive) ? undefined : media;
+      },
+      5_000,
+      "leaving expanded did not release unused encoding",
+    );
+    expect(preview.control.isOpen()).toBeTrue();
+    const laterPreview = waitFor<void>(
+      "compact preview after expanded encoding stopped",
+      (resolve) => preview.frames.onMessage((raw) => {
+        if (typeof raw === "string") resolve();
+      }),
+    );
+    await laterPreview;
+    expect(adapter.running(owner.surfaceId)).toEqual({ generation: 1 });
+    expect(adapter.stops).toEqual([]);
+    await closePeer(preview.peer);
+  }, 15_000);
+
+  test("switching from Bot A to Bot B replaces only that client's projection", async () => {
+    const ownerA = await ownerFor(h, await makeBot(h, "Switch source A"));
+    const ownerB = await ownerFor(h, await makeBot(h, "Switch target B"));
+    const viewA = await connectProjection(h, ownerA, "switch-from-a");
+    peer = viewA.peer;
+    const frameA = waitFor<void>(
+      "Bot A preview before switch",
+      (resolve) => viewA.frames.onMessage((raw) => {
+        if (typeof raw === "string") resolve();
+      }),
+    );
+    expect(viewA.control.sendMessage(JSON.stringify({
+      version: SCREEN_PROJECTION_PROTOCOL_VERSION,
+      type: "view",
+      surfaceId: ownerA.surfaceId,
+      runtimeGeneration: viewA.answer.runtimeGeneration,
+      mode: "preview",
+    }))).toBeTrue();
+    await frameA;
+    expect(adapter.running(ownerA.surfaceId)).toEqual({ generation: 1 });
+
+    adapter.blockActions();
+    const turnA = await sendToBot(h, ownerA.botId, "computer:observe");
+    await adapter.waitForActions(1);
+
+    const viewB = await connectProjection(h, ownerB, "switch-to-b");
+    const frameB = waitFor<void>(
+      "Bot B preview after switch",
+      (resolve) => viewB.frames.onMessage((raw) => {
+        if (typeof raw === "string") resolve();
+      }),
+    );
+    expect(viewB.control.sendMessage(JSON.stringify({
+      version: SCREEN_PROJECTION_PROTOCOL_VERSION,
+      type: "view",
+      surfaceId: ownerB.surfaceId,
+      runtimeGeneration: viewB.answer.runtimeGeneration,
+      mode: "preview",
+    }))).toBeTrue();
+    await frameB;
+
+    const closedA = await fetch(
+      `${h.baseUrl}/api/computer/projection?botId=${encodeURIComponent(ownerA.botId)}&surfaceId=${encodeURIComponent(ownerA.surfaceId)}`,
+      {
+        method: "DELETE",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ sessionId: viewA.answer.sessionId }),
+      },
+    );
+    expect(closedA.status).toBe(204);
+    await adapter.waitForCaptureStreamsClosed(1);
+    await until(
+      () => {
+        const idleA = h.svc.projections.surfaceMedia(ownerA.surfaceId);
+        return idleA.viewers === 0 && !idleA.captureActive && !idleA.encodingActive ? idleA : undefined;
+      },
+      5_000,
+      "switching away from A did not release its viewer-driven media",
+    );
+    expect(h.svc.projections.status(ownerA, viewA.answer.sessionId)).toBeUndefined();
+    expect(h.svc.projections.status(ownerB, viewB.answer.sessionId)).toMatchObject({
+      state: "preview",
+      mode: "preview",
+    });
+    expect(viewB.control.isOpen()).toBeTrue();
+    expect(adapter.running(ownerA.surfaceId)).toEqual({ generation: 1 });
+    expect(adapter.stops).toEqual([]);
+    expect(h.svc.screens.status(ownerA)).toEqual({ state: "ready" });
+    expect(h.svc.screens.status(ownerB)).toEqual({ state: "ready" });
+
+    adapter.releaseActions();
+    await waitThreadIdle(h, turnA.threadId);
+    const laterB = waitFor<void>(
+      "Bot B preview continues after A media release",
+      (resolve) => viewB.frames.onMessage((raw) => {
+        if (typeof raw === "string") resolve();
+      }),
+    );
+    await laterB;
+    const snapshotA = await fetch(
+      `${h.baseUrl}/api/computer/snapshot?botId=${encodeURIComponent(ownerA.botId)}&surfaceId=${encodeURIComponent(ownerA.surfaceId)}`,
+    );
+    expect(snapshotA.status).toBe(200);
+    expect(adapter.starts.filter((start) => start.surfaceId === ownerA.surfaceId)).toHaveLength(1);
+    await closePeer(viewB.peer);
+  }, 15_000);
+
+  test("a second expanded viewer takes input without tearing down the first video stream", async () => {
+    const owner = await ownerFor(h, await makeBot(h, "Two expanded viewers"));
+    const first = await connectProjection(h, owner, "first-expanded-viewer");
+    const second = await connectProjection(h, owner, "second-expanded-viewer");
+    peer = second.peer;
+
+    const firstAuthority = authority(first.input);
+    const firstFrame = waitFor<void>(
+      "first expanded video frame",
+      (resolve) => first.video.onMessage(() => resolve()),
+    );
+    expect(first.control.sendMessage(JSON.stringify({
+      version: SCREEN_PROJECTION_PROTOCOL_VERSION,
+      type: "view",
+      surfaceId: owner.surfaceId,
+      runtimeGeneration: first.answer.runtimeGeneration,
+      mode: "expanded",
+    }))).toBeTrue();
+    const granted = await firstAuthority;
+    await firstFrame;
+
+    const firstRevoked = authority(first.input, false);
+    const laterFirstVideo = waitFor<void>(
+      "first expanded video after sibling claimed input",
+      (resolve) => first.video.onMessage(() => resolve()),
+    );
+    const secondAuthority = authority(second.input);
+    const secondFrame = waitFor<void>(
+      "second expanded video frame",
+      (resolve) => second.video.onMessage(() => resolve()),
+    );
+    expect(second.control.sendMessage(JSON.stringify({
+      version: SCREEN_PROJECTION_PROTOCOL_VERSION,
+      type: "view",
+      surfaceId: owner.surfaceId,
+      runtimeGeneration: second.answer.runtimeGeneration,
+      mode: "expanded",
+    }))).toBeTrue();
+    await secondFrame;
+    await secondAuthority;
+    await firstRevoked;
+
+    expect(first.control.isOpen()).toBeTrue();
+    expect(first.input.isOpen()).toBeTrue();
+    await laterFirstVideo;
+    expect(h.svc.projections.status(owner, first.answer.sessionId)).toMatchObject({
+      state: "expanded",
+      mode: "expanded",
+    });
+    expect(h.svc.projections.surfaceMedia(owner.surfaceId)).toMatchObject({
+      viewers: 2,
+      expandedViewers: 2,
+      encodingActive: true,
+    });
+    expect(coordination(h, owner.surfaceId)).toMatchObject({ authority_kind: "web" });
+    expect(first.input.sendMessage(JSON.stringify({
+      version: SCREEN_PROJECTION_PROTOCOL_VERSION,
+      type: "pointer-motion",
+      surfaceId: owner.surfaceId,
+      runtimeGeneration: first.answer.runtimeGeneration,
+      geometryGeneration: first.answer.geometryGeneration,
+      controllerEpoch: granted.controllerEpoch,
+      sequence: 1,
+      x: 10,
+      y: 10,
+    }))).toBeTrue();
+    await until(
+      () => first.control.isOpen() ? undefined : true,
+      2_000,
+      "stale first-controller input was not rejected",
+    );
+    expect(h.svc.projections.status(owner, second.answer.sessionId)).toMatchObject({
+      state: "expanded",
+      mode: "expanded",
+    });
+    expect(second.control.isOpen()).toBeTrue();
+    await closePeer(first.peer);
+  }, 15_000);
+
 
   test("reconnect replaces stale media and awaits the old Surface pipeline before starting another", async () => {
     const owner = await ownerFor(h, await makeBot(h, "Reconnected projection"));
@@ -588,6 +971,10 @@ describe("WebRTC Screen Projection signaling", () => {
     }))).toBeTrue();
     await firstFrame;
 
+    expect(await h.svc.projections.close(owner, first.answer.sessionId)).toBeTrue();
+    await adapter.waitForCaptureStreamsClosed(1);
+    expect(first.control.isOpen()).toBeFalse();
+
     const replacement = await connectProjection(h, owner, "replacement-reconnect-browser");
     peer = replacement.peer;
     const replacementFrame = waitFor<void>(
@@ -602,9 +989,7 @@ describe("WebRTC Screen Projection signaling", () => {
       mode: "expanded",
     }))).toBeTrue();
     await replacementFrame;
-    await adapter.waitForCaptureStreamsClosed(1);
 
-    expect(first.control.isOpen()).toBeFalse();
     expect(replacement.answer.runtimeGeneration).toBe(first.answer.runtimeGeneration);
     expect(adapter.captureStreamsOpened).toBe(2);
     expect(h.svc.projections.status(owner, replacement.answer.sessionId)).toMatchObject({

@@ -7,9 +7,14 @@ export default defineConfig(({ command }) => ({
   plugins: [
     tanstackRouter({ target: "react", routesDirectory: "src/routes", generatedRouteTree: "src/routeTree.gen.ts" }),
     react(),
-    stylex({ dev: command === "development", unstable_moduleResolution: { type: "commonJS" } }),
+    stylex({
+      dev: command === "serve",
+      runtimeInjection: command === "serve",
+      unstable_moduleResolution: { type: "commonJS" },
+    }),
     {
       name: "stylex-stylesheet",
+      apply: "build",
       transformIndexHtml: {
         order: "post",
         handler: () => [{ tag: "link", attrs: { rel: "stylesheet", href: "/stylex.css" }, injectTo: "head" }],

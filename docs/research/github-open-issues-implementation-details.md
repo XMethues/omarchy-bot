@@ -2,6 +2,8 @@
 
 Research date: 2026-09-04
 
+> **Current authority (2026-09-05):** this note is historical implementation research. Do not implement Changes, a Git working-tree panel, or daemon-cwd fallback from the #5 recommendation below. Composer dock and Computer Surface behavior remain in [the product boundary](../workspace-redesign.md#shared-workspace-and-plugin-boundary) and [the current implementation specification](../../.scratch/shared-workspace-desktop-boundary/spec.md). Accounting: [requirement map](../../.scratch/shared-workspace-desktop-boundary/requirement-map.md).
+
 Scope: the three open issues currently listed for `XMethues/omarchy-bot`: [#2](https://github.com/XMethues/omarchy-bot/issues/2), [#3](https://github.com/XMethues/omarchy-bot/issues/3), and [#5](https://github.com/XMethues/omarchy-bot/issues/5).
 
 ## Executive decisions
@@ -10,14 +12,14 @@ Scope: the three open issues currently listed for `XMethues/omarchy-bot`: [#2](h
 | --- | --- | --- |
 | [#2 Bot-to-bot in-app mailbox](https://github.com/XMethues/omarchy-bot/issues/2) | Not implemented. The current Thread and Agent-worker contracts cannot represent durable peer delivery or attribution. | Implement after a Workspace/Agent Integration ADR fixes the v1 conversation, delivery, retry, and deletion semantics. Use target-owned, user-visible Threads plus a durable delivery queue; do not turn this into A2A/RPC. |
 | [#3 Bot Screen transport/Desktop](https://github.com/XMethues/omarchy-bot/issues/3) | Its transport and compositor assumptions are superseded. Cage, PNG preview, H.264 Expanded Web Control, persistent neutral Bot Desktop, and removal of Alacritty are already implemented and verified. | Close as superseded/resolved. Do not implement its nested-Hyprland or data-channel-frame direction. Track richer Desktop chrome separately only if the newer neutral-Desktop decision is intentionally changed. |
-| [#5 Composer dock + Changes/Browser panel](https://github.com/XMethues/omarchy-bot/issues/5) | Not implemented, but it fits existing Astryx and Computer Surface seams. | Implement incrementally. Composer chrome is a small web-only cut. Browser v1 should host the existing Computer Surface. Changes v1 should report the effective Thread Git working tree, explicitly without Agent attribution. |
+| [#5 Composer dock + Changes/Browser panel](https://github.com/XMethues/omarchy-bot/issues/5) | Composer dock and Computer Surface were later implemented; Changes is now a superseded product capability. | Do not implement Changes. Keep Composer and the Computer Surface. Removal of Changes is an implementation gap tracked by the current boundary specification, not by this research note. |
 
-Recommended order:
+Recommended order (historical 2026-09-04; step 4 is withdrawn):
 
 1. Close #3 with links to the superseding ADR, resolved implementation tickets, and capacity approval.
 2. Ship #5 Composer chrome.
-3. Refactor the existing Computer Surface into #5's Browser tab without changing its protocol.
-4. Add #5's Git-backed Changes API and UI.
+3. Keep the existing Computer Surface as the Computer entry; do not treat a Changes/Browser tab pair as current IA.
+4. Do not add a Git-backed Changes API or UI. That recommendation is superseded by ADR 0009.
 5. Resolve #2's domain decisions in an ADR, then implement its persistence/worker/UI vertical slice.
 
 # Issue #2 — Bot-to-bot in-app mailbox
@@ -233,6 +235,8 @@ One documentation cleanup is appropriate: `docs/research/grok-screen-transport.m
 
 # Issue #5 — Composer dock and Changes/Browser right region
 
+> Historical implementation notes for #5. Composer and Computer Surface remain current. The Changes API, DTOs, polling, and tab pairing below are not current instructions.
+
 ## Composer: existing Astryx API already fits
 
 Current composition is in `apps/web/src/components/ChatPanel.tsx`:
@@ -397,7 +401,7 @@ Workspace browser coverage should assert:
 # Cross-issue dependencies and risks
 
 - #5 Browser depends on the current #3 implementation, but that dependency is already complete. It must reuse the Cage/H.264 Computer Surface rather than code against #3's obsolete data-channel/Hyprland wording.
-- #5 Changes and #2 both touch daemon protocol/API wiring and `apps/web/src/routes/index.tsx`, but they have no semantic dependency. Implement them as separate vertical cuts to avoid one oversized migration.
+- #5 Changes and #2 both touched daemon protocol/API wiring. Changes is no longer a current product requirement; do not implement it as a follow-on cut.
 - #2 is the only issue that changes the domain model and Agent-worker contract. It needs the strongest migration, restart, idempotency, and deletion proof.
 - #5's Git data is workspace state, not Agent provenance. Any future “changes made by this Bot” claim requires causal instrumentation at the tool/Turn layer and cannot be inferred retrospectively from a shared checkout.
 - The host graphical session remains out of scope. #3's production Bot Screens use private runtime/profile directories; no issue here requires changing or restarting the host compositor or session services.

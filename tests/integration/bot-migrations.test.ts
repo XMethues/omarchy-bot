@@ -5,7 +5,8 @@ import path from "node:path";
 import { Database } from "bun:sqlite";
 import { applyMigration, MIGRATIONS, openDb } from "../../apps/daemon/src/persistence/db.ts";
 import { renderAvatarRecipe } from "../../apps/web/src/components/avatarRenderer.ts";
-import { AVATAR_RENDERER_ID, AvatarRecipeDto, type MessageDto } from "../../packages/protocol/src/index.ts";
+import { AVATAR_RENDERER_ID, AvatarRecipeDto, type MessageDto, type ToolCallSummaryDto } from "../../packages/protocol/src/index.ts";
+import { isToolCallSummary, TOOL_CALL_INTERRUPTED_ERROR_SUMMARY } from "../../packages/domain/src/index.ts";
 import { api, makeBot, startDaemon, type Harness } from "./helpers/harness.ts";
 import { BotScreenManager } from "../../apps/daemon/src/modules/computer/botScreenManager.ts";
 import { FakeBotScreenRuntimeAdapter } from "../../apps/daemon/src/modules/computer/fakeBotScreenRuntime.ts";
@@ -80,7 +81,7 @@ function deployedArchivelessDatabase(): { dbPath: string; home: string } {
 
 describe("integration: deployed schema convergence", () => {
   test("keeps Bot Screen and divergent-ledger migrations in dependency order", () => {
-    expect(MIGRATIONS.slice(-12).map((migration) => migration.name)).toEqual([
+    expect(MIGRATIONS.slice(-13).map((migration) => migration.name)).toEqual([
       "0010-bot-computer-surfaces",
       "0011-redacted-input-diagnostics",
       "0012-bot-screen-contract",
@@ -93,6 +94,7 @@ describe("integration: deployed schema convergence", () => {
       "0016-bot-display-settings",
       "0017-ordered-transcript-repair",
       "0018-durable-bot-mail",
+      "0019-legacy-tool-call-summaries",
     ]);
   });
 
@@ -285,6 +287,183 @@ describe("integration: deployed schema convergence", () => {
         },
         createdAt,
       }]);
+    } finally {
+      await daemon?.stop();
+      rmSync(home, { recursive: true, force: true });
+    }
+  }, 15_000);
+
+  test("upgrades deployed legacy Tool Calls without exposing or losing native data", async () => {
+    const home = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-tool-migration-"));
+    const migrationName = "0019-legacy-tool-call-summaries";
+    const createdAt = "2026-09-05T05:30:00.000Z";
+    const legacyId = "1ad7b030-6454-4ef0-aa84-c9a667a60503";
+    const cases: {
+      id: string;
+      state: string;
+      isError?: boolean;
+      status: ToolCallSummaryDto["status"];
+      errorSummary?: string;
+    }[] = [
+      { id: legacyId, state: "complete", isError: false, status: "completed" },
+      { id: "legacy-tool-failed", state: "complete", isError: true, status: "error", errorSummary: "Tool call failed." },
+      { id: "legacy-tool-error", state: "error", isError: false, status: "error", errorSummary: "Tool call failed." },
+      { id: "legacy-tool-running", state: "running", isError: false, status: "error", errorSummary: TOOL_CALL_INTERRUPTED_ERROR_SUMMARY },
+      { id: "legacy-tool-started-only", state: "running", status: "error", errorSummary: TOOL_CALL_INTERRUPTED_ERROR_SUMMARY },
+      { id: "legacy-tool-completed", state: "completed", isError: false, status: "completed" },
+    ];
+    const modern: ToolCallSummaryDto = {
+      id: "native-modern",
+      name: "edit",
+      status: "completed",
+      target: "safe file.ts",
+      durationMs: 12,
+      additions: 2,
+      deletions: 1,
+    };
+    let daemon: Harness | undefined;
+    try {
+      daemon = await startDaemon(home);
+      const botId = await makeBot(daemon, "Legacy Tool Bot");
+      const thread = daemon.svc.threads.createThread(botId, { title: "Retained tools" });
+      const messagesPath = `/api/threads/${thread.id}/messages`;
+      daemon.svc.db.exec("ALTER TABLE messages DROP COLUMN legacy_tool_data");
+      const nativeRows = cases.map((entry) => ({
+        id: entry.id,
+        payload: JSON.stringify({
+          toolId: `native-${entry.id}`,
+          name: "bash",
+          input: { command: "sentinel-secret-input" },
+          state: entry.state,
+          ...(entry.isError === undefined ? {} : { output: { content: [{ type: "text", text: "sentinel-secret-output" }] } }),
+          isError: entry.isError,
+        }),
+        text: entry.id === "legacy-tool-error" ? "sentinel-secret-diagnostic" : null,
+      }));
+      daemon.svc.db.exec("PRAGMA ignore_check_constraints = ON");
+      const insert = daemon.svc.db.query(
+        `INSERT INTO messages (id, thread_id, seq, author_kind, kind, text, payload, created_at, turn_id)
+         VALUES (?, ?, ?, 'bot', 'tool', ?, ?, ?, ?)`,
+      );
+      for (const [index, row] of nativeRows.entries()) {
+        expect(isToolCallSummary(JSON.parse(row.payload))).toBeFalse();
+        insert.run(row.id, thread.id, index + 1, row.text, row.payload, createdAt, null);
+      }
+      daemon.svc.db.query(
+        `INSERT INTO turns (id, thread_id, bot_id, status, native_session_id, steer_count, started_at, finished_at)
+         VALUES ('modern-tool-turn', ?, ?, 'completed', '', 0, ?, ?)`,
+      ).run(thread.id, botId, createdAt, createdAt);
+      insert.run("modern-tool-message", thread.id, cases.length + 1, null, JSON.stringify(modern), createdAt, "modern-tool-turn");
+      daemon.svc.db.exec("PRAGMA ignore_check_constraints = OFF");
+      const modernBefore = daemon.svc.db.query<Record<string, unknown>, []>(
+        `SELECT * FROM messages WHERE id = 'modern-tool-message'`,
+      ).get()!;
+
+      await expect(api(daemon, "GET", messagesPath)).rejects.toThrow(
+        `Tool Call message ${legacyId} has no valid safe summary`,
+      );
+      daemon.svc.db.query(`DELETE FROM schema_migrations WHERE name = ?`).run(migrationName);
+      await daemon.disconnectForRestart();
+      daemon = undefined;
+
+      daemon = await startDaemon(home);
+      const repaired = await api<MessageDto[]>(daemon, "GET", messagesPath);
+      expect(repaired).toEqual([
+        ...cases.map<MessageDto>((entry, index) => ({
+          id: entry.id,
+          threadId: thread.id,
+          seq: index + 1,
+          author: { kind: "bot" },
+          kind: "tool",
+          toolCall: {
+            id: `native-${entry.id}`,
+            name: "bash",
+            status: entry.status,
+            ...(entry.errorSummary === undefined ? {} : { errorSummary: entry.errorSummary }),
+          },
+          createdAt,
+        })),
+        {
+          id: "modern-tool-message",
+          threadId: thread.id,
+          seq: cases.length + 1,
+          author: { kind: "bot" },
+          kind: "tool",
+          toolCall: modern,
+          createdAt,
+        },
+      ]);
+      expect(JSON.stringify(repaired)).not.toContain("sentinel-secret");
+      for (const row of nativeRows) {
+        const stored = daemon.svc.db.query<{ legacy_tool_data: string; text: null }, [string]>(
+          `SELECT legacy_tool_data, text FROM messages WHERE id = ?`,
+        ).get(row.id)!;
+        expect(JSON.parse(stored.legacy_tool_data)).toEqual({ payload: row.payload, text: row.text });
+        expect(stored.text).toBeNull();
+      }
+      expect(daemon.svc.db.query(`SELECT * FROM messages WHERE id = 'modern-tool-message'`).get()).toEqual({
+        ...modernBefore,
+        legacy_tool_data: null,
+      });
+      expect(daemon.svc.db.query(
+        `SELECT DISTINCT status, finished_at, outcome_reason FROM turns WHERE id LIKE 'legacy-turn-%'`,
+      ).all()).toEqual([{
+        status: "failed",
+        finished_at: null,
+        outcome_reason: "Historical Tool Call has no recorded Turn outcome.",
+      }]);
+      expect(daemon.svc.db.query(`PRAGMA foreign_key_check`).all()).toEqual([]);
+      const storedBeforeReboot = daemon.svc.db.query(`SELECT * FROM messages ORDER BY seq`).all();
+      await daemon.disconnectForRestart();
+      daemon = undefined;
+
+      daemon = await startDaemon(home);
+      expect(await api<MessageDto[]>(daemon, "GET", messagesPath)).toEqual(repaired);
+      expect(daemon.svc.db.query(`SELECT * FROM messages ORDER BY seq`).all()).toEqual(storedBeforeReboot);
+      expect(daemon.svc.db.query(
+        `SELECT COUNT(*) AS count FROM schema_migrations WHERE name = ?`,
+      ).get(migrationName)).toEqual({ count: 1 });
+      applyMigration(daemon.svc.db, MIGRATIONS.find((migration) => migration.name === migrationName)!);
+      expect(daemon.svc.db.query(`SELECT * FROM messages ORDER BY seq`).all()).toEqual(storedBeforeReboot);
+    } finally {
+      await daemon?.stop();
+      rmSync(home, { recursive: true, force: true });
+    }
+  }, 15_000);
+
+  test("keeps unrecognized Tool Call payloads subject to strict summary validation", async () => {
+    const home = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-unknown-tool-migration-"));
+    let daemon: Harness | undefined;
+    try {
+      daemon = await startDaemon(home);
+      const botId = await makeBot(daemon, "Unknown Tool Bot");
+      const thread = daemon.svc.threads.createThread(botId, { title: "Unrecognized tool" });
+      const payload = JSON.stringify({
+        toolId: "unknown-native-tool",
+        name: "bash",
+        state: "unknown",
+        input: { command: "sentinel-secret-input" },
+        output: { text: "sentinel-secret-output" },
+        isError: false,
+      });
+      daemon.svc.db.exec("PRAGMA ignore_check_constraints = ON");
+      daemon.svc.db.query(
+        `INSERT INTO messages (id, thread_id, seq, author_kind, kind, payload, created_at)
+         VALUES ('unknown-tool-message', ?, 1, 'bot', 'tool', ?, '2026-09-05T05:30:00.000Z')`,
+      ).run(thread.id, payload);
+      daemon.svc.db.exec("PRAGMA ignore_check_constraints = OFF");
+      daemon.svc.db.query(
+        `DELETE FROM schema_migrations WHERE name = '0019-legacy-tool-call-summaries'`,
+      ).run();
+      const before = daemon.svc.db.query(`SELECT * FROM messages WHERE id = 'unknown-tool-message'`).get();
+      await daemon.disconnectForRestart();
+      daemon = undefined;
+
+      daemon = await startDaemon(home);
+      await expect(api(daemon, "GET", `/api/threads/${thread.id}/messages`)).rejects.toThrow(
+        "Tool Call message unknown-tool-message has no valid safe summary",
+      );
+      expect(daemon.svc.db.query(`SELECT * FROM messages WHERE id = 'unknown-tool-message'`).get()).toEqual(before);
     } finally {
       await daemon?.stop();
       rmSync(home, { recursive: true, force: true });

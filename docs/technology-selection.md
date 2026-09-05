@@ -14,8 +14,8 @@ Styling:               Astryx tokens with product-owned layout styles
 Frontend data:         TanStack Router + Query + Virtual where needed
 Desktop integration:   systemd user service + localhost API
 Computer backend:      computer-use-linux behind computer-worker
-Bot Screen runtime:   one pure-headless Cage + persistent Bot Desktop per Bot
-Screen Projection:    low-frequency PNG preview + WebRTC H.264 Web Control
+Bot Screen runtime:    on-demand pure-headless Cage Bot Desktop Session per Bot
+Screen Projection:     selected-view PNG preview + WebRTC H.264 Web Control
 Voice input:           Voxtype through the localhost daemon
 Persistence:           SQLite + daemon-managed local media
 ```
@@ -26,9 +26,11 @@ The daemon owns product state, SQLite, the REST/WebSocket API, process supervisi
 
 Workers start on demand by Agent, not by visible Bot. Several user-created Bots may share one Agent worker/runtime while retaining independent native sessions.
 
-The production daemon runs as a systemd user service with a fixed Bun runtime and absolute paths. Omarchy Shell integration may launch or summarize the product, but it does not own the daemon lifecycle.
+Deployment follows the [Omarchy plugin contract](../README.md#installation), including Omarchy Shell's ownership of daemon lifecycle. Bot Desktop Sessions are separately supervised application processes, not additional host graphical login sessions.
 
 Bot Screens do not inherit the user's Wayland display. The daemon provisions Cage directly with private runtime directories and headless outputs; no runtime selector or fallback compositor is supported. The HTTP PNG snapshot remains a read-only recovery path and never substitutes an interactive live transport.
+
+The [accepted product boundary](workspace-redesign.md#shared-workspace-and-plugin-boundary) separates Shared Workspace files, Agent-owned execution, Bot desktop infrastructure, and client projections. [System ADR 0009](adr/0009-share-work-files-isolate-bot-screens.md) governs on-demand lifetime and resource acceptance; application profile/login policy and work-file locking are not part of the desktop stack. A transport change to VNC or SSH is not a substitute for independent display/input endpoints.
 
 ## Agent integration rule
 
@@ -37,6 +39,8 @@ Use the richest official interface for each Agent. Every installed version must 
 ## Web UI
 
 Use React 19 because Astryx and the stable TanStack React adapters cover the required accessible conversation interactions. Streaming updates are buffered, transcript rows subscribe selectively, and long histories may use TanStack Virtual. Computer frames do not flow through ordinary React message state.
+
+The Web frontend is also the foundation of the future Tauri Bot Client, as recorded in [ADR 0010](adr/0010-reuse-web-client-in-tauri.md). Reuse its UI and daemon-facing behavior; keep native shell details out of shared business logic and keep execution on Omarchy. This is a present architecture constraint, not a requirement to add Tauri dependencies or native scaffolding now; actual WebView codec/input compatibility must be verified when that client is built.
 
 ### Astryx policy
 
@@ -84,7 +88,12 @@ Token deltas update the projection directly and do not trigger query refetches.
 
 ## Primary references
 
+- Context routing and vocabulary: [`../CONTEXT-MAP.md`](../CONTEXT-MAP.md)
 - Accepted workspace: [`workspace-redesign.md`](workspace-redesign.md)
+- Current implementation specification: [`../.scratch/shared-workspace-desktop-boundary/spec.md`](../.scratch/shared-workspace-desktop-boundary/spec.md)
+- Historical vs current requirement homes: [`../.scratch/shared-workspace-desktop-boundary/requirement-map.md`](../.scratch/shared-workspace-desktop-boundary/requirement-map.md)
+- Shared files / isolated Screens: [`adr/0009-share-work-files-isolate-bot-screens.md`](adr/0009-share-work-files-isolate-bot-screens.md)
+- Future Tauri Bot Client: [`adr/0010-reuse-web-client-in-tauri.md`](adr/0010-reuse-web-client-in-tauri.md)
 - Agent inventory: [`agents-integration.md`](agents-integration.md)
 - Astryx: <https://astryx.atmeta.com/> and <https://github.com/facebook/astryx>
 - React: <https://react.dev/>

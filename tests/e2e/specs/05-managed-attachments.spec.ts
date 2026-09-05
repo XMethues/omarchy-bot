@@ -45,8 +45,88 @@ async function sendAndWait(page: Page, text: string): Promise<void> {
   await expect(page.getByTestId("assistant-message")).toHaveCount(priorReplies + 1, { timeout: 15_000 });
 }
 
+async function sampleDrawerTransition(drawer: Locator, present: boolean): Promise<number[]> {
+  return drawer.evaluate(async (element, expected) => {
+    const heights = [element.getBoundingClientRect().height];
+    if (element.getAttribute("data-present") !== String(expected)) {
+      await new Promise<void>((resolve) => {
+        const observer = new MutationObserver(() => {
+          if (element.getAttribute("data-present") !== String(expected)) return;
+          observer.disconnect();
+          resolve();
+        });
+        observer.observe(element, { attributes: true, attributeFilter: ["data-present"] });
+      });
+    }
+    const started = performance.now();
+    while (performance.now() - started < 300) {
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      heights.push(element.getBoundingClientRect().height);
+    }
+    return heights;
+  }, present);
+}
+
 
 test.describe("managed attachments", () => {
+  test("animates first and final attachments without retaining hidden draft controls", async ({ page }) => {
+    await page.goto("/");
+    await createBot(page, "Attachment Motion Bot");
+    await sendAndWait(page, "say: ready");
+    const drawer = page.getByTestId("attachment-drawer");
+    const file = { name: "motion.txt", mimeType: "text/plain", buffer: Buffer.from("motion draft") };
+    await expect(drawer).toHaveAttribute("data-present", "false");
+    const [opening] = await Promise.all([
+      sampleDrawerTransition(drawer, true),
+      page.getByLabel("Choose files to attach").setInputFiles(file),
+    ]);
+    const expanded = opening.at(-1)!;
+    expect(opening[0]).toBe(0);
+    expect(expanded).toBeGreaterThan(0);
+    expect(opening.some((height) => height > 0.5 && height < expanded - 0.5)).toBe(true);
+
+    const remove = page.getByRole("button", { name: "Remove motion.txt" });
+    const restingBox = await remove.boundingBox();
+    await page.getByTestId("staged-attachment").hover();
+    await expect(remove).toHaveCSS("opacity", "1");
+    expect(await remove.boundingBox()).toEqual(restingBox);
+    await remove.focus();
+    await expect(remove).toBeFocused();
+
+    const toggle = drawer.getByRole("button", { name: "Collapse Attachments" });
+    await toggle.focus();
+    await toggle.press("Enter");
+    await expect(drawer.getByRole("button", { name: "Expand Attachments" })).toHaveAttribute("aria-expanded", "false");
+    await expect(stagedAttachments(page)).toHaveAttribute("inert", "");
+    await drawer.getByRole("button", { name: "Expand Attachments" }).press("Enter");
+    await expect(stagedAttachments(page)).not.toHaveAttribute("inert");
+    await expect.poll(() => drawer.evaluate((element) => element.getBoundingClientRect().height)).toBeCloseTo(expanded, 0);
+
+    const [closing] = await Promise.all([
+      sampleDrawerTransition(drawer, false),
+      remove.click(),
+    ]);
+    expect(closing.some((height) => height > 0.5 && height < expanded - 0.5)).toBe(true);
+    expect(closing.at(-1)).toBe(0);
+    await expect(drawer).toHaveAttribute("inert", "");
+    await expect(page.getByTestId("staged-attachment")).toHaveCount(0);
+    await expect(remove).toHaveCount(0);
+
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    const [reducedOpening] = await Promise.all([
+      sampleDrawerTransition(drawer, true),
+      page.getByLabel("Choose files to attach").setInputFiles(file),
+    ]);
+    const reducedExpanded = reducedOpening.at(-1)!;
+    expect(reducedOpening.slice(1).every((height) => Math.abs(height - reducedExpanded) < 0.5)).toBe(true);
+    const [reducedClosing] = await Promise.all([
+      sampleDrawerTransition(drawer, false),
+      page.getByRole("button", { name: "Remove motion.txt" }).click(),
+    ]);
+    expect(reducedClosing.slice(1).every((height) => height === 0)).toBe(true);
+    await expect(page.getByTestId("staged-attachment")).toHaveCount(0);
+  });
+
   test("stages with picker, restores in the same window, and stays bound to its original draft", async ({ page }) => {
     await page.goto("/");
     await createBot(page, "Attachment Draft Bot");

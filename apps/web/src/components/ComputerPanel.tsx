@@ -205,7 +205,7 @@ function ComputerSurfaceContent({
               ? `Starting ${bot.name}’s screen.`
               : view.unavailableReason === "capacity"
                 ? view.activity ?? "Bot Screen capacity is full."
-                : `Couldn’t start ${bot.name}’s screen.`
+                : view.activity ?? `Couldn’t start ${bot.name}’s screen.`
           }
           {...(!screenRetrying && onRetry !== undefined
             ? { actions: <Button label="Retry" variant="secondary" onClick={onRetry} /> }

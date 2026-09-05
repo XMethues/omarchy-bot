@@ -4,6 +4,8 @@ The context for connecting supported coding-agent backends without reducing or o
 
 ## Language
 
+Definitions only. Rules and acceptance live in [agents-integration](../../agents-integration.md), [the product boundary](../../workspace-redesign.md#native-agent-behavior), and [the current implementation specification](../../../.scratch/shared-workspace-desktop-boundary/spec.md). Related terms: [Bot](../workspace/CONTEXT.md), [Thread](../workspace/CONTEXT.md), [Shared Workspace](../workspace/CONTEXT.md), [Bot Desktop Session](../computer-control/CONTEXT.md).
+
 **Agent**:
 A supported execution backend such as Pi, Claude, or Codex that supplies a Bot's runtime capabilities. An Agent is selected when a Bot is created and is not itself shown as a user-created Bot.
 _Avoid_: Bot, assistant, persona
@@ -13,8 +15,8 @@ Whether an Agent can accept new work. It is independent of the activity and life
 _Avoid_: Bot status, Bot availability, presence
 
 **Native Session**:
-Conversation state owned by an Agent backend. Omarchy Bot may reference it for continuation, but deleting a Bot does not erase it.
-_Avoid_: Thread, Bot history, Omarchy-owned session
+Conversation state owned by an Agent backend, distinct from both the user's Thread and the Bot's graphical work surface. Omarchy Bot may reference it for continuation, but deleting a Bot does not erase it.
+_Avoid_: Thread, Bot history, Omarchy-owned session, Bot Desktop Session
 
 **Thinking**:
 Model reasoning content or provider-authored reasoning summary officially and natively exposed by an Agent for a Turn, available while streaming and in Thread history. It is separate from the Bot's response and from operational reasons for Agent Readiness or Turn failure.

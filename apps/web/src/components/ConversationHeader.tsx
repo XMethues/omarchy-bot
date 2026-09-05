@@ -1,3 +1,4 @@
+import * as stylex from "@stylexjs/stylex";
 import type { JSX, RefObject } from "react";
 import { Monitor } from "lucide-react";
 import { Button } from "@astryxdesign/core/Button";
@@ -10,6 +11,7 @@ import { LayoutHeader } from "@astryxdesign/core/Layout";
 import { StackItem } from "@astryxdesign/core/Stack";
 import type { BotViewDto, ComputerViewDto, ThreadDto } from "@omarchy-bot/protocol";
 import { AvatarView } from "./AvatarView.tsx";
+import { avatarStatusScope, avatarStatusStyles } from "./avatarStatus.stylex.ts";
 
 const COMPUTER_TOOLTIPS: Record<ComputerViewDto["state"], string> = {
   starting: "Open Computer Surface, Screen is starting",
@@ -94,6 +96,7 @@ export function ConversationHeader({
                 variant="ghost"
                 size="sm"
                 onClick={onToggleBotSettings}
+                xstyle={avatarStatusScope}
                 data-testid="bot-settings-open"
                 style={{
                   minWidth: 0,
@@ -105,7 +108,7 @@ export function ConversationHeader({
                 }}
                 aria-expanded={botSettingsOpen}
               >
-                <HStack gap={1} vAlign="center">
+                <HStack gap={1} vAlign="center" xstyle={avatarStatusStyles.identity}>
                   <AvatarView
                     avatar={bot.avatar}
                     name={bot.name}
@@ -113,8 +116,13 @@ export function ConversationHeader({
                     presentation="static"
                     decorative
                   />
-                  <Text as="h1" type="body" weight="medium" maxLines={1}>
-                    {bot.name}
+                  <Text as="h1" type="body" weight="medium" xstyle={avatarStatusStyles.nameLine}>
+                    <span {...stylex.props(avatarStatusStyles.name)}>{bot.name}</span>
+                    {bot.status === "active" ? (
+                      <span {...stylex.props(avatarStatusStyles.reveal)} aria-hidden="true" data-testid="header-working-status">
+                        <span {...stylex.props(avatarStatusStyles.content)}>{" is working"}</span>
+                      </span>
+                    ) : null}
                   </Text>
                 </HStack>
               </Button>

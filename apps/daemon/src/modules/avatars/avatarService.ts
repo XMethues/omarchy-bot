@@ -6,6 +6,7 @@ import type { AgentEvent } from "@omarchy-bot/agent-contract";
 import type { AgentId } from "@omarchy-bot/domain";
 import type { AvatarRecipeDto, BotDto } from "@omarchy-bot/protocol";
 import { HttpError, type BotsService } from "../bots/bots.ts";
+import { resolveWorkCwd } from "../workspace/sharedWorkspace.ts";
 import { AVATAR_RECIPE_SYSTEM_INSTRUCTIONS, parseAvatarRecipeResponse } from "./recipes.ts";
 
 export const MAX_AVATAR_UPLOAD_BYTES = 8 * 1024 * 1024;
@@ -119,7 +120,7 @@ export class AvatarService {
           type: "session.open",
           botId,
           threadId: `avatar_profile_${operationId}`,
-          options: { cwd: process.cwd(), instructions: AVATAR_RECIPE_SYSTEM_INSTRUCTIONS },
+          options: { cwd: resolveWorkCwd(), instructions: AVATAR_RECIPE_SYSTEM_INSTRUCTIONS },
         },
         30_000,
       );

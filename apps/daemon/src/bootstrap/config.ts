@@ -1,6 +1,7 @@
 import { mkdirSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { sharedWorkspaceDir } from "../modules/workspace/sharedWorkspace.ts";
 import capacityApproval from "./bot-screen-capacity-approval.json";
 
 /** Checked-in schema-v3 final-stack measurement that authorizes production capacity. */
@@ -13,6 +14,8 @@ export interface Config {
   artifactsDir: string;
   attachmentsDir: string;
   avatarsDir: string;
+  /** Home-local Shared Workspace; distinct from product data under dataDir. */
+  sharedWorkspaceDir: string;
   /** Voxtype transcript targets live here; runtime dir preferred, state dir fallback. */
   dictationDir: string;
   /** Transient child sockets and retained Bot-owned application profiles. */
@@ -120,6 +123,7 @@ export function loadConfig(): Config {
     artifactsDir: path.join(dataDir, "artifacts"),
     attachmentsDir: path.join(dataDir, "attachments"),
     avatarsDir: path.join(dataDir, "avatars"),
+    sharedWorkspaceDir: sharedWorkspaceDir(),
     dictationDir: runtimeDir ? path.join(runtimeDir, "omarchy-bot", "dictation") : path.join(stateDir, "dictation"),
     botScreenRuntimeDir: runtimeDir
       ? path.join(runtimeDir, "omarchy-bot", "screens")

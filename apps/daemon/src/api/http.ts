@@ -21,8 +21,6 @@ import { handleComputerRequest } from "./computerRoutes.ts";
 import { handleProjectionRequest } from "./projectionRoutes.ts";
 import { handleDictationRequest } from "./dictationRoutes.ts";
 import { handleAttachmentRequest } from "./attachmentRoutes.ts";
-import { handleWorkingTreeRequest } from "./workingTreeRoutes.ts";
-import type { WorkingTreeService } from "../modules/changes/workingTree.ts";
 import type { Supervisor } from "../supervision/supervisor.ts";
 import { existsSync } from "node:fs";
 import path from "node:path";
@@ -42,7 +40,6 @@ export interface DaemonServices {
   avatars: AvatarService;
   attachments: AttachmentsService;
   dictation: DictationService;
-  workingTrees: WorkingTreeService;
   computer: ComputerBroker;
   screens: BotScreenManager;
   projections: ScreenProjectionService;
@@ -130,10 +127,6 @@ export function startHttp(svc: DaemonServices): { stop: () => Promise<void>; por
 
     const threadFeatureResponse = await handleThreadFeatureRequest(req, svc.threads, pathname);
     if (threadFeatureResponse) return threadFeatureResponse;
-
-    const workingTreeResponse = await handleWorkingTreeRequest(req, svc.workingTrees, pathname);
-    if (workingTreeResponse) return workingTreeResponse;
-
 
     const attachmentResponse = await handleAttachmentRequest(req, svc.attachments, pathname);
     if (attachmentResponse) return attachmentResponse;

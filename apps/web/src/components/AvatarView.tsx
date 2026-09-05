@@ -3,6 +3,8 @@ import type { JSX } from "react";
 import type { AvatarDto } from "@omarchy-bot/protocol";
 import { Avatar } from "@astryxdesign/core/Avatar";
 import { HStack } from "@astryxdesign/core/HStack";
+import { Text } from "@astryxdesign/core/Text";
+import { avatarStatusScope, avatarStatusStyles } from "./avatarStatus.stylex.ts";
 import { renderAvatarRecipe, type AvatarPresentation } from "./avatarRenderer.ts";
 
 export type { AvatarPresentation } from "./avatarRenderer.ts";
@@ -85,17 +87,34 @@ export function WorkingAvatarView({ avatar, name }: { avatar: AvatarDto; name: s
   const motionStyle = avatar.kind === "upload" ? styles.working : undefined;
 
   return (
-    <HStack paddingInline={2} vAlign="center" data-testid="working-avatar">
-      <Avatar
-        name={name}
-        alt={explanation}
-        tooltip={explanation}
-        {...(src !== undefined ? { src } : {})}
-        {...(motionStyle !== undefined ? { xstyle: motionStyle } : {})}
-        size="sm"
+    <HStack paddingInline={2} gap={2} vAlign="center" xstyle={[avatarStatusScope, avatarStatusStyles.identity]} data-testid="working-avatar">
+      <HStack
+        as="span"
+        role="img"
+        aria-label={explanation}
+        tabIndex={0}
         data-avatar-presentation="working"
-        data-testid={avatarTestId(avatar)}
-      />
+        xstyle={avatarStatusStyles.focusTarget}
+      >
+        <Avatar
+          name={name}
+          aria-hidden="true"
+          aria-label=""
+          role="presentation"
+          tooltip={false}
+          {...(src !== undefined ? { src } : {})}
+          {...(motionStyle !== undefined ? { xstyle: motionStyle } : {})}
+          size="sm"
+          data-avatar-presentation="working"
+          data-testid={avatarTestId(avatar)}
+        />
+      </HStack>
+      <span {...stylex.props(avatarStatusStyles.reveal, avatarStatusStyles.transcriptReveal)} aria-hidden="true" data-testid="working-avatar-status">
+        <Text type="supporting" color="secondary" xstyle={[avatarStatusStyles.content, avatarStatusStyles.nameLine]}>
+          <span {...stylex.props(avatarStatusStyles.name)} data-testid="working-avatar-name">{name}</span>
+          <span {...stylex.props(avatarStatusStyles.workingSuffix)} data-testid="working-avatar-suffix">{" is working"}</span>
+        </Text>
+      </span>
     </HStack>
   );
 }

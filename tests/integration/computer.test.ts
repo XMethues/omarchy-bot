@@ -337,9 +337,61 @@ describe("contextual computer control", () => {
     expect(await waitForComputerState(h, owner, "unavailable")).toEqual({
       ...owner,
       state: "unavailable",
-      activity: "Screen unavailable.",
+      activity: "configured Cage executable is unavailable: /definitely/missing/cage",
       takeover: "unavailable",
     });
+
+    const rtc = (await import("node-datachannel")).default;
+    const {
+      SCREEN_H264_FMTP,
+      SCREEN_PROJECTION_PROTOCOL_VERSION,
+      SCREEN_PREVIEW_CHANNEL,
+      SCREEN_CONTROL_CHANNEL,
+      SCREEN_INPUT_CHANNEL,
+      SCREEN_H264_PROFILE,
+      SCREEN_H264_CLOCK_RATE,
+    } = await import("../../packages/protocol/src/index.ts");
+    const peer = new rtc.PeerConnection("startup-failure-offer", { iceServers: [] });
+    try {
+      const video = new rtc.Video("screen", "RecvOnly");
+      video.addH264Codec(96, SCREEN_H264_FMTP);
+      peer.addTrack(video);
+      const gathered = Promise.withResolvers<void>();
+      peer.onGatheringStateChange((state) => {
+        if (state === "complete") gathered.resolve();
+      });
+      peer.setLocalDescription("offer");
+      await gathered.promise;
+      const offer = peer.localDescription();
+      if (offer === null) throw new Error("WebRTC offer was not created");
+      const projection = await fetch(`${h.baseUrl}${computerPath("/api/computer/projection", owner)}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          version: SCREEN_PROJECTION_PROTOCOL_VERSION,
+          type: "offer",
+          sdp: offer.sdp,
+          capabilities: {
+            previewImage: { transport: "data-channel", channel: SCREEN_PREVIEW_CHANNEL, mediaType: "image/png" },
+            expandedVideo: {
+              transport: "webrtc-video-track",
+              codec: "video/H264",
+              profileLevelId: SCREEN_H264_PROFILE,
+              clockRate: SCREEN_H264_CLOCK_RATE,
+            },
+            control: { transport: "data-channel", channel: SCREEN_CONTROL_CHANNEL },
+            input: { transport: "data-channel", channel: SCREEN_INPUT_CHANNEL },
+            snapshotFallback: { transport: "http", mediaType: "image/png" },
+          },
+        }),
+      });
+      expect(projection.status).toBe(503);
+      expect(await projection.json()).toEqual({
+        error: "configured Cage executable is unavailable: /definitely/missing/cage",
+      });
+    } finally {
+      peer.close();
+    }
   }, 15_000);
 
   test("opening preview captures directly from the assigned Bot Screen", async () => {

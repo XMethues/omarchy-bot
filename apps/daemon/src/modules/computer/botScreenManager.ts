@@ -325,9 +325,10 @@ export class BotScreenManager {
         videoHeight: Math.round(logicalHeight * scale),
         scale,
         capture: () =>
-          this.#serialize(owner.surfaceId, () =>
-            this.#invoke(owner.surfaceId, currentEntry(), () => runtime.capture())
-          ),
+          this.#serialize(owner.surfaceId, async () => {
+            currentEntry();
+            return runtime.capture();
+          }),
         openCaptureStream: async () => {
           currentEntry();
           const captureStream = await runtime.openCaptureStream();
@@ -368,9 +369,10 @@ export class BotScreenManager {
             this.#invoke(owner.surfaceId, currentEntry(), () => runtime.input(event))
           ),
         releaseInput: (controllerEpoch) =>
-          this.#serialize(owner.surfaceId, () =>
-            this.#invoke(owner.surfaceId, currentEntry(), () => runtime.releaseInput(controllerEpoch))
-          ),
+          this.#serialize(owner.surfaceId, async () => {
+            currentEntry();
+            await runtime.releaseInput(controllerEpoch);
+          }),
       };
     });
   }

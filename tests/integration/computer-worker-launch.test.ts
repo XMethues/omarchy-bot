@@ -28,7 +28,7 @@ test("open_app launches directly in the owning Screen environment and applicatio
   const application = path.join(binDir, "fixture-application");
   writeFileSync(application, [
     "#!/bin/sh",
-    `printf '%s|%s|%s|%s' "$WAYLAND_DISPLAY" "$XDG_CONFIG_HOME" "$XDG_STATE_HOME" "$XDG_CACHE_HOME" > ${JSON.stringify(`${marker}.tmp`)}`,
+    `printf '%s|%s|%s|%s|%s' "$WAYLAND_DISPLAY" "$XDG_CONFIG_HOME" "$XDG_STATE_HOME" "$XDG_CACHE_HOME" "$(pwd)" > ${JSON.stringify(`${marker}.tmp`)}`,
     `mv ${JSON.stringify(`${marker}.tmp`)} ${JSON.stringify(marker)}`,
     "exit 0",
     "",
@@ -45,6 +45,8 @@ test("open_app launches directly in the owning Screen environment and applicatio
     "",
   ].join("\n"));
 
+  const applicationCwd = path.join(root, ".omarchy-bot", "workspace");
+  mkdirSync(applicationCwd, { recursive: true });
   const worker = new WorkerClient({
     name: "computer-application-launch-test",
     script: WORKER_SCRIPT,
@@ -59,6 +61,7 @@ test("open_app launches directly in the owning Screen environment and applicatio
       WAYLAND_DISPLAY: "wayland-private",
       OMARCHY_BOT_SURFACE_ID: SURFACE_ID,
       OMARCHY_BOT_RUNTIME_GENERATION: "1",
+      OMARCHY_BOT_APPLICATION_CWD: applicationCwd,
     },
     onEvent: () => {},
   });
@@ -76,7 +79,8 @@ test("open_app launches directly in the owning Screen environment and applicatio
       inputAuthority: { botId: "bot_launch_test", surfaceId: SURFACE_ID, turnId: "turn-launch-test" },
     }, 2_000)).resolves.toMatchObject({ done: true, text: "launched fixture.desktop" });
     await markerWritten.promise;
-    expect(await Bun.file(marker).text()).toBe(`wayland-private|${configHome}|${stateHome}|${cacheHome}`);
+    expect(await Bun.file(marker).text()).toBe(`wayland-private|${configHome}|${stateHome}|${cacheHome}|${applicationCwd}`);
+    expect(applicationCwd).not.toBe(path.dirname(WORKER_SCRIPT));
     expect(existsSync(activationMarker)).toBeFalse();
     expect(worker.alive).toBeTrue();
     await expect(worker.request({

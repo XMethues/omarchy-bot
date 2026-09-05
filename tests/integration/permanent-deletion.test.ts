@@ -305,7 +305,7 @@ describe("local Bot deletion", () => {
       botId: "bot_native_session_survival_probe",
       threadId: "thread_native_session_survival_probe",
       nativeSessionId,
-      options: { cwd: process.cwd(), instructions: "" },
+      options: { cwd: path.join(h.home, ".omarchy-bot", "workspace"), instructions: "" },
     }, 30_000);
     if (resumed === null || typeof resumed !== "object" || !("nativeSessionId" in resumed)) {
       throw new Error("fake Agent returned an invalid Session resume result");

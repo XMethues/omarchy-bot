@@ -1,3 +1,4 @@
+import * as stylex from "@stylexjs/stylex";
 import type { JSX } from "react";
 import { useEffect, useRef } from "react";
 import { useAppShellMobile } from "@astryxdesign/core/AppShell";
@@ -18,6 +19,7 @@ import { ContextMenu } from "@astryxdesign/core/ContextMenu";
 import type { BotViewDto } from "@omarchy-bot/protocol";
 import { AvatarStatusDot } from "@astryxdesign/core/Avatar";
 import { AvatarView } from "./AvatarView.tsx";
+import { avatarStatusScope, avatarStatusStyles } from "./avatarStatus.stylex.ts";
 
 export interface SidebarProps {
   bots: BotViewDto[];
@@ -84,6 +86,7 @@ export function Sidebar({
       ]}
     >
       <Item
+        xstyle={avatarStatusScope}
         startContent={
           <HStack height={48} vAlign="center">
             <AvatarView
@@ -95,7 +98,16 @@ export function Sidebar({
             />
           </HStack>
         }
-        label={<strong>{bot.name}</strong>}
+        label={
+          <strong {...stylex.props(avatarStatusStyles.nameLine)}>
+            <span {...stylex.props(avatarStatusStyles.name)}>{bot.name}</span>
+            {bot.status === "active" ? (
+              <span {...stylex.props(avatarStatusStyles.reveal)} aria-hidden="true" data-testid="sidebar-working-status">
+                <span {...stylex.props(avatarStatusStyles.content)}>{" is working"}</span>
+              </span>
+            ) : null}
+          </strong>
+        }
         labelLines={1}
         description={
           <Text aria-hidden="true" type="supporting" color="secondary" maxLines={1}>

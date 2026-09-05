@@ -1,5 +1,5 @@
 import type { ChangeEvent, CSSProperties, DragEvent, JSX, ReactNode } from "react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import * as stylex from "@stylexjs/stylex";
 import { Paperclip } from "lucide-react";
 import { AspectRatio } from "@astryxdesign/core/AspectRatio";
@@ -27,6 +27,7 @@ import { Token } from "@astryxdesign/core/Token";
 import { Text } from "@astryxdesign/core/Text";
 import { VStack } from "@astryxdesign/core/VStack";
 import { VisuallyHidden } from "@astryxdesign/core/VisuallyHidden";
+import { useContainerReveal } from "@astryxdesign/core/hooks";
 import type {
   AgentDto,
   AttachmentDto,
@@ -140,6 +141,8 @@ const TOOL_CALL_TEXT_CONTRAST_STYLE = {
 } as CSSProperties;
 
 function MessageMarkdown({ text, isStreaming = false }: { text: string; isStreaming?: boolean }): JSX.Element {
+  const reveal = useContainerReveal();
+  const revealProps = reveal.getContainerProps();
   return (
     <Markdown
       density="compact"
@@ -148,6 +151,8 @@ function MessageMarkdown({ text, isStreaming = false }: { text: string; isStream
       isStreaming={isStreaming}
       components={MARKDOWN_COMPONENTS}
       data-testid={isStreaming ? "streaming-markdown" : "message-markdown"}
+      {...revealProps}
+      className={[revealProps.className, "omarchy-message-markdown"].filter(Boolean).join(" ")}
     >
       {text}
     </Markdown>
@@ -203,6 +208,7 @@ export function formatThinkingDuration(startedAt: string, completedAt: string): 
 }
 
 function ThinkingDisclosure({ message }: { message: MessageDto }): JSX.Element | null {
+  const [isOpen, setIsOpen] = useState(false);
   const thinking = message.thinking;
   if (thinking === undefined) return null;
   const header = thinking.state === "streaming"
@@ -214,11 +220,19 @@ function ThinkingDisclosure({ message }: { message: MessageDto }): JSX.Element |
       data-testid="thinking-message"
       data-thinking-state={thinking.state}
     >
-      <Collapsible trigger={header} defaultIsOpen={false}>
-        <MessageMarkdown
-          text={message.text ?? ""}
-          isStreaming={thinking.state === "streaming"}
-        />
+      <Collapsible
+        trigger={header}
+        isOpen={isOpen}
+        onOpenChange={setIsOpen}
+        className="omarchy-thinking-disclosure"
+        data-open={isOpen}
+      >
+        <div {...stylex.props(styles.disclosureContent)} inert={!isOpen} aria-hidden={!isOpen}>
+          <MessageMarkdown
+            text={message.text ?? ""}
+            isStreaming={thinking.state === "streaming"}
+          />
+        </div>
       </Collapsible>
     </ChatMessage>
   );
@@ -301,6 +315,143 @@ function AttachmentContent({ attachment, previewUrl }: { attachment: AttachmentD
     />
   );
 }
+
+function StagedAttachment({
+  attachment,
+  previewUrl,
+  onRemove,
+}: {
+  attachment: AttachmentDto;
+  previewUrl?: string;
+  onRemove: (attachment: AttachmentDto) => Promise<void>;
+}): JSX.Element {
+  const reveal = useContainerReveal();
+  const isImage = attachment.mediaType.startsWith("image/") && previewUrl !== undefined;
+  return (
+    <div
+      {...reveal.getContainerProps()}
+      data-testid="staged-attachment"
+      data-attachment-id={attachment.id}
+    >
+      <Item
+        label={attachment.name}
+        description={attachment.mediaType}
+        density="compact"
+        startContent={
+          isImage ? (
+            <AspectRatio ratio={1} fit="cover" xstyle={styles.attachmentThumbnail}>
+              <img
+                src={previewUrl}
+                alt={attachment.name}
+                {...stylex.props(styles.attachmentImage)}
+                data-testid="staged-image-preview"
+              />
+            </AspectRatio>
+          ) : (
+            <Icon icon="info" size="sm" />
+          )
+        }
+        endContent={
+          <HStack gap={1}>
+            <Token
+              label={formatAttachmentSize(attachment.size)}
+              size="sm"
+              description={`File size for ${attachment.name}`}
+            />
+            <Button
+              {...reveal.getContentRevealProps({ isLayoutPreserved: true })}
+              label={`Remove ${attachment.name}`}
+              icon={<Icon icon="close" size="sm" />}
+              variant="ghost"
+              size="sm"
+              isIconOnly
+              onClick={() => void onRemove(attachment)}
+              data-testid="remove-staged-attachment"
+            />
+          </HStack>
+        }
+        {...(!isImage ? { "data-testid": "staged-file-row" } : {})}
+      />
+    </div>
+  );
+}
+
+function AttachmentDrawer({
+  attachments,
+  previewUrls,
+  onRemove,
+}: {
+  attachments: AttachmentDto[];
+  previewUrls: Map<string, string>;
+  onRemove: (attachment: AttachmentDto) => Promise<void>;
+}): JSX.Element {
+  const contentRef = useRef<HTMLDivElement>(null);
+  const [retainedHeight, setRetainedHeight] = useState(0);
+  const [isCollapsed, setIsCollapsed] = useState(false);
+  const isPresent = attachments.length > 0;
+
+  // Keep only measured geometry during exit, never staged data or controls.
+  // The native drawer's grid remains the sole content-size animation owner.
+  useLayoutEffect(() => {
+    const content = contentRef.current;
+    if (!isPresent || content === null) return;
+    const measure = (): void => setRetainedHeight(content.getBoundingClientRect().height);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, [isPresent]);
+
+  useEffect(() => {
+    if (isPresent) return;
+    setIsCollapsed(false);
+    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const clearWhenReduced = (): void => {
+      if (reducedMotion.matches) setRetainedHeight(0);
+    };
+    clearWhenReduced();
+    reducedMotion.addEventListener("change", clearWhenReduced);
+    return () => reducedMotion.removeEventListener("change", clearWhenReduced);
+  }, [isPresent]);
+
+  return (
+    <ChatComposerDrawer
+      count={attachments.length}
+      label="Attachments"
+      isCollapsed={!isPresent || isCollapsed}
+      onCollapsedChange={setIsCollapsed}
+      className="omarchy-attachment-drawer"
+      data-testid="attachment-drawer"
+      data-present={isPresent}
+      inert={!isPresent}
+      aria-hidden={!isPresent}
+      onTransitionEnd={(event) => {
+        if (!isPresent && event.target === event.currentTarget) setRetainedHeight(0);
+      }}
+    >
+      {isPresent ? (
+        <VStack
+          ref={contentRef}
+          gap={1}
+          aria-label="Staged attachments"
+          inert={!isPresent || isCollapsed}
+          aria-hidden={!isPresent || isCollapsed}
+        >
+          {attachments.map((attachment) => (
+            <StagedAttachment
+              key={attachment.id}
+              attachment={attachment}
+              previewUrl={previewUrls.get(attachment.id)}
+              onRemove={onRemove}
+            />
+          ))}
+        </VStack>
+      ) : (
+        <div aria-hidden style={{ height: retainedHeight, width: "100%" }} />
+      )}
+    </ChatComposerDrawer>
+  );
+}
 interface DictationOrigin {
   target: VoiceDraftTarget;
   anchor: number;
@@ -375,12 +526,14 @@ export function ChatPanel({
   const draftBotId = bot?.id;
   const draftThreadId = thread?.id;
   const selectedDraftRef = useRef({ botId: draftBotId, threadId: draftThreadId });
+  const restoredDraftRef = useRef({ botId: draftBotId, threadId: draftThreadId });
   const transcriptAttention = useTranscriptAttentionSurface();
   selectedDraftRef.current = { botId: draftBotId, threadId: draftThreadId };
 
   // Restore this conversation's staged files without blocking text editing.
   useEffect(() => {
     const generation = ++restoreGenerationRef.current;
+    restoredDraftRef.current = { botId: draftBotId, threadId: draftThreadId };
     setSubmitError(undefined);
     setStagedAttachments([]);
     if (draftBotId === undefined) {
@@ -893,6 +1046,7 @@ export function ChatPanel({
               calls={calls}
               style={TOOL_CALL_TEXT_CONTRAST_STYLE}
               data-testid="tool-calls"
+              className="omarchy-tool-calls"
             />
           </ChatMessage>,
         );
@@ -1013,62 +1167,18 @@ export function ChatPanel({
     />
   );
 
-  const attachmentDrawer = stagedAttachments.length > 0 ? (
-    <ChatComposerDrawer count={stagedAttachments.length} label="Attachments">
-      <VStack gap={1} aria-label="Staged attachments">
-        {stagedAttachments.map((attachment) => {
-          const previewUrl = previewUrlsRef.current.get(attachment.id);
-          const isImage = attachment.mediaType.startsWith("image/") && previewUrl !== undefined;
-          return (
-            <div
-              key={attachment.id}
-              data-testid="staged-attachment"
-              data-attachment-id={attachment.id}
-            >
-              <Item
-                label={attachment.name}
-                description={attachment.mediaType}
-                density="compact"
-                startContent={
-                  isImage ? (
-                    <AspectRatio ratio={1} fit="cover" xstyle={styles.attachmentThumbnail}>
-                      <img
-                        src={previewUrl}
-                        alt={attachment.name}
-                        {...stylex.props(styles.attachmentImage)}
-                        data-testid="staged-image-preview"
-                      />
-                    </AspectRatio>
-                  ) : (
-                    <Icon icon="info" size="sm" />
-                  )
-                }
-                endContent={
-                  <HStack gap={1}>
-                    <Token
-                      label={formatAttachmentSize(attachment.size)}
-                      size="sm"
-                      description={`File size for ${attachment.name}`}
-                    />
-                    <Button
-                      label={`Remove ${attachment.name}`}
-                      icon={<Icon icon="close" size="sm" />}
-                      variant="ghost"
-                      size="sm"
-                      isIconOnly
-                      onClick={() => void removeStagedAttachment(attachment)}
-                      data-testid="remove-staged-attachment"
-                    />
-                  </HStack>
-                }
-                {...(!isImage ? { "data-testid": "staged-file-row" } : {})}
-              />
-            </div>
-          );
-        })}
-      </VStack>
-    </ChatComposerDrawer>
-  ) : undefined;
+  const attachmentDrawer = (
+    <AttachmentDrawer
+      key={`${draftBotId ?? ""}:${draftThreadId ?? ""}`}
+      attachments={
+        restoredDraftRef.current.botId === draftBotId && restoredDraftRef.current.threadId === draftThreadId
+          ? stagedAttachments
+          : []
+      }
+      previewUrls={previewUrlsRef.current}
+      onRemove={removeStagedAttachment}
+    />
+  );
 
   const composer = (
     <div {...stylex.props(styles.composerWrap)}>
@@ -1132,7 +1242,7 @@ export function ChatPanel({
               isDisabled={composerIsDisabled}
             />
           }
-          {...(attachmentDrawer !== undefined ? { drawer: attachmentDrawer } : {})}
+          drawer={attachmentDrawer}
           footerActions={
             <Button
               label="Attach files"
@@ -1226,6 +1336,7 @@ export function ChatPanel({
         {thinkingAnnouncement}
       </VisuallyHidden>
       <ChatLayout
+        className="thread-chat-layout"
         {...(transcriptAttention !== null
           ? { ref: transcriptAttention.viewportRef, onScroll: transcriptAttention.onViewportScroll }
           : {})}

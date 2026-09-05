@@ -73,7 +73,11 @@ class FakePeerConnection {
     this.localDescription = description;
   }
 
-  async setRemoteDescription(): Promise<void> {}
+  remoteDescriptionCalls = 0;
+
+  async setRemoteDescription(): Promise<void> {
+    this.remoteDescriptionCalls += 1;
+  }
   async addIceCandidate(): Promise<void> {}
 
   emitTrack(): void {
@@ -195,5 +199,102 @@ describe("Screen Projection input authority", () => {
     ]);
     expect(controlStates).toEqual([true]);
     connection.close();
+  });
+});
+
+describe("Screen Projection switch and stale responses", () => {
+  test("ignores a late offer answer and preview frame after the viewer has closed", async () => {
+    const surfaceId = "surf_0123456789abcdef0123456789abcdef";
+    const frames: Array<Blob | undefined> = [];
+    const states: string[] = [];
+    const errors: string[] = [];
+    let releaseAnswer: (response: Response) => void = () => {};
+    const answer = new Promise<Response>((resolve) => {
+      releaseAnswer = resolve;
+    });
+    const fetchStarted = Promise.withResolvers<void>();
+    Object.assign(globalThis, {
+      RTCPeerConnection: FakePeerConnection,
+      RTCRtpReceiver: {
+        getCapabilities: () => ({
+          codecs: [{
+            mimeType: "video/H264",
+            clockRate: SCREEN_H264_CLOCK_RATE,
+            sdpFmtpLine: `level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=${SCREEN_H264_PROFILE}`,
+          }],
+        }),
+      },
+      window: globalThis,
+      fetch: async () => {
+        fetchStarted.resolve();
+        return answer;
+      },
+    });
+
+    const connection = new ScreenProjectionConnection(
+      "/api/computer/projection",
+      { botId: "bot-a", surfaceId },
+      {
+        onState: (state) => states.push(state),
+        onFrame: (frame) => frames.push(frame),
+        onVideo() {},
+        onError: (error) => errors.push(error),
+      },
+    );
+    const connecting = connection.connect();
+    await fetchStarted.promise;
+    connection.close();
+    releaseAnswer(new Response(JSON.stringify({
+      version: SCREEN_PROJECTION_PROTOCOL_VERSION,
+      type: "answer",
+      sdp: "v=0\r\n",
+      sessionId: "late-session",
+      surfaceId,
+      runtimeGeneration: 1,
+      geometryGeneration: 1,
+      logicalWidth: 1920,
+      logicalHeight: 1080,
+      videoWidth: 1920,
+      videoHeight: 1080,
+      scale: 1,
+      state: "connecting",
+      capabilities: {
+        previewImage: { transport: "data-channel", channel: SCREEN_PREVIEW_CHANNEL, mediaType: "image/png" },
+        expandedVideo: { transport: "webrtc-video-track", codec: "video/H264", profileLevelId: SCREEN_H264_PROFILE, clockRate: SCREEN_H264_CLOCK_RATE },
+        control: { transport: "data-channel", channel: SCREEN_CONTROL_CHANNEL },
+        input: { transport: "data-channel", channel: SCREEN_INPUT_CHANNEL },
+        snapshotFallback: { transport: "http", mediaType: "image/png" },
+      },
+      security: { authentication: "none", httpsRequired: false },
+      candidates: [],
+    }), { status: 200 }));
+    await connecting;
+
+    const peer = FakePeerConnection.latest!;
+    const preview = peer.channels.get(SCREEN_PREVIEW_CHANNEL)!;
+    preview.emitMessage(JSON.stringify({
+      version: SCREEN_PROJECTION_PROTOCOL_VERSION,
+      type: "preview-frame",
+      surfaceId,
+      runtimeGeneration: 1,
+      geometryGeneration: 1,
+      logicalWidth: 1920,
+      logicalHeight: 1080,
+      videoWidth: 1920,
+      videoHeight: 1080,
+      scale: 1,
+      sequence: 1,
+      mediaType: "image/png",
+      capturedAt: "2026-09-05T00:00:00.000Z",
+      byteLength: 1,
+      chunkCount: 1,
+    }));
+    preview.emitMessage(new ArrayBuffer(1));
+
+    expect(states).toEqual(["connecting", "closed"]);
+    expect(frames).toEqual([undefined]);
+    expect(errors).toEqual([]);
+    expect(peer.remoteDescriptionCalls).toBe(0);
+    expect(peer.channels.get(SCREEN_CONTROL_CHANNEL)?.sent ?? []).toEqual([]);
   });
 });

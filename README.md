@@ -8,13 +8,16 @@ An Omarchy plugin for local AI teammates. Omarchy Bot is intentionally and deepl
 - An **Agent** is an execution backend such as Pi, Claude, Codex, or Grok.
 - A Bot references one immutable Agent; several Bots may use the same Agent.
 - Every Agent adapter preserves its native behavior and maintains a tested capability inventory. Omarchy Bot does not add a separate Agent permission policy or capability allowlist.
-- Every Bot owns a persistent independent Bot Screen. The Computer Broker coordinates Agent and human input per Screen, so different Bots can use their desktops concurrently.
+- Each Bot has its own Screen identity; a lightweight desktop session is provisioned on demand. The Computer Broker coordinates Agent and human input per Screen, so switching the viewed Bot does not interrupt other Bots' desktop work.
+- Bots share work files rather than plugin source. The accepted Shared Workspace default and the boundary between plugin desktop infrastructure and native application behavior are defined in the [product model](docs/workspace-redesign.md#shared-workspace-and-plugin-boundary).
 
 The accepted product specification is [`docs/workspace-redesign.md`](docs/workspace-redesign.md). Domain vocabulary is routed through [`CONTEXT-MAP.md`](CONTEXT-MAP.md).
 
+The current Web frontend will be reused for a future Tauri desktop client. [ADR 0010](docs/adr/0010-reuse-web-client-in-tauri.md) defines the shared-client contract; Agents and Bot desktops continue running on the Omarchy side. Tauri delivery is not yet implemented.
+
 ## Status
 
-The repository implements the accepted user-created-Bot workspace and its contracted public model.
+The user-created-Bot application is implemented, but the [2026-09-05 model correction](docs/workspace-redesign.md#implementation-gaps-in-the-2026-09-05-revision) is not yet fully implemented: the Shared Workspace default and Changes removal remain pending, and reported Screen startup and host-session failures remain unresolved by this documentation update.
 
 The current vertical slice uses Pi and includes a Bun daemon, React web client, SQLite persistence, worker protocol, and computer worker. Other Agents become selectable only after their adapter and versioned conformance inventory pass.
 

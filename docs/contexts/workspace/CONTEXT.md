@@ -1,12 +1,22 @@
 # Workspace
 
-The end-user context for creating AI teammates and working with them through conversations.
+The end-user context for creating AI teammates, working with them through conversations, and identifying their shared work files. The context name is not itself a filesystem directory.
 
 ## Language
 
+Definitions only. Rules and acceptance live in [the product boundary](../../workspace-redesign.md#shared-workspace-and-plugin-boundary) and [the current implementation specification](../../../.scratch/shared-workspace-desktop-boundary/spec.md). Related terms: [Agent](../agent-integration/CONTEXT.md), [Native Session](../agent-integration/CONTEXT.md), [Host Session](../computer-control/CONTEXT.md), [Bot Screen](../computer-control/CONTEXT.md), [Bot Desktop Session](../computer-control/CONTEXT.md), [Screen Projection](../computer-control/CONTEXT.md).
+
 **Bot**:
-A persistent assistant created and named by the user, with its own job instructions, configuration, and identity. Each Bot uses one Agent; multiple Bots may use the same Agent. Ambiguous legacy rows are conservatively treated as Bots until evidence permits another classification; enabled Agent inventory is never itself a Bot.
+A persistent assistant created and named by the user, with its own job instructions, configuration, and identity. Each Bot uses one Agent; multiple Bots may use the same Agent, and Agent inventory is not itself a Bot.
 _Avoid_: Agent Bot, runtime Bot, Agent instance
+
+**Bot Client**:
+The user-facing application for conversations with Bots and observation or human control of their Bot Screens. It is distinct from the Agents and graphical sessions that execute the work.
+_Avoid_: Bot Desktop, Agent runtime, Host Session
+
+**Shared Workspace**:
+The common working-file space used by all Bots, distinct from the Omarchy Bot plugin's source, installation, and conversation data. Its files belong to the user's work rather than to an individual Bot, Thread, or Bot Screen.
+_Avoid_: Per-Bot workspace, plugin repository, Bot Screen, Hyprland workspace
 
 **Bot Activity**:
 Whether a Bot has at least one Active Turn in any of its Threads. A Bot is `active` or `inactive`; Agent readiness, selection, unreadness, and ambient avatar motion are separate concepts.
@@ -17,7 +27,7 @@ A Bot exists from creation until permanent deletion. It has no disabled or archi
 _Avoid_: Bot enablement, archived Bot, offline Bot
 
 **Bot Deletion**:
-Irreversible removal of a Bot and the data Omarchy Bot owns for it. Agent-owned Native Sessions are outside this boundary.
+Irreversible removal of a Bot and the data Omarchy Bot owns for it. Shared Workspace files and Agent-owned Native Sessions are outside this boundary.
 _Avoid_: Archive, disable, Agent data erasure
 
 

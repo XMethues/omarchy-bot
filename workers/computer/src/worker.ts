@@ -178,8 +178,19 @@ function desktopApplicationCommand(application: string): string[] {
   return argv;
 }
 
+function applicationCwd(): string {
+  const fromSupervisor = process.env.OMARCHY_BOT_APPLICATION_CWD;
+  if (fromSupervisor !== undefined && fromSupervisor !== "") return fromSupervisor;
+  throw new Error("Shared Workspace is unavailable: application working directory was not supplied");
+}
+
 function launchApplication(application: string): void {
+  const cwd = applicationCwd();
+  if (!existsSync(cwd)) {
+    throw new Error(`Shared Workspace is unavailable: ${cwd} does not exist`);
+  }
   const child = Bun.spawn(desktopApplicationCommand(application), {
+    cwd,
     stdin: "ignore",
     stdout: "ignore",
     stderr: "ignore",

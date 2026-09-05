@@ -501,7 +501,7 @@ describe("durable Bot mailbox", () => {
     expect(targetSession[0]).toMatchObject({
       botId: targetBotId,
       threadId: mailboxThread.id,
-      options: { cwd: process.cwd(), instructions: targetInstructions },
+      options: { cwd: path.join(h.home, ".omarchy-bot", "workspace"), instructions: targetInstructions },
     });
     expect(targetSession[0]?.options).not.toHaveProperty("model");
 

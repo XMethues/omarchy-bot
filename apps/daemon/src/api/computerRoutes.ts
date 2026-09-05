@@ -27,7 +27,12 @@ export function computerView(state: ComputerBrokerState, lifecycle: BotScreenLif
     return { ...identity, state: "starting", activity: "Screen starting.", ...preview };
   }
   if (lifecycle.state === "failed") {
-    return { ...identity, state: "unavailable", activity: "Screen unavailable.", ...preview };
+    return {
+      ...identity,
+      state: "unavailable",
+      activity: lifecycle.failure ?? "Screen unavailable.",
+      ...preview,
+    };
   }
   if (state.screenUse === "human") {
     return { ...identity, state: "user-control", activity: "You have control.", ...preview };

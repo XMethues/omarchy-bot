@@ -587,12 +587,14 @@ async function terminateCageProcess(child: CageProcess): Promise<void> {
  */
 export class CageBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
   #units: ApplicationUnits;
+  #runtimes = new Map<SurfaceId, BotScreenRuntime>();
 
   constructor(private readonly options: CageAdapterOptions) {
     this.#units = new ApplicationUnits(options.hostRuntimeDir);
   }
 
   async start(provision: BotScreenProvision): Promise<BotScreenRuntime> {
+    await this.#stopTracked(provision.surfaceId);
     await this.#units.stop(provision.surfaceId);
     if (!Number.isSafeInteger(provision.scale) || provision.scale < 1) {
       throw new Error("Cage Bot Screen scale must be a positive integer");
@@ -703,25 +705,16 @@ export class CageBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
       const outputName = "HEADLESS-1";
       const videoWidth = Math.round(provision.logicalWidth * provision.scale);
       const videoHeight = Math.round(provision.logicalHeight * provision.scale);
-      const configured = await command([
+      await this.#configureOutput(
         wlrRandr,
-        "--output",
+        childEnv,
         outputName,
-        "--on",
-        "--custom-mode",
-        `${videoWidth}x${videoHeight}@${provision.refreshRate}Hz`,
-        "--pos",
-        "0,0",
-        "--transform",
-        "normal",
-        "--scale",
-        String(provision.scale),
-      ], childEnv);
-      if (configured.status !== 0) {
-        throw new Error(
-          `Cage output configuration failed${configured.stderr.trim() === "" ? "" : `: ${configured.stderr.trim()}`}`,
-        );
-      }
+        videoWidth,
+        videoHeight,
+        provision.refreshRate,
+        provision.scale,
+        cageProcess,
+      );
       const startedDesktop = Bun.spawn([
         ...this.#units.command(provision.surfaceId, provision.generation, "application", childEnv),
         botDesktop,
@@ -856,7 +849,7 @@ export class CageBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
             : workerImage === undefined ? {} : { image: workerImage }),
         };
       };
-      return {
+      const runtime: BotScreenRuntime = {
         readiness: {
           compositor: "ready",
           waylandSocket: "private",
@@ -900,10 +893,15 @@ export class CageBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
             await cleanup;
             cleanupComplete = true;
           } finally {
+            if (this.#runtimes.get(provision.surfaceId) === runtime) {
+              this.#runtimes.delete(provision.surfaceId);
+            }
             stopInFlight = undefined;
           }
         },
       };
+      this.#runtimes.set(provision.surfaceId, runtime);
+      return runtime;
     } catch (error) {
       await computerWorker?.stop().catch(() => {});
       await virtualInput?.stop().catch(() => {});
@@ -916,15 +914,24 @@ export class CageBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
   }
 
   async reconcile(provision: BotScreenProvision): Promise<BotScreenRuntime | undefined> {
+    await this.#stopTracked(provision.surfaceId);
     await this.#units.stop(provision.surfaceId);
     rmSync(path.join(this.options.runtimeRoot, provision.surfaceId), { recursive: true, force: true });
     return undefined;
   }
 
   async destroy(surfaceId: SurfaceId): Promise<void> {
+    await this.#stopTracked(surfaceId);
     await this.#units.stop(surfaceId);
     rmSync(path.join(this.options.runtimeRoot, surfaceId), { recursive: true, force: true });
     rmSync(path.join(this.options.profileRoot, surfaceId), { recursive: true, force: true });
+  }
+
+  async #stopTracked(surfaceId: SurfaceId): Promise<void> {
+    const runtime = this.#runtimes.get(surfaceId);
+    if (runtime === undefined) return;
+    await runtime.stop().catch(() => {});
+    if (this.#runtimes.get(surfaceId) === runtime) this.#runtimes.delete(surfaceId);
   }
 
   async #discoverSocket(runtimeDir: string, cageProcess: CageProcess): Promise<string> {
@@ -947,6 +954,46 @@ export class CageBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
       throw new Error("Cage did not create its private Wayland socket");
     })();
     return Promise.race([socketReady, exited]);
+  }
+
+  async #configureOutput(
+    wlrRandr: string,
+    environment: Record<string, string>,
+    outputName: string,
+    videoWidth: number,
+    videoHeight: number,
+    refreshRate: number,
+    scale: number,
+    cageProcess: CageProcess,
+  ): Promise<void> {
+    const argv = [
+      wlrRandr,
+      "--output",
+      outputName,
+      "--on",
+      "--custom-mode",
+      `${videoWidth}x${videoHeight}@${refreshRate}Hz`,
+      "--pos",
+      "0,0",
+      "--transform",
+      "normal",
+      "--scale",
+      String(scale),
+    ];
+    const deadline = Date.now() + 5_000;
+    let lastError = "Cage output configuration failed";
+    while (Date.now() < deadline) {
+      if (cageProcess.exitCode !== null) {
+        throw new Error(`Cage exited before output configuration with status ${cageProcess.exitCode}`);
+      }
+      const configured = await command(argv, environment);
+      if (configured.status === 0) return;
+      lastError = `Cage output configuration failed${
+        configured.stderr.trim() === "" ? "" : `: ${configured.stderr.trim()}`
+      }`;
+      await Bun.sleep(20);
+    }
+    throw new Error(lastError);
   }
 
   async #waitForDesktop(

@@ -6,6 +6,8 @@
 
 **Status:** resolved
 
+> **Superseded on 2026-09-05:** [ADR 0009](../../../docs/adr/0009-share-work-files-isolate-bot-screens.md) removes Changes from the product. This ticket is fully retired as a current instruction: no still-valid product requirement remains. The summary API, cwd fallback, UI, and acceptance tests are historical delivery only — do not preserve or reintroduce them. Removal is still an [implementation gap](../../../docs/workspace-redesign.md#implementation-gaps-in-the-2026-09-05-revision). Accounting: [requirement map](../../shared-workspace-desktop-boundary/requirement-map.md#capability-panel-specification).
+
 - [x] Changes is an explicit capability tab alongside Browser and uses “Working tree changes” or “Uncommitted changes” language.
 - [x] A Bot-scoped read-only daemon API resolves the effective root from the selected Thread and rejects missing or cross-Bot Thread identity.
 - [x] The browser cannot submit an arbitrary filesystem root, absolute path, parent traversal, or NUL-containing value.

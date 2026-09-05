@@ -55,6 +55,7 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
   #releaseWaiters: Array<{ count: number; resolve: () => void }> = [];
   #captureStreamCloseWaiters: Array<{ count: number; resolve: () => void }> = [];
   #captureStreamFailures = new Set<string>();
+  #releaseFailures = new Set<string>();
   #blockActions = false;
   #actionsStarted = 0;
   #actionWaiters: Array<{ count: number; resolve: () => void }> = [];
@@ -62,11 +63,37 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
   #blockInputs = false;
   #inputGate = Promise.withResolvers<void>();
   #inputAttemptWaiters: Array<{ count: number; resolve: () => void }> = [];
+  #blockStarts = false;
+  #startGate = Promise.withResolvers<void>();
+  #startAttempts = 0;
+  #startAttemptWaiters: Array<{ count: number; resolve: () => void }> = [];
+  #startFailures = new Map<string, string>();
 
   constructor(
     private readonly failure?: string,
     private readonly options: FakeBotScreenRuntimeOptions = {},
   ) {}
+
+  failStart(surfaceId: string, message: string): void {
+    this.#startFailures.set(surfaceId, message);
+  }
+
+  blockStarts(): void {
+    this.#blockStarts = true;
+    this.#startGate = Promise.withResolvers<void>();
+  }
+
+  waitForStartAttempts(count: number): Promise<void> {
+    if (this.#startAttempts >= count) return Promise.resolve();
+    const { promise, resolve } = Promise.withResolvers<void>();
+    this.#startAttemptWaiters.push({ count, resolve });
+    return promise;
+  }
+
+  releaseStarts(): void {
+    this.#blockStarts = false;
+    this.#startGate.resolve();
+  }
 
   blockActions(): void {
     this.#blockActions = true;
@@ -144,6 +171,10 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     this.#captureStreamFailures.add(surfaceId);
   }
 
+  failNextRelease(surfaceId: string): void {
+    this.#releaseFailures.add(surfaceId);
+  }
+
   running(surfaceId: string): { generation: number } | undefined {
     const record = this.#runtimes.get(surfaceId);
     return record === undefined ? undefined : { generation: record.provision.generation };
@@ -212,8 +243,15 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
   }
 
   async start(provision: BotScreenProvision): Promise<BotScreenRuntime> {
+    this.#startAttempts += 1;
+    for (const waiter of this.#startAttemptWaiters.splice(0)) {
+      if (this.#startAttempts >= waiter.count) waiter.resolve();
+      else this.#startAttemptWaiters.push(waiter);
+    }
+    if (this.#blockStarts) await this.#startGate.promise;
     await Promise.resolve();
-    if (this.failure !== undefined) throw new Error(this.failure);
+    const failure = this.#startFailures.get(provision.surfaceId) ?? this.failure;
+    if (failure !== undefined) throw new Error(failure);
     this.starts.push(provision);
     let stopped = false;
     let controllerEpoch: number | undefined;
@@ -368,6 +406,9 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
       },
       releaseInput: async (epoch): Promise<void> => {
         if (stopped) return;
+        if (this.#releaseFailures.delete(provision.surfaceId)) {
+          throw new Error("fake Bot Screen input release failed");
+        }
         if (epoch !== undefined && epoch !== controllerEpoch) {
           throw new BotScreenInputRejectedError("fake Bot Screen rejected stale input authority release");
         }

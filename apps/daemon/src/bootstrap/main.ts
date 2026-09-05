@@ -16,7 +16,6 @@ import { InputDiagnostics } from "../modules/computer/inputDiagnostics.ts";
 import { AvatarService } from "../modules/avatars/avatarService.ts";
 import { DictationService } from "../modules/dictation/dictationService.ts";
 import { AttachmentsService } from "../modules/attachments/attachments.ts";
-import { WorkingTreeService, type WorkingTreeOptions } from "../modules/changes/workingTree.ts";
 import { Supervisor } from "../supervision/supervisor.ts";
 import { startHttp, type DaemonServices } from "../api/http.ts";
 import { writeFileSync, renameSync } from "node:fs";
@@ -35,8 +34,6 @@ export interface MainOptions {
   useHostApplicationUnits?: boolean;
   /** Test-only private runtime root; production uses the configured XDG runtime. */
   botScreenRuntimeDir?: string;
-  /** Integration-only process bounds/binary override; production uses safe defaults. */
-  workingTree?: WorkingTreeOptions;
 }
 
 export async function main(options: MainOptions = {}): Promise<{
@@ -119,7 +116,6 @@ export async function main(options: MainOptions = {}): Promise<{
   const bots = new BotsService(db, events, agents, threads);
   const attachments = new AttachmentsService(db, cfg.attachmentsDir, agents);
   attachments.gcStaged();
-  const workingTrees = new WorkingTreeService(db, options.workingTree);
   const avatars = new AvatarService(bots, supervisor, cfg.avatarsDir);
   const turns: TurnService = new TurnService(db, events, threads, agents, bots, attachments, supervisor, cfg);
   mailbox = new MailboxService(db, events, threads, agents, turns);
@@ -175,7 +171,6 @@ export async function main(options: MainOptions = {}): Promise<{
     avatars,
     attachments,
     dictation,
-    workingTrees,
     computer,
     screens,
     projections,

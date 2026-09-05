@@ -10,12 +10,15 @@ import type { SurfaceId } from "../../packages/domain/src/ids.ts";
 const SURFACE_ID = "surf_11111111111111111111111111111111" as SurfaceId;
 let root: string | undefined;
 const originalWaylandDisplay = process.env.WAYLAND_DISPLAY;
+const originalPath = process.env.PATH;
 
 afterEach(() => {
   if (root !== undefined) rmSync(root, { recursive: true, force: true });
   root = undefined;
   if (originalWaylandDisplay === undefined) delete process.env.WAYLAND_DISPLAY;
   else process.env.WAYLAND_DISPLAY = originalWaylandDisplay;
+  if (originalPath === undefined) delete process.env.PATH;
+  else process.env.PATH = originalPath;
 });
 
 function executable(directory: string, name: string, body: string): string {
@@ -302,4 +305,122 @@ test("Cage rejects ffmpeg without libx264 before starting a Surface process", as
   expect(existsSync(cageStarted)).toBeFalse();
   expect(existsSync(path.join(runtimeRoot, SURFACE_ID))).toBeFalse();
   expect(existsSync(path.join(profileRoot, SURFACE_ID))).toBeFalse();
+});
+
+test("Cage retries a transient output-configuration miss before declaring startup failed", async () => {
+  root = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-cage-wlr-retry-"));
+  const bin = path.join(root, "bin");
+  const runtimeRoot = path.join(root, "runtime");
+  const attempts = path.join(root, "wlr-attempts");
+  mkdirSync(bin);
+  const png = path.join(root, "screen.png");
+  writeFileSync(
+    png,
+    Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAYAAAD0In+KAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAADklEQVQImWMQMgn7D8IAC5MDN627upEAAAAASUVORK5CYII=",
+      "base64",
+    ),
+  );
+  const cage = executable(bin, "cage", `#!/usr/bin/env bun
+import path from "node:path";
+const separator = process.argv.indexOf("--");
+const application = process.argv.slice(separator + 1);
+const socket = path.join(process.env.XDG_RUNTIME_DIR, "wayland-0");
+const server = Bun.listen({ unix: socket, socket: { data() {} } });
+const child = Bun.spawn(application, { env: { ...process.env, WAYLAND_DISPLAY: "wayland-0" }, stdin: "ignore", stdout: "inherit", stderr: "inherit" });
+const status = await child.exited;
+server.stop(true);
+process.exit(status);
+`);
+  const desktop = executable(bin, "bot-desktop", [
+    "#!/bin/sh",
+    "if [ \"$1\" = \"--host\" ]; then while :; do sleep 60; done; fi",
+    "printf 'READY %s %s\\n' \"$1\" \"$2\"",
+    "while :; do sleep 60; done",
+    "",
+  ].join("\n"));
+  const wlrRandr = executable(bin, "wlr-randr", [
+    "#!/bin/sh",
+    `count_file=${JSON.stringify(attempts)}`,
+    "if [ ! -f \"$count_file\" ]; then echo 1 > \"$count_file\"; echo 'not ready' >&2; exit 1; fi",
+    "exit 0",
+    "",
+  ].join("\n"));
+  const adapter = new CageBotScreenRuntimeAdapter({
+    runtimeRoot,
+    profileRoot: path.join(root, "profiles"),
+    cageBin: cage,
+    wlrRandrBin: wlrRandr,
+    grimBin: executable(bin, "grim", `#!/bin/sh\ncat ${JSON.stringify(png)}\n`),
+    inputHelperBin: executable(bin, "input", "#!/bin/sh\nprintf 'READY\\n'\nwhile IFS=' ' read -r command request rest; do printf 'OK %s\\n' \"$request\"; done\n"),
+    captureHelperBin: executable(bin, "capture", "#!/bin/sh\nprintf 'READY\\n'\nwhile read -r command; do [ \"$command\" = close ] && exit 0; done\n"),
+    botDesktopBin: desktop,
+    ffmpegBin: executable(bin, "ffmpeg", "#!/bin/sh\nprintf ' V..... libx264 H.264 encoder\\n'\n"),
+    computerWorkers: {
+      startComputerWorker: async (scope) => ({
+        surfaceId: scope.surfaceId,
+        runtimeGeneration: scope.runtimeGeneration,
+        exited: new Promise<Error>(() => {}),
+        act: async () => ({}),
+        stop: async () => {},
+      }),
+    },
+  });
+
+  const runtime = await adapter.start({
+    surfaceId: SURFACE_ID,
+    generation: 1,
+    geometryGeneration: 1,
+    logicalWidth: 2,
+    logicalHeight: 1,
+    scale: 1,
+    refreshRate: 15,
+  });
+  expect(runtime.readiness.compositor).toBe("ready");
+  expect(readFileSync(attempts, "utf8").trim()).toBe("1");
+  await runtime.stop();
+});
+
+test("production-style application units stop only the failed Surface and leave no orphan units", async () => {
+  const hostRuntimeDir = process.env.XDG_RUNTIME_DIR;
+  if (hostRuntimeDir === undefined || !existsSync(path.join(hostRuntimeDir, "systemd", "private"))) {
+    throw new Error("production-style application-unit check requires a user systemd manager");
+  }
+  root = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-cage-units-"));
+  const runtimeRoot = path.join(root, "runtime");
+  const profileRoot = path.join(root, "profiles");
+  const adapter = new CageBotScreenRuntimeAdapter({
+    runtimeRoot,
+    profileRoot,
+    hostRuntimeDir,
+    cageBin: path.join(root, "missing-cage"),
+    ffmpegBin: executable(root, "ffmpeg", "#!/bin/sh\nprintf ' V..... libx264 H.264 encoder\\n'\n"),
+    computerWorkers: { startComputerWorker: async () => { throw new Error("worker should not start"); } },
+  });
+  const unitPattern = `omarchy-bot-screen-${SURFACE_ID.slice("surf_".length)}-*`;
+
+  await expect(adapter.start({
+    surfaceId: SURFACE_ID,
+    generation: 3,
+    geometryGeneration: 1,
+    logicalWidth: 1920,
+    logicalHeight: 1080,
+    scale: 1,
+    refreshRate: 16,
+  })).rejects.toThrow("configured Cage executable is unavailable");
+  expect(existsSync(path.join(runtimeRoot, SURFACE_ID))).toBeFalse();
+  expect(existsSync(path.join(profileRoot, SURFACE_ID))).toBeFalse();
+
+  const remaining = Bun.spawnSync([
+    "systemctl",
+    "--user",
+    "list-units",
+    "--all",
+    "--full",
+    "--plain",
+    "--no-legend",
+    `${unitPattern}.service`,
+  ], { stdout: "pipe", stderr: "pipe" });
+  expect(remaining.exitCode).toBe(0);
+  expect(remaining.stdout.toString().trim()).toBe("");
 });

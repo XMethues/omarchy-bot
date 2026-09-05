@@ -215,6 +215,7 @@ export class ScreenProjectionConnection {
         signal: this.#abort.signal,
       });
       const rawAnswer: unknown = await response.json().catch(() => undefined);
+      if (this.#closed) return;
       if (!response.ok) {
         const message =
           rawAnswer !== null

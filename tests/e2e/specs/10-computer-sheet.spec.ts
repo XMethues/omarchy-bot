@@ -24,6 +24,15 @@ async function fulfillJson(route: Route, body: unknown): Promise<void> {
   await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
 }
 
+async function settleCapabilityLayout(page: Page): Promise<void> {
+  await page.getByTestId("capability-presence").evaluate(async (shell) => {
+    const regions = [shell, ...shell.querySelectorAll(".capability-panel, .capability-tab-content")];
+    await Promise.all(regions.flatMap((region) =>
+      region.getAnimations().map((animation) => animation.finished)
+    ));
+  });
+}
+
 async function installProjectionPeer(
   page: Page,
   options: { inputAuthorityAvailable?: boolean; frameAvailable?: boolean } = {},
@@ -361,8 +370,9 @@ test.describe("contextual computer sheet", () => {
     await computerTrigger.click();
     await expect(settings).toHaveCount(0);
     await expect(capabilities).toBeVisible();
-    await expect(capabilities.getByRole("tab", { name: "Browser" })).toHaveAttribute("aria-selected", "true");
-    await expect(capabilities.getByRole("tabpanel", { name: "Browser" })).toBeVisible();
+    await expect(capabilities.getByRole("tab", { name: "Changes" })).toHaveCount(0);
+    await expect(capabilities.getByRole("tab", { name: "Browser" })).toHaveCount(0);
+    await expect(capabilities.getByRole("heading", { name: "Capability Browser Bot’s screen" })).toBeVisible();
     await expect(capabilities.getByAltText("Capability Browser Bot screen")).toBeVisible();
     await expect(page.getByRole("complementary", { name: "Computer Surface" })).toHaveCount(0);
 
@@ -374,6 +384,7 @@ test.describe("contextual computer sheet", () => {
     await expect(capabilities).toBeVisible();
     await expect(capabilities.getByAltText("Capability Browser Bot screen")).toBeVisible();
 
+    await settleCapabilityLayout(page);
     const [splitConversation, capabilityBox] = await Promise.all([
       conversation.boundingBox(),
       capabilities.boundingBox(),
@@ -532,7 +543,62 @@ test.describe("contextual computer sheet", () => {
     await expect(trigger).toBeFocused();
   });
 
-  test("switching Bots clears the previous Bot Screen projection and preserves scoped requests", async ({ page }) => {
+  test("switching Bots during a pending Takeover does not complete the sensitive step (simulated peers)", async ({ page }) => {
+    await installProjectionPeer(page);
+    const takeoverByBot = new Map<string, "unavailable" | "available" | "active">();
+    let returnCalls = 0;
+    let takeoverCalls = 0;
+    await page.route("**/api/computer/**", async (route) => {
+      const url = new URL(route.request().url());
+      const botId = url.searchParams.get("botId") ?? "";
+      if (await fulfillProjection(route)) return;
+      if (url.pathname === "/api/computer/snapshot") {
+        await route.fulfill({ status: 200, contentType: "image/png", body: PNG });
+        return;
+      }
+      if (url.pathname === "/api/computer/take-control") {
+        takeoverCalls += 1;
+        takeoverByBot.set(botId, "active");
+      }
+      if (url.pathname === "/api/computer/return-to-bot") {
+        returnCalls += 1;
+        takeoverByBot.set(botId, "unavailable");
+      }
+      const takeover = takeoverByBot.get(botId) ?? "unavailable";
+      await fulfillJson(route, {
+        botId,
+        surfaceId: url.searchParams.get("surfaceId"),
+        state: takeover === "active" ? "user-control" : "ready",
+        takeover,
+        activity: takeover === "active" ? "You have control." : "Screen ready.",
+      });
+    });
+
+    await page.goto("/");
+    const firstBotId = await createBot(page, "Takeover Source Bot");
+    await createBot(page, "Takeover Other Bot");
+    takeoverByBot.set(firstBotId, "available");
+    await page.getByRole("button", { name: "Takeover Source Bot", exact: true }).click();
+    await page.getByRole("button", { name: "Open Computer Surface", exact: true }).click();
+    const computer = page.getByRole("complementary", { name: "Workspace capabilities", exact: true });
+    await computer.getByRole("button", { name: "Take control" }).click();
+    await expect(page.getByTestId("expanded-web-control")).toBeVisible();
+    expect(takeoverCalls).toBe(1);
+
+    await page.getByRole("button", { name: "Takeover Other Bot", exact: true }).dispatchEvent("click");
+    await expect(page.getByTestId("expanded-web-control")).toHaveCount(0);
+    await expect(computer.getByAltText("Takeover Other Bot screen")).toBeVisible();
+    await expect(computer.getByRole("button", { name: "I'm done" })).toHaveCount(0);
+    await expect(computer.getByRole("button", { name: "Continue takeover" })).toHaveCount(0);
+    expect(returnCalls).toBe(0);
+
+    await page.getByRole("button", { name: "Takeover Source Bot", exact: true }).click();
+    await expect(computer.getByRole("button", { name: "Continue takeover" })).toBeVisible();
+    expect(returnCalls).toBe(0);
+    await expect(computer.getByRole("button", { name: "I'm done" })).toHaveCount(0);
+  });
+
+  test("switching Bots clears the previous Bot Screen projection and preserves scoped requests (simulated peers)", async ({ page }) => {
     await installProjectionPeer(page);
     let closedProjectionCount = 0;
     await page.route("**/api/computer/**", async (route) => {
@@ -596,6 +662,7 @@ test.describe("contextual computer sheet", () => {
     const expandPreview = page.getByRole("button", { name: "Open Web Control" });
     await expect(preview).toBeVisible();
     await expect(expandPreview).toContainText("Open Web Control");
+    await settleCapabilityLayout(page);
     const previewBox = await preview.boundingBox();
     const expandBox = await expandPreview.boundingBox();
     if (previewBox === null || expandBox === null) throw new Error("preview has no rendered box");
@@ -721,6 +788,7 @@ test.describe("contextual computer sheet", () => {
     await sheet.getByRole("button", { name: "Open Web Control" }).click();
     const expanded = page.getByTestId("computer-expanded-video");
     await expect(expanded).toBeVisible();
+    await settleCapabilityLayout(page);
     const videoBox = await expanded.boundingBox();
     if (videoBox === null) throw new Error("expanded video has no rendered box");
     let x = videoBox.x + videoBox.width / 2;

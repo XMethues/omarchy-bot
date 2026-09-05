@@ -20,14 +20,10 @@ import type {
   SendResultDto,
   ServerToClient,
   ThreadDto,
-  WorkingTreeDetailDto,
-  WorkingTreeSummaryDto,
 } from "@omarchy-bot/protocol";
 import {
   ComputerViewDto as ComputerViewSchema,
   DeleteBotResultDto as DeleteBotResultSchema,
-  WorkingTreeDetailDto as WorkingTreeDetailSchema,
-  WorkingTreeSummaryDto as WorkingTreeSummarySchema,
 } from "@omarchy-bot/protocol";
 
 export interface ApiClientOptions {
@@ -160,35 +156,6 @@ export class ApiClient {
   }
   listBotThreads(id: string, q?: string): Promise<ThreadDto[]> {
     return this.req(`/api/bots/${id}/threads${q ? `?q=${encodeURIComponent(q)}` : ""}`);
-  }
-  async workingTreeSummary(input: {
-    botId: string;
-    threadId?: string;
-    signal?: AbortSignal;
-  }): Promise<WorkingTreeSummaryDto> {
-    const query = input.threadId === undefined ? "" : `?threadId=${encodeURIComponent(input.threadId)}`;
-    return WorkingTreeSummarySchema.parse(
-      await this.req<unknown>(
-        `/api/bots/${encodeURIComponent(input.botId)}/changes${query}`,
-        input.signal === undefined ? undefined : { signal: input.signal },
-      ),
-    );
-  }
-  async workingTreeDetail(input: {
-    botId: string;
-    threadId?: string;
-    path: string;
-    signal?: AbortSignal;
-  }): Promise<WorkingTreeDetailDto> {
-    const query = new URLSearchParams();
-    if (input.threadId !== undefined) query.set("threadId", input.threadId);
-    query.set("path", input.path);
-    return WorkingTreeDetailSchema.parse(
-      await this.req<unknown>(
-        `/api/bots/${encodeURIComponent(input.botId)}/changes/detail?${query}`,
-        input.signal === undefined ? undefined : { signal: input.signal },
-      ),
-    );
   }
   sendBotMessage(id: string, body: SendMessageBodyDto): Promise<SendResultDto> {
     return this.req(`/api/bots/${id}/messages`, { method: "POST", body: JSON.stringify(body) });

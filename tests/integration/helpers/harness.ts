@@ -9,7 +9,6 @@ import type { DaemonServices } from "../../../apps/daemon/src/api/http.ts";
 import { FakeBotScreenRuntimeAdapter } from "../../../apps/daemon/src/modules/computer/fakeBotScreenRuntime.ts";
 import type { BotScreenRuntimeAdapter } from "../../../apps/daemon/src/modules/computer/botScreenManager.ts";
 import type { MessageDto } from "../../../packages/protocol/src/index.ts";
-import type { WorkingTreeOptions } from "../../../apps/daemon/src/modules/changes/workingTree.ts";
 
 export interface Harness {
   baseUrl: string;
@@ -24,10 +23,11 @@ export interface HarnessOptions {
   botDeletionTerminalTimeoutMs?: number;
   botScreenFailure?: string;
   useProductionBotScreen?: boolean;
+  /** Production-style user-systemd units. Default false; label those results harness-mode. */
+  useHostApplicationUnits?: boolean;
   botScreenAdapter?: BotScreenRuntimeAdapter;
   botScreenCapacity?: number;
   waitForAgentReady?: boolean;
-  workingTree?: WorkingTreeOptions;
 }
 
 export async function startDaemon(existingHome?: string, options: HarnessOptions = {}): Promise<Harness> {
@@ -43,6 +43,7 @@ export async function startDaemon(existingHome?: string, options: HarnessOptions
     JSON.stringify({ ok: true, image: "verified" }),
   );
 
+  process.env.HOME = home;
   process.env.OMARCHY_BOT_HOME = home;
   process.env.OMARCHY_BOT_STATE = state;
   process.env.OMARCHY_BOT_PORT = "0";
@@ -59,17 +60,15 @@ export async function startDaemon(existingHome?: string, options: HarnessOptions
   const { main } = await import("../../../apps/daemon/src/bootstrap/main.ts");
   const daemon = options.useProductionBotScreen
     ? await main({
-        useHostApplicationUnits: false,
+        useHostApplicationUnits: options.useHostApplicationUnits === true,
         botScreenRuntimeDir: path.join(home, "r"),
         ...(options.botScreenCapacity === undefined ? {} : { botScreenCapacity: options.botScreenCapacity }),
-        ...(options.workingTree === undefined ? {} : { workingTree: options.workingTree }),
       })
     : await main({
-        useHostApplicationUnits: false,
+        useHostApplicationUnits: options.useHostApplicationUnits === true,
         botScreenRuntimeDir: path.join(home, "r"),
         botScreenAdapter: options.botScreenAdapter ?? new FakeBotScreenRuntimeAdapter(options.botScreenFailure),
         botScreenCapacity: options.botScreenCapacity ?? 8,
-        ...(options.workingTree === undefined ? {} : { workingTree: options.workingTree }),
       });
   const { stop, disconnectForRestart, port, svc } = daemon;
   const base: Harness = {

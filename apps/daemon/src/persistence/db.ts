@@ -2,7 +2,7 @@ import { lstatSync, readdirSync, unlinkSync, type Dirent } from "node:fs";
 import path from "node:path";
 import { Database } from "bun:sqlite";
 import { AVATAR_RENDERER_ID, DEFAULT_AVATAR_STYLE_ID } from "@omarchy-bot/protocol";
-import { TOOL_CALL_INTERRUPTED_ERROR_SUMMARY } from "@omarchy-bot/domain";
+import { isToolCallSummary, TOOL_CALL_INTERRUPTED_ERROR_SUMMARY, type ToolCallSummary } from "@omarchy-bot/domain";
 import type { Config } from "../bootstrap/config.ts";
 
 type MigrationConfig = Pick<Config, "artifactsDir">;
@@ -895,6 +895,76 @@ CREATE TABLE bot_mail_deliveries (
 CREATE INDEX idx_bot_mail_deliveries_dispatch
   ON bot_mail_deliveries(target_bot_id, state, created_at);
 `,
+  },
+  {
+    name: "0019-legacy-tool-call-summaries",
+    migrate: (db) => {
+      // Keep native history private on the owning Message; only the whitelisted
+      // summary is served. Bot deletion still removes all locally owned data.
+      if (!columnNames(db, "messages").has("legacy_tool_data")) {
+        db.exec(`ALTER TABLE messages ADD COLUMN legacy_tool_data TEXT`);
+      }
+      const rows = db.query<{
+        id: string;
+        thread_id: string;
+        payload: string;
+        text: string | null;
+        created_at: string;
+        turn_id: string | null;
+      }, []>(
+        `SELECT id, thread_id, payload, text, created_at, turn_id
+         FROM messages WHERE kind = 'tool' AND author_kind = 'bot' AND json_valid(payload)`,
+      ).all();
+      const bindHistoricalTurn = db.query(
+        `INSERT INTO turns (
+           id, thread_id, bot_id, status, worker_session_id, native_session_id,
+           steer_count, started_at, finished_at, outcome_reason
+         )
+         SELECT ?, id, bot_id, 'failed', NULL, '', 0, ?, NULL,
+                'Historical Tool Call has no recorded Turn outcome.'
+         FROM threads WHERE id = ?`,
+      );
+      const update = db.query(
+        `UPDATE messages
+         SET legacy_tool_data = COALESCE(legacy_tool_data, ?),
+             payload = ?, text = NULL, turn_id = COALESCE(turn_id, ?)
+         WHERE id = ?`,
+      );
+      for (const row of rows) {
+        const payload: unknown = JSON.parse(row.payload);
+        if (isToolCallSummary(payload)) continue;
+        if (payload === null || typeof payload !== "object" || Array.isArray(payload)) continue;
+        const legacy = payload as Record<string, unknown>;
+        // Recognize the historical native event envelope, not arbitrary invalid
+        // summaries. Unknown shapes remain subject to the strict reader.
+        if (
+          typeof legacy.toolId !== "string" || legacy.toolId.length === 0 ||
+          typeof legacy.name !== "string" || legacy.name.length === 0 ||
+          (legacy.state !== "running" && legacy.state !== "complete" && legacy.state !== "completed" && legacy.state !== "error") ||
+          (legacy.isError !== undefined && typeof legacy.isError !== "boolean") ||
+          ((legacy.state === "complete" || legacy.state === "completed") && legacy.isError === undefined)
+        ) continue;
+        const failed = legacy.isError === true || legacy.state === "error";
+        const interrupted = !failed && legacy.state === "running";
+        const summary: ToolCallSummary = {
+          id: legacy.toolId,
+          name: legacy.name,
+          status: failed || interrupted ? "error" : "completed",
+          ...(failed ? { errorSummary: "Tool call failed." } : {}),
+          ...(interrupted ? { errorSummary: TOOL_CALL_INTERRUPTED_ERROR_SUMMARY } : {}),
+        };
+        // An unbound historical call needs a terminal binding for the current
+        // schema, but its Tool outcome does not establish a successful Turn.
+        const turnId = row.turn_id ?? `legacy-turn-${row.id}`;
+        if (row.turn_id === null) bindHistoricalTurn.run(turnId, row.created_at, row.thread_id);
+        update.run(
+          JSON.stringify({ payload: row.payload, text: row.text }),
+          JSON.stringify(summary),
+          turnId,
+          row.id,
+        );
+      }
+    },
   },
 ];
 export function openDb(cfg: Config): Database {

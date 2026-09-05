@@ -1,8 +1,8 @@
 # AI teammate workspace redesign
 
-Status: implemented except the accepted ordered-transcript revision; original design accepted on 2026-09-02 and transcript revision accepted on 2026-09-04
+Status: accepted product design; the Shared Workspace and plugin-boundary revision was confirmed on 2026-09-05. Implementation gaps below now distinguish landed runtime work from the still-open human host-acceptance gate.
 
-This document defines the accepted product and interaction design. Earlier architecture drafts remain research inputs only where they do not conflict with this specification.
+This document defines the accepted product and interaction design. Omarchy Bot is an Omarchy plugin inspired by Grok Bot's user-created teammates, not a generic coding dashboard or a second full desktop session; earlier drafts and feature tickets are authoritative only where they agree with this specification and [ADR 0009](adr/0009-share-work-files-isolate-bot-screens.md). Historical specifications and their still-valid homes are accounted in [the requirement map](../.scratch/shared-workspace-desktop-boundary/requirement-map.md).
 
 > Bot activity, avatar activity presentation, archive/restore, and permanent-deletion decisions are superseded by [Binary Bot activity and direct deletion](../.scratch/bot-activity-lifecycle/spec.md). Transcript Activity, message rendering, and Agent-output structure are superseded by [Ordered rich transcript](../.scratch/ordered-rich-transcript/spec.md) and [ADR 0007](./adr/0007-preserve-ordered-agent-blocks.md).
 
@@ -17,6 +17,48 @@ This document defines the accepted product and interaction design. Earlier archi
 - Agents are not automatically rendered as Bots in the sidebar.
 - A Bot's editable profile contains its name, Job/Instructions, and avatar.
 - Updating Instructions affects future turns in every Thread belonging to that Bot. Existing messages remain unchanged.
+
+### Shared Workspace and plugin boundary
+
+All Bots default to the same `~/.omarchy-bot/workspace/` under the user's home directory, not `/workspace` at the filesystem root and not the plugin's checkout, installation, or daemon launch directory. A Bot's Threads share this default; a new conversation, another Agent, or another Bot Screen does not allocate a separate work-file space. It is an ordinary working directory, not a required Git repository, a file-access sandbox, or a mechanism that overrides an Agent's native ability to work elsewhere.
+
+```text
+Omarchy user
+  ├─ Shared Workspace: work files common to all Bots
+  └─ user-created Bots
+       └─ each Bot
+            ├─ one Agent reference (many Bots may use that Agent)
+            ├─ many Threads → Agent-owned Native Sessions
+            └─ one Bot Screen identity
+                 └─ on-demand Bot Desktop Session → application windows
+                      ↑
+                 Screen Projection from the selected client view
+
+Host Session: the user's original Omarchy desktop, separate from Bot Screens
+```
+
+| Concern | Owner and boundary |
+| --- | --- |
+| Default working directory | The plugin provides the Shared Workspace default; it never implicitly falls back to its own source or installation directory. |
+| Work files and concurrent edits | The user, Agents, and their tools manage their work. The plugin does not add file locks, task locks, Git worktrees, repository management, or file-authorship tracking. |
+| Bot and conversation data | The plugin owns Bot identity, Threads, messages, local session mappings, and explicitly managed media. These are not the Shared Workspace. |
+| Native Session | The Agent owns conversation execution state. It is not a graphical session or a viewer connection. |
+| Bot desktop infrastructure | The plugin owns Screen identity, on-demand session processes, private display endpoints, capture, routed input, and same-Screen human handoff. |
+| Applications | Agents and applications retain native behavior. Browser selection, profile layout, Cookies, logins, and cross-Bot application-state sharing are not responsibilities of this desktop design. |
+| Deletion | Deleting a Bot removes its plugin-owned records and desktop runtime, not shared work files, Agent-owned Native Sessions, or arbitrary application data. |
+
+`~/.omarchy-bot/memory/` is a future directory intention, not an implemented memory feature or a decision about memory semantics. This revision does not relocate existing databases, managed attachments, avatars, or other product data.
+
+Changes is removed from the accepted interface and its backing product capability, not merely hidden. No review workflow or work-artifact panel replaces it. The Computer Surface remains the desktop observation/control entry; this correction does not add an arbitrary-URL webview or adopt a coding-workspace information architecture.
+
+### Implementation gaps in the 2026-09-05 revision
+
+Implementation is tracked by the [Shared Workspace and Bot Desktop Boundary Correction specification](../.scratch/shared-workspace-desktop-boundary/spec.md), including automated, real-runtime, and mandatory user experience acceptance.
+
+- **Shared Workspace default implemented:** implicit Agent sessions and supported application launches use `~/.omarchy-bot/workspace` under the live user home. Explicit Thread cwd values are unchanged. Native `session.resume` still only proves the daemon supplied cwd, not that a backend relocated an existing Native Session.
+- **Changes removed:** the Changes UI, Git summary/detail service, public endpoints, and client methods are gone. Retired `/api/bots/:id/changes` routes return ordinary missing-interface 404s.
+- **Screen startup repaired, host disruption separate:** Cage output configuration is retried while the compositor is alive, and projection `releaseInput` / snapshot capture no longer destroy a ready desktop. Public state exposes the failing stage. Prior top-bar/shortcut breakage was not shown to share that cause. The live plugin daemon was not restarted onto this tree.
+- **Unused-Bot cost recorded; selected-view resource windows unmet in the checked-in JSON; human host acceptance pending:** unused Bots add no Cage/capture/encoder stack. The checked-in [normal-use JSON](../.scratch/shared-workspace-desktop-boundary/normal-use-resource-report.json) did not measure retained-desktop / one-selected-projection windows (`OMARCHY_BOT_REAL_SCREEN_LOAD` unset on that run). Top bar, shortcuts, and ordinary host input remain a mandatory user gate.
 
 ### Migration boundary
 
@@ -33,7 +75,7 @@ This document defines the accepted product and interaction design. Earlier archi
 - Every adapter owns a compact `AgentCapabilityInventory` returned by the probe protocol and derived from the official interface plus conformance probes.
 - The inventory is the sole support-policy source for steering, abort, Thinking, Thread actions, accepted attachment modalities, and native event families.
 - Contextual native operations are shown and executed according to that inventory. Unsupported operations are rejected rather than simulated; Pi image input is not claimed while its provider conformance reports images unsupported.
-- Bot deletion removes Omarchy Bot-owned data and local Agent-session mappings only. It neither acquires an Agent worker nor deletes Agent-owned Native Sessions.
+- Bot deletion removes Omarchy Bot-owned data and local Agent-session mappings only. Shared Workspace files and Agent-owned Native Sessions survive deletion.
 
 ## 2. Information architecture
 
@@ -53,6 +95,12 @@ There is no persistent global TopNav.
 - The main pane has a conversation-local Header, transcript, and Composer.
 - On narrow screens the Sidebar becomes a drawer; the conversation Header supplies its opener.
 - Opening the app selects the most recently active Bot, not the previously viewed Bot. That Bot opens its most recently active Thread.
+
+### Future Tauri Bot Client
+
+The current Web frontend will be reused for a Tauri desktop client, not replaced by an independently implemented interface. Conversation UI, Bot selection, Computer Surface behavior, and daemon-facing contracts stay shared; Agents, Native Sessions, Bot Desktop Sessions, and capture/input execution remain on the Omarchy side.
+
+[ADR 0010](adr/0010-reuse-web-client-in-tauri.md) records this accepted evolution contract. Preserve the client/execution separation now without adding unused native scaffolding. Tauri packaging and shell-specific integrations are later work; its actual WebView media/input support must be tested then rather than inferred from Chromium tests. This does not change current Omarchy plugin lifecycle ownership, network policy, or application-state ownership.
 
 ## 3. Sidebar
 
@@ -200,7 +248,7 @@ The app does not depend on Voxtype's synthetic Return because file output bypass
 
 ## 10. Computer
 
-Each Bot owns one persistent independent Bot Screen. Screens have independent pixels, focus, cursor, input state, and retained application profiles while sharing intended user-account resources.
+Each Bot owns one Bot Screen identity with independent windows, pixels, focus, pointer, and keyboard state. A running Bot Desktop Session serves that Screen; a Screen Projection only exposes it to a viewer. Neither a new Thread nor another viewer creates another computer or transfers ownership of the Bot's ongoing work.
 
 - Keep input arbitration internal and scoped to each Bot Screen so a Bot and the user cannot interleave actions on that Screen while unrelated Bots continue independently.
 - Do not show controller epochs, queues, runtime generations, or engineering diagnostics in normal UI.
@@ -209,8 +257,30 @@ Each Bot owns one persistent independent Bot Screen. Screens have independent pi
 - Expanding the preview opens Web Control backed only by the H.264 Screen Projection media track. The HTTP PNG snapshot is an explicit read-only fallback, never an interactive image stream.
 - Show **Take control** only when human input is relevant.
 - While the user controls the Screen, show **Return to Bot**; re-observe before resuming automation.
-- Permanent deletion removes the Bot Screen's runtime state and retained profile before deleting its Surface identity.
+- Permanent deletion removes plugin-owned desktop runtime and session metadata before its Screen identity. It does not authorize erasing Shared Workspace files or taking ownership of application-internal state.
 - Screen coordination does not approve or filter Agent capabilities, and compositor/socket isolation is not an adversarial security boundary.
+
+### Desktop implementation and host boundary
+
+- Retain one pure-headless Cage runtime per active Bot Desktop Session, as selected in [Computer ADR 0008](contexts/computer-control/adr/0008-run-cage-bot-desktops.md). Provision it on the first graphical action or requested desktop view, not simply because a Bot was created.
+- Run only lightweight desktop infrastructure: a private runtime directory and Wayland socket, headless output, persistent application surface, and explicitly targeted capture/input. There is no per-Bot Omarchy/UWSM login session, shell/bar stack, or host autostart configuration.
+- Bot A and Bot B may operate independently. The Computer Broker coordinates Bot versus human input on the same Screen; it does not serialize unrelated Bots or manage workspace files.
+- A client switching from A to B releases its old projection and input authority and connects to B. A's background work continues under its existing authority rules; switching does not cancel a Turn, destroy A's desktop, or implicitly finish an outstanding human Takeover.
+- Each client projects only its selected Screen. When a Screen has no viewers, stop its continuous preview capture and video encoding; this does not prohibit screenshots explicitly requested by an Agent or stop its applications. A projection disconnect is not a session-destruction policy.
+- Application launch and desktop tools receive the intended Bot display endpoint. Installing a browser per Bot, synchronizing Cookies, choosing shared versus separate browser profiles, and controlling application-internal concurrency are outside this contract.
+- The Host Session's top bar, shortcuts, focus, and physical input remain usable through provisioning, operation, projection switches, failures, and cleanup. Child environments never overwrite global systemd/D-Bus activation state; teardown addresses only plugin-owned child processes or transient application units.
+- Private display routing is operational isolation, not an Agent system-permission sandbox. Preserving native Agent capabilities does not authorize plugin development or runtime management to update the host OS or alter its graphical session.
+- A single shared window/focus/input state cannot satisfy parallel Bot desktop operation. VNC or SSH connections alone do not create independent surfaces; this revision neither replaces Cage nor rewrites transport on that assumption.
+
+### Required host-safety and resource evidence
+
+Separate plugin desktop overhead (compositor, desktop surface, helpers, capture, encoder, and daemon) from Agent/application workloads; report the whole scenario as well, and identify test-harness overhead rather than assigning it to the compositor. The historical four-active-Screen result of about 2 GiB PSS and 4.13 CPU cores is not an accepted normal-use budget or proof that desktop isolation itself requires that cost.
+
+Acceptance must exercise Bots with no graphical use, several retained Bot desktop sessions with only one viewed, repeated client A/B switches, and no viewers while background work continues. Verify release of unused capture/encoding paths without destroying applications; do not claim unmeasured resource savings or introduce idle-kill policies that discard work.
+
+Host-safety evidence must cover the original top bar, shortcuts, focus, and physical input across desktop start, use, failure, and targeted cleanup. The two-Cage smoke in `tests/integration/bot-screen-cage.smoke.test.ts` currently checks sibling-screen outcomes but does not directly assert host top-bar/shortcut usability; its historical ticket completion is not sufficient proof. Safe verification must use private runtime/profile artifacts and targeted child teardown, never host package updates or graphical-session restarts.
+
+Final acceptance also requires the user's own confirmation that the original top bar, shortcuts, ordinary desktop use, and Bot switching behave correctly. Record automated results, real-runtime evidence, and human acceptance separately; automated passes alone do not satisfy this gate.
 
 ## 11. Settings
 

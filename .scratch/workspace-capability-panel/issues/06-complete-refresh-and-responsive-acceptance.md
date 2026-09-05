@@ -6,6 +6,8 @@
 
 **Status:** resolved
 
+> **Partially superseded on 2026-09-05:** [ADR 0009](../../../docs/adr/0009-share-work-files-isolate-bot-screens.md) removes the Changes UI, diff state, polling, and their product acceptance requirements. Still-valid homes: Composer → [workspace-redesign Composer](../../../docs/workspace-redesign.md#7-composer) and parent story 30; Computer Surface selection/control → [workspace-redesign Computer](../../../docs/workspace-redesign.md#10-computer) and parent stories 29, 51–65; responsive/accessibility and Bot Settings exclusivity → parent stories 31–33. Retired: Changes refresh, polling, and diff state. The checks below are historical; do not restore Changes to satisfy old snapshots or tests. Accounting: [requirement map](../../shared-workspace-desktop-boundary/requirement-map.md#capability-panel-specification).
+
 - [x] Changes provides a manual refresh action that replaces summary and selected detail with current repository state.
 - [x] Changes fetches on activation and refreshes at a modest interval only while the Changes tab is visible.
 - [x] Polling stops when the capability panel closes, Browser is active, the component unmounts, or the workspace selection changes.

@@ -4,8 +4,6 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
-  readFileSync,
-  readdirSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -35,9 +33,23 @@ import {
   requireApprovedDefaultRow,
   requireCompletedOperationalRows,
 } from "./helpers/bot-screen-capacity-report.ts";
+import {
+  activeEncoderCount,
+  command,
+  currentGeneration,
+  gpuSnapshot,
+  matchingProcessPids,
+  percentile,
+  resourceWindow,
+  unitName,
+  until,
+  waitScreenReady,
+  withTimeout,
+  type ResourceWindow,
+  type ScreenOwner,
+} from "./helpers/bot-screen-load-observe.ts";
 
 const loadTest = process.env.OMARCHY_BOT_REAL_SCREEN_LOAD === "1" ? test : test.skip;
-const ROLES = ["compositor", "application", "input", "worker", "capture", "encoder"] as const;
 const MATRIX = [1, 2, 4, 8] as const;
 
 
@@ -68,10 +80,7 @@ function receiveH264(peer: PeerConnection): Track {
   video.addH264Codec(96, SCREEN_H264_FMTP);
   return peer.addTrack(video);
 }
-interface Owner {
-  botId: string;
-  surfaceId: SurfaceId;
-}
+type Owner = ScreenOwner;
 
 interface ProjectionAnswer {
   type: "answer";
@@ -98,81 +107,6 @@ interface Authority {
   active: boolean;
   controllerEpoch: number;
 }
-
-interface ScreenResources {
-  surfaceId: SurfaceId;
-  pids: number[];
-  pssMiB: number;
-  rssMiB: number;
-  cpuPercent: number;
-  gpu: {
-    attributable: false;
-    utilizationPercent: null;
-    vramMiB: null;
-  };
-  processes: Array<{
-    pid: number;
-    role: typeof ROLES[number] | "unknown";
-    executable: string;
-    pssMiB: number;
-    rssMiB: number;
-    cpuPercent: number;
-  }>;
-}
-
-interface ResourceWindow {
-  durationMs: number;
-  screens: ScreenResources[];
-  daemonAndHarness: {
-    pssMiB: number;
-    rssMiB: number;
-    cpuPercent: number;
-  };
-  total: {
-    pssMiB: number;
-    rssMiB: number;
-    cpuPercent: number;
-  };
-}
-
-function percentile(values: number[], fraction: number): number | null {
-  if (values.length === 0) return null;
-  const sorted = [...values].sort((a, b) => a - b);
-  return sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * fraction) - 1)]!;
-}
-
-async function command(argv: string[]): Promise<{ status: number; stdout: string; stderr: string }> {
-  const child = Bun.spawn(argv, { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
-  const [status, stdout, stderr] = await Promise.all([
-    child.exited,
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-  ]);
-  return { status, stdout: stdout.trim(), stderr: stderr.trim() };
-}
-
-async function until<T>(probe: () => T | undefined | Promise<T | undefined>, timeoutMs: number, message: string): Promise<T> {
-  const deadline = performance.now() + timeoutMs;
-  for (;;) {
-    const value = await probe();
-    if (value !== undefined) return value;
-    if (performance.now() >= deadline) throw new Error(message);
-    // This opt-in platform harness intentionally follows real compositor and WebRTC time.
-    await Bun.sleep(20);
-  }
-}
-
-async function withTimeout<T>(operation: Promise<T>, timeoutMs: number, message: string): Promise<T> {
-  const timeout = Promise.withResolvers<never>();
-  const timer = setTimeout(() => timeout.reject(new Error(message)), timeoutMs);
-  try {
-    return await Promise.race([operation, timeout.promise]);
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-
 
 async function closeBrowserProjectionSessions(
   harness: Harness,
@@ -401,212 +335,6 @@ class ProjectionClient {
   }
 }
 
-function unitName(surfaceId: SurfaceId, generation: number, role: string): string {
-  return `omarchy-bot-screen-${surfaceId.slice("surf_".length)}-g${generation}-${role}.service`;
-}
-
-async function roleUnitNames(
-  owner: Owner,
-  generation: number,
-  role: typeof ROLES[number],
-): Promise<string[]> {
-  const pattern = unitName(owner.surfaceId, generation, `${role}*`);
-  const result = await command([
-    "systemctl",
-    "--user",
-    "list-units",
-    "--all",
-    "--full",
-    "--plain",
-    "--no-legend",
-    pattern,
-  ]);
-  if (result.status !== 0) return [];
-  return result.stdout
-    .split("\n")
-    .map((line) => line.trim().split(/\s+/, 1)[0])
-    .filter((unit): unit is string => unit !== undefined && unit.endsWith(".service"));
-}
-
-async function screenPidRoles(
-  owner: Owner,
-  generation: number,
-): Promise<Map<number, typeof ROLES[number] | "unknown">> {
-  const pids = new Map<number, typeof ROLES[number] | "unknown">();
-  if (Bun.which("systemctl") !== null) {
-    for (const role of ROLES) {
-      for (const unit of await roleUnitNames(owner, generation, role)) {
-        const result = await command(["systemctl", "--user", "show", unit, "--property=ControlGroup", "--value"]);
-        const file = result.status === 0 && result.stdout !== "" ? path.join("/sys/fs/cgroup", result.stdout, "cgroup.procs") : "";
-        if (file !== "" && existsSync(file)) {
-          for (const raw of readFileSync(file, "utf8").trim().split(/\s+/)) {
-            const pid = Number(raw);
-            if (Number.isSafeInteger(pid) && pid > 0) pids.set(pid, role);
-          }
-        }
-      }
-    }
-  }
-  if (pids.size > 0) return pids;
-  for (const entry of readdirSync("/proc")) {
-    if (!/^\d+$/.test(entry)) continue;
-    try {
-      const cmdline = readFileSync(`/proc/${entry}/cmdline`, "utf8");
-      const environment = readFileSync(`/proc/${entry}/environ`, "utf8");
-      if (cmdline.includes(owner.surfaceId) || environment.includes(owner.surfaceId)) {
-        pids.set(Number(entry), "unknown");
-      }
-    } catch {
-      // Processes may exit while /proc is sampled.
-    }
-  }
-  return pids;
-}
-
-function processSample(pid: number): { ticks: number; pssKiB: number; rssKiB: number } | undefined {
-  try {
-    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
-    const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
-    const ticks = Number(fields[11]) + Number(fields[12]);
-    const rollup = readFileSync(`/proc/${pid}/smaps_rollup`, "utf8");
-    const pssKiB = Number(/^Pss:\s+(\d+) kB$/m.exec(rollup)?.[1] ?? 0);
-    const status = readFileSync(`/proc/${pid}/status`, "utf8");
-    const rssKiB = Number(/^VmRSS:\s+(\d+) kB$/m.exec(status)?.[1] ?? 0);
-    return { ticks, pssKiB, rssKiB };
-  } catch {
-    return undefined;
-  }
-}
-
-async function resourceWindow(
-  owners: Owner[],
-  generationBySurface: Map<SurfaceId, number>,
-  durationMs: number,
-  activity?: (deadlineMs: number) => Promise<void>,
-): Promise<ResourceWindow> {
-  const hertzResult = await command(["getconf", "CLK_TCK"]);
-  const hertz = Number(hertzResult.stdout) || 100;
-  const before = new Map<number, number>();
-  const beforePids = new Map<SurfaceId, Map<number, typeof ROLES[number] | "unknown">>();
-  const daemonBefore = processSample(process.pid);
-  for (const owner of owners) {
-    const pids = await screenPidRoles(owner, generationBySurface.get(owner.surfaceId) ?? 1);
-    beforePids.set(owner.surfaceId, pids);
-    for (const pid of pids.keys()) {
-      const sample = processSample(pid);
-      if (sample !== undefined) before.set(pid, sample.ticks);
-    }
-  }
-  const startedAt = performance.now();
-  const deadline = startedAt + durationMs;
-  if (activity === undefined) await Bun.sleep(durationMs);
-  else await activity(deadline);
-  const elapsedMs = performance.now() - startedAt;
-  const daemonAfter = processSample(process.pid);
-  const daemonAndHarness = {
-    pssMiB: Number(((daemonAfter?.pssKiB ?? 0) / 1024).toFixed(2)),
-    rssMiB: Number(((daemonAfter?.rssKiB ?? 0) / 1024).toFixed(2)),
-    cpuPercent: Number((
-      ((daemonAfter?.ticks ?? 0) - (daemonBefore?.ticks ?? 0))
-      / hertz
-      / (elapsedMs / 1_000)
-      * 100
-    ).toFixed(2)),
-  };
-  const screens: ScreenResources[] = [];
-  for (const owner of owners) {
-    const pidRoles = new Map(beforePids.get(owner.surfaceId) ?? []);
-    for (const [pid, role] of await screenPidRoles(owner, generationBySurface.get(owner.surfaceId) ?? 1)) {
-      pidRoles.set(pid, role);
-    }
-    const processes: ScreenResources["processes"] = [];
-    for (const [pid, role] of pidRoles) {
-      const sample = processSample(pid);
-      if (sample === undefined) continue;
-      const firstTicks = before.get(pid);
-      const ticks = firstTicks === undefined ? 0 : Math.max(0, sample.ticks - firstTicks);
-      let executable = "unknown";
-      try {
-        executable = path.basename(readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0")[0] ?? "") || "unknown";
-      } catch {
-        // Process identity is best-effort diagnostic data.
-      }
-      processes.push({
-        pid,
-        role,
-        executable,
-        pssMiB: Number((sample.pssKiB / 1024).toFixed(2)),
-        rssMiB: Number((sample.rssKiB / 1024).toFixed(2)),
-        cpuPercent: Number(((ticks / hertz) / (elapsedMs / 1000) * 100).toFixed(2)),
-      });
-    }
-    processes.sort((left, right) => left.pid - right.pid);
-    screens.push({
-      surfaceId: owner.surfaceId,
-      pids: processes.map((entry) => entry.pid),
-      pssMiB: Number(processes.reduce((sum, entry) => sum + entry.pssMiB, 0).toFixed(2)),
-      rssMiB: Number(processes.reduce((sum, entry) => sum + entry.rssMiB, 0).toFixed(2)),
-      cpuPercent: Number(processes.reduce((sum, entry) => sum + entry.cpuPercent, 0).toFixed(2)),
-      gpu: { attributable: false, utilizationPercent: null, vramMiB: null },
-      processes,
-    });
-  }
-  return {
-    durationMs: Number(elapsedMs.toFixed(2)),
-    screens,
-    daemonAndHarness,
-    total: {
-      pssMiB: Number((screens.reduce((sum, screen) => sum + screen.pssMiB, 0) + daemonAndHarness.pssMiB).toFixed(2)),
-      rssMiB: Number((screens.reduce((sum, screen) => sum + screen.rssMiB, 0) + daemonAndHarness.rssMiB).toFixed(2)),
-      cpuPercent: Number((screens.reduce((sum, screen) => sum + screen.cpuPercent, 0) + daemonAndHarness.cpuPercent).toFixed(2)),
-    },
-  };
-}
-
-async function gpuSnapshot(): Promise<Record<string, unknown>> {
-  const binary = Bun.which("nvidia-smi");
-  if (binary === null) return { available: false, attributionAvailable: false, reason: "nvidia-smi is unavailable" };
-  const result = await command([
-    binary,
-    "--query-gpu=name,utilization.gpu,memory.used,memory.total",
-    "--format=csv,noheader,nounits",
-  ]);
-  if (result.status !== 0) {
-    return { available: false, attributionAvailable: false, reason: result.stderr || "nvidia-smi failed" };
-  }
-  return {
-    available: true,
-    attributionAvailable: false,
-    reason: "nvidia-smi does not expose attributable graphics-process VRAM on this stack",
-    systemTotals: result.stdout.split("\n").map((line) => {
-      const [name, utilizationPercent, usedMiB, totalMiB] = line.split(",").map((value) => value.trim());
-      return { name, utilizationPercent: Number(utilizationPercent), usedMiB: Number(usedMiB), totalMiB: Number(totalMiB) };
-    }),
-  };
-}
-
-async function currentGeneration(harness: Harness, owner: Owner): Promise<number> {
-  const row = harness.svc.db.query("SELECT runtime_generation FROM bot_surfaces WHERE surface_id = ?")
-    .get(owner.surfaceId) as { runtime_generation: number };
-  return row.runtime_generation;
-}
-
-async function waitReady(harness: Harness, owner: Owner): Promise<number> {
-  const startedAt = performance.now();
-  harness.svc.screens.open(owner);
-  await until(async () => {
-    const response = await fetch(`${harness.baseUrl}/api/computer/state?botId=${owner.botId}&surfaceId=${owner.surfaceId}`);
-    const view = await response.json() as { state?: string; activity?: string };
-    if (view.state === "unavailable") {
-      const runtime = harness.svc.screens.status(owner);
-      if (runtime.state === "failed") throw new Error(runtime.failure);
-      return undefined;
-    }
-    return view.state === "ready" ? true : undefined;
-  }, 30_000, `Screen ${owner.surfaceId} did not become ready`);
-  return Number((performance.now() - startedAt).toFixed(2));
-}
-
 async function destroyBot(harness: Harness, owner: Owner): Promise<number> {
   const startedAt = performance.now();
   const result = await api<{ status: string; failures?: unknown }>(
@@ -628,34 +356,6 @@ async function destroyBot(harness: Harness, owner: Owner): Promise<number> {
 async function killUnit(owner: Owner, generation: number, role: "input" | "compositor"): Promise<void> {
   const result = await command(["systemctl", "--user", "kill", "--signal=KILL", unitName(owner.surfaceId, generation, role)]);
   if (result.status !== 0) throw new Error(`could not crash ${role}: ${result.stderr}`);
-}
-
-function matchingProcessPids(executableName: string): Set<number> {
-  const pids = new Set<number>();
-  for (const entry of readdirSync("/proc")) {
-    if (!/^\d+$/.test(entry)) continue;
-    try {
-      const commandLine = readFileSync(`/proc/${entry}/cmdline`, "utf8").split("\0");
-      const stat = readFileSync(`/proc/${entry}/stat`, "utf8");
-      const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
-      const directDaemonChild = Number(fields[1]) === process.pid;
-      const cgroup = readFileSync(`/proc/${entry}/cgroup`, "utf8");
-      const surfaceUnitChild = cgroup.includes("omarchy-bot-screen-");
-      if (!directDaemonChild && !surfaceUnitChild) continue;
-      const matchesEncoder = executableName !== "ffmpeg"
-        || commandLine.some((argument) => argument.includes("repeat-headers=1:aud=1"));
-      if (path.basename(commandLine[0] ?? "") === executableName && matchesEncoder) {
-        pids.add(Number(entry));
-      }
-    } catch {
-      // Processes may exit while /proc is sampled.
-    }
-  }
-  return pids;
-}
-
-function activeEncoderCount(): number {
-  return matchingProcessPids("ffmpeg").size;
 }
 
 async function newProcessPid(executableName: string, before: ReadonlySet<number>): Promise<number> {
@@ -778,7 +478,7 @@ async function runRow(profile: "1080p" | "720p", count: number, durationMs: numb
     unopenedNoRuntime = owners.every((owner) =>
       !existsSync(path.join(harness.svc.cfg.botScreenRuntimeDir, owner.surfaceId))
     );
-    startupMs.push(...await Promise.all(owners.map((owner) => waitReady(harness, owner))));
+    startupMs.push(...await Promise.all(owners.map((owner) => waitScreenReady(harness, owner))));
     console.log(`Bot Screen load ${profile}/${count}: runtimes ready`);
     const workloadApplication = process.env.OMARCHY_BOT_LOAD_APP_BIN;
     if (workloadApplication === undefined) throw new Error("capacity workload application is unavailable");
@@ -1145,7 +845,7 @@ async function runRow(profile: "1080p" | "720p", count: number, durationMs: numb
         const provisioned: Owner = { botId, surfaceId: bot.surfaceId };
         if (trackedSurfaceIds.has(provisioned.surfaceId)) throw new Error("Bot reprovision reused a destroyed Surface");
         trackedSurfaceIds.add(provisioned.surfaceId);
-        const cycleStartupMs = await waitReady(harness, provisioned);
+        const cycleStartupMs = await waitScreenReady(harness, provisioned);
         owners[0] = provisioned;
         repeatedProvisionDestroy.push({
           cycle,
@@ -1204,7 +904,7 @@ async function runRow(profile: "1080p" | "720p", count: number, durationMs: numb
       "input-helper crash was not observed",
     );
     crashes.push({ surfaceId: faultOwner.surfaceId, role: "input-helper", isolated: siblingReady() });
-    startupMs.push(await waitReady(harness, faultOwner));
+    startupMs.push(await waitScreenReady(harness, faultOwner));
 
     generation = await currentGeneration(harness, faultOwner);
     await killUnit(faultOwner, generation, "compositor");

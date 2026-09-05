@@ -2,6 +2,26 @@
 
 Status: implemented
 
+> **Current authority:** [Computer ADR 0008](../../docs/contexts/computer-control/adr/0008-run-cage-bot-desktops.md) replaces the nested-Hyprland runtime below with pure-headless Cage. [System ADR 0009](../../docs/adr/0009-share-work-files-isolate-bot-screens.md) and the [product model](../../docs/workspace-redesign.md#shared-workspace-and-plugin-boundary) govern shared work files, on-demand desktop sessions, independent input, and viewer lifetime. Requirements below prescribing per-Bot browser/application profiles are superseded: application-internal state is outside the desktop contract. Historical completion does not establish current host top-bar/shortcut safety or acceptable normal-use resource cost. Requirement homes: [requirement map](../shared-workspace-desktop-boundary/requirement-map.md#bot-screens-specification).
+
+## Requirement map (2026-09-05)
+
+Still-valid (use the current homes, not nested Hyprland as the instruction):
+
+- One Bot Screen identity; many Threads; Bots sharing an Agent stay separate → ADR 0009; [workspace-redesign Computer](../../docs/workspace-redesign.md#10-computer); [parent spec](../shared-workspace-desktop-boundary/spec.md) stories 36–39.
+- Independent pixels, focus, pointer, keyboard; concurrent Bots → ADR 0008/0009; parent stories 40–41.
+- Preview, Expanded Web Control, Takeover, incomplete Takeover stays unfinished → workspace-redesign Computer; [ADR 0003](../../docs/adr/0003-hold-takeover-at-computer-tool-boundary.md); parent stories 57–65.
+- Switch projection without cancelling the other Bot → ADR 0009; parent stories 51–55.
+- Deletion removes plugin-owned runtime; Native Sessions survive → [ADR 0006](../../docs/adr/0006-bot-deletion-is-local-only.md), ADR 0009; parent story 75.
+- Host Session stays one Omarchy login; no child autostart or environment import → ADR 0008/0009; parent stories 44, 68–73.
+- Isolation is routing, not an adversarial sandbox → ADR 0008/0009; parent story 76.
+
+Retired or historical evidence only:
+
+- Nested Hyprland, parent-Wayland bootstrap, and `hyprctl` readiness → historical in [ADR 0007](../../docs/contexts/computer-control/adr/0007-provision-nested-hyprland-per-bot.md). Current compositor is ADR 0008.
+- Per-Bot browser/Electron profile or login-sharing policy → ADR 0009. Private runtime directories remain plugin-owned.
+- Four concurrent 1080p streams as default capacity or host-safety proof → [historical capacity report](../bot-screen-media-desktop/capacity-report.json); current acceptance is [required host/resource evidence](../../docs/workspace-redesign.md#required-host-safety-and-resource-evidence).
+
 ## Problem Statement
 
 omarchy-bot currently presents a Computer Surface for the selected Bot, but every Computer path targets one physical Shared Screen: the daemon owns one `ComputerBroker`, one fixed lease row, one computer worker, one screenshot cache, and unscoped control/snapshot routes. Agent-native desktop tools also bypass the Broker. The UI can observe still images and orchestrate a nominal Takeover, but it cannot stream or accept browser input, cannot enforce Bot–human exclusion, and cannot isolate one Bot's pixels, focus, cursor, or input from another Bot.
@@ -10,7 +30,7 @@ The required product is different: each Bot needs its own persistent independent
 
 ## Proven Platform Basis
 
-The feasibility investigation is recorded in `docs/research/omarchy-bot-screen-feasibility.md` and the decision in `docs/contexts/computer-control/adr/0007-provision-nested-hyprland-per-bot.md`.
+The feasibility investigation is recorded in `docs/research/omarchy-bot-screen-feasibility.md`. The nested-Hyprland decision in `docs/contexts/computer-control/adr/0007-provision-nested-hyprland-per-bot.md` is historical; current compositor and lifetime are ADR 0008 and system ADR 0009.
 
 On the target Hyprland 0.56.2/Aquamarine 0.14.0 workstation, executable probes proved:
 
@@ -114,7 +134,7 @@ XDG_CACHE_HOME=<Bot profile>
 
 The child receives a purpose-built configuration. It does not run another UWSM session. Full Omarchy autostart, global portal activation, monitor/power services, shell provisioning and host environment import are prohibited inside children.
 
-Bot application state uses a per-Bot config/state/cache profile so concurrent Chromium/Electron instances cannot collide on singleton profile locks or silently open windows in another Bot's process. The ordinary filesystem remains shared under the host user. This is operational separation, not adversarial file isolation.
+Historical implementation: Bot applications received per-Bot config/state/cache directories to avoid Chromium/Electron singleton collisions; the ordinary filesystem remained shared under the host user. This is not a current requirement to manage application profiles or login sharing: [ADR 0009](../../docs/adr/0009-share-work-files-isolate-bot-screens.md) leaves those behaviors to Agents and applications while retaining private desktop runtime and explicit input/display routing.
 
 ## Capture and WebRTC
 
@@ -261,7 +281,7 @@ Separate child sockets and per-Bot profiles are not a security boundary between 
 
 - `docs/research/omarchy-bot-screen-feasibility.md` is the platform evidence source.
 - `docs/contexts/computer-control/CONTEXT.md` supplies canonical vocabulary.
-- `docs/contexts/computer-control/adr/0007-provision-nested-hyprland-per-bot.md` is authoritative over superseded Shared Screen ADR 0005 and the global-arbitration portions of ADR 0004.
+- Nested-Hyprland ADR 0007 is historical evidence for why Shared Screen ADR 0005 and global-arbitration portions of ADR 0004 were replaced. Current compositor, transport, and lifetime are [ADR 0008](../../docs/contexts/computer-control/adr/0008-run-cage-bot-desktops.md) and [system ADR 0009](../../docs/adr/0009-share-work-files-isolate-bot-screens.md).
 - `docs/adr/0003-hold-takeover-at-computer-tool-boundary.md` defines the cross-context Agent continuation seam.
 - `docs/adr/0006-bot-deletion-is-local-only.md` is authoritative for direct deletion: Bots have no archive lifecycle and Native Sessions are Agent-owned.
 - The clean cutover is implemented through the eleven resolved tickets in `.scratch/bot-screens/issues/`; the measured production envelope is published in `docs/research/omarchy-bot-screen-feasibility.md`.

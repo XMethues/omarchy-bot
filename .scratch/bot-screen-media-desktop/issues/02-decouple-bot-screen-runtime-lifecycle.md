@@ -6,6 +6,8 @@
 
 **Status:** resolved
 
+> **Historical prefactor:** preserving nested-Hyprland behavior was the then-current runtime. Current compositor is [ADR 0008](../../../docs/contexts/computer-control/adr/0008-run-cage-bot-desktops.md). Do not restore Hyprland as production. Accounting: [requirement map](../../shared-workspace-desktop-boundary/requirement-map.md#media-and-desktop-specification).
+
 - [x] Bot Screen callers continue to provision, observe, input, recover, and stop Screens through Bot-owned lifecycle and operation results rather than compositor commands or process identifiers.
 - [x] The current nested-Hyprland implementation still reaches ready state, captures the correct output, accepts existing helper input, and tears down completely.
 - [x] The manager's readiness contract describes a private Wayland socket, configured output geometry, ready desktop surface, input helper, and computer worker without naming Hyprland, `hyprctl`, or Alacritty.

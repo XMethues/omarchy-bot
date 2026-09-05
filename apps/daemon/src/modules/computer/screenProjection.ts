@@ -98,6 +98,17 @@ export interface ProjectionFailureDiagnostic {
   readonly metrics: Readonly<ProjectionLoadMetrics>;
 }
 
+/** Viewer-driven capture/encode work for one Screen. Not an HTTP status contract. */
+export interface SurfaceProjectionMedia {
+  readonly surfaceId: SurfaceId;
+  readonly viewers: number;
+  readonly previewViewers: number;
+  readonly expandedViewers: number;
+  readonly captureActive: boolean;
+  readonly encodingActive: boolean;
+  readonly encoderPids: readonly number[];
+}
+
 export class ScreenProjectionUnavailableError extends Error {
   constructor(
     readonly reason: ScreenProjectionFailureReasonDto,
@@ -308,7 +319,9 @@ export class ScreenProjectionService {
       );
     }
     const source = await this.screens.projectionSource(owner);
-    if (source === undefined) throw new Error("Bot Screen is unavailable");
+    if (source === undefined) {
+      throw new Error(this.screens.status(owner).failure ?? "Bot Screen is unavailable");
+    }
 
     const id = randomUUID();
     const peer = new rtc.PeerConnection(`screen-projection-${id}`, {
@@ -513,6 +526,29 @@ export class ScreenProjectionService {
     return failure.diagnostic.metrics;
   }
 
+  /**
+   * Viewer-driven capture and encode work still attached to a Screen.
+   * Internal/harness observation; not an HTTP status contract.
+   */
+  surfaceMedia(surfaceId: SurfaceId): SurfaceProjectionMedia {
+    const sessions = [...this.#sessions.values()].filter((session) => session.source.surfaceId === surfaceId);
+    const encoderPids = sessions.flatMap((session) => {
+      const pid = session.encoder?.pid;
+      return pid === undefined ? [] : [pid];
+    });
+    return {
+      surfaceId,
+      viewers: sessions.length,
+      previewViewers: sessions.filter((session) => session.mode === "preview").length,
+      expandedViewers: sessions.filter((session) => session.mode === "expanded").length,
+      captureActive: sessions.some((session) =>
+        session.captureStream !== undefined || session.timer !== undefined || session.captureInFlight
+      ),
+      encodingActive: sessions.some((session) => session.encoder !== undefined || session.videoStart !== undefined),
+      encoderPids,
+    };
+  }
+
   /** Internal terminal failure snapshot for focused integration diagnostics. */
   failureDiagnostic(owner: ComputerSurfaceOwner, sessionId: string): ProjectionFailureDiagnostic | undefined {
     const failure = this.#failures.get(sessionId);
@@ -675,11 +711,6 @@ export class ScreenProjectionService {
     session.nextFrameAt = mode === "idle" ? undefined : performance.now();
     session.state = mode;
     if (mode === "expanded") {
-      for (const candidate of this.#sessions.values()) {
-        if (candidate !== session && candidate.source.surfaceId === session.source.surfaceId) {
-          this.#close(candidate, false);
-        }
-      }
       this.#startVideo(session);
       if (changed || !this.#isInputController(session)) void this.#claimInput(session).catch(() => {});
     } else if (mode === "preview") {
@@ -1189,7 +1220,9 @@ export class ScreenProjectionService {
     ) return false;
     const surfaceId = session.source.surfaceId;
     const previous = this.#controllers.get(surfaceId);
-    if (previous !== undefined && previous.session !== session) this.#close(previous.session, false);
+    if (previous !== undefined && previous.session !== session) {
+      void this.#revokeInput(previous);
+    }
     const epoch = (this.#controllerEpochs.get(surfaceId) ?? 0) + 1;
     this.#controllerEpochs.set(surfaceId, epoch);
     const controller: InputController = {

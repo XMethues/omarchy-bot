@@ -6,6 +6,8 @@
 
 **Status:** resolved
 
+> **Historical capacity gate:** the four-stream row and checked-in approval are historical measurement evidence, not current Host Session or normal-use-cost acceptance. Follow [required host/resource evidence](../../../docs/workspace-redesign.md#required-host-safety-and-resource-evidence). Report: [capacity-report.json](../capacity-report.json). Accounting: [requirement map](../../shared-workspace-desktop-boundary/requirement-map.md#media-and-desktop-specification).
+
 - [x] The final-stack harness exercises the production daemon, real Cage runtime, long-lived capture/encoder, actual WebRTC peer, built web client, and browser decode/paint/canvas readback rather than a synthetic codec loop.
 - [x] The matrix covers 1, 2, 4, and 8 concurrent 1080p Bot Screens plus the selectable 720p fallback using sustained phases comparable to the checked-in approval.
 - [x] Four concurrent 1080p Screens each sustain at least 15 source, encoded, sent, received, decoded, and browser-displayed FPS.

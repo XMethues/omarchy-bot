@@ -351,6 +351,50 @@ test.describe("chat through a bot", () => {
       /inspect|progress|updated|delta/i,
     );
 
+    // Reverse before the close finishes: geometry must continue from its
+    // current value, without resetting the streaming disclosure's open state.
+    const reversal = await trigger.evaluate(async (button) => {
+      const content = document.getElementById(button.getAttribute("aria-controls") ?? "");
+      if (content === null) throw new Error("Thinking content is missing");
+      const expandedHeight = content.getBoundingClientRect().height;
+      (button as HTMLButtonElement).click();
+      const closing: number[] = [];
+      const started = performance.now();
+      while (performance.now() - started < 60) {
+        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+        closing.push(content.getBoundingClientRect().height);
+      }
+      const beforeReversal = content.getBoundingClientRect().height;
+      (button as HTMLButtonElement).click();
+      const afterReversal = content.getBoundingClientRect().height;
+      const reopened = performance.now();
+      while (performance.now() - reopened < 280) {
+        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      }
+      return { expandedHeight, closing, beforeReversal, afterReversal, finalHeight: content.getBoundingClientRect().height };
+    });
+    expect(reversal.closing.some((height) => height > 0 && height < reversal.expandedHeight - 0.5)).toBe(true);
+    expect(Math.abs(reversal.afterReversal - reversal.beforeReversal)).toBeLessThan(1);
+    expect(reversal.finalHeight).toBeCloseTo(reversal.expandedHeight, 0);
+    await expect(trigger).toHaveAttribute("aria-expanded", "true");
+
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    const reduced = await trigger.evaluate(async (button) => {
+      const content = document.getElementById(button.getAttribute("aria-controls") ?? "");
+      if (content === null) throw new Error("Thinking content is missing");
+      (button as HTMLButtonElement).click();
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      const closedHeight = content.getBoundingClientRect().height;
+      const isInert = content.firstElementChild?.hasAttribute("inert");
+      (button as HTMLButtonElement).click();
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      return { closedHeight, isInert, openHeight: content.getBoundingClientRect().height };
+    });
+    expect(reduced.closedHeight).toBe(0);
+    expect(reduced.isInert).toBe(true);
+    expect(reduced.openHeight).toBeCloseTo(reversal.expandedHeight, 0);
+    await page.emulateMedia({ reducedMotion: "no-preference" });
+
     const hidden = await request.patch(`/api/bots/${botId}`, { data: { showThinking: false } });
     expect(hidden.ok()).toBe(true);
     await expect(disclosure).toHaveCount(0);

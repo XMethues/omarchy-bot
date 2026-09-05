@@ -313,39 +313,6 @@ async function seedWorkspaceApi(page: Page, options: SeedOptions = {}): Promise<
           ],
     );
   });
-  await page.route("**/api/bots/*/changes*", async (route) => {
-    const url = new URL(route.request().url());
-    if (url.pathname.endsWith("/detail")) {
-      await fulfillJson(route, {
-        kind: "text",
-        path: "src/release-checklist.ts",
-        status: "modified",
-        patch: "+export const releaseReady = true;\n",
-        truncated: false,
-      });
-      return;
-    }
-    await fulfillJson(route, {
-      state: "ready",
-      generatedAt: FIXED_LATE,
-      changedFileCount: 2,
-      additions: 5,
-      deletions: 1,
-      truncated: false,
-      files: [
-        {
-          path: "src/release-checklist.ts",
-          status: "modified",
-          counts: { kind: "known", additions: 4, deletions: 1 },
-        },
-        {
-          path: "notes/release plan.txt",
-          status: "untracked",
-          counts: { kind: "known", additions: 1, deletions: 0 },
-        },
-      ],
-    });
-  });
   await page.route("**/api/dictation", (route) => fulfillJson(route, { state: "idle" }));
   await page.route("**/api/computer/state**", (route) => {
     const state = options.computerState ?? "ready";
@@ -416,6 +383,16 @@ async function expectNoSeriousOrCriticalViolations(page: Page, state: string): P
 
 async function expectInsideViewport(page: Page, locator: Locator): Promise<void> {
   await expect(locator).toBeVisible();
+  // This checks resting geometry; motion-specific tests sample intermediate frames.
+  await locator.evaluate(async (element) => {
+    const transitions: Animation[] = [];
+    for (let current: Element | null = element; current !== null; current = current.parentElement) {
+      transitions.push(...current.getAnimations().filter(
+        (animation) => animation.effect?.getComputedTiming().iterations !== Infinity,
+      ));
+    }
+    await Promise.all(transitions.map((animation) => animation.finished.catch(() => undefined)));
+  });
   const box = await locator.boundingBox();
   const viewport = page.viewportSize();
   expect(box, "visible surface must have a bounding box").not.toBeNull();
@@ -596,7 +573,7 @@ test.describe("ticket 13 responsive, accessible, and visual QA", () => {
     await expect(settings).toBeHidden();
   });
 
-  test("keeps the final Changes rail compact, themed, focusable, and responsive beside the Composer", async ({ page }) => {
+  test("keeps the Computer rail compact, themed, focusable, and responsive beside the Composer", async ({ page }) => {
     await page.setViewportSize(desktopViewport);
     await page.emulateMedia({ colorScheme: "light", reducedMotion: "no-preference" });
     await seedWorkspaceApi(page);
@@ -605,8 +582,9 @@ test.describe("ticket 13 responsive, accessible, and visual QA", () => {
     const conversation = page.getByLabel("Conversation workspace");
     await page.getByRole("button", { name: "Open Computer Surface", exact: true }).click();
     const capabilities = page.getByRole("complementary", { name: "Workspace capabilities", exact: true });
-    await capabilities.getByRole("tab", { name: "Changes" }).click();
-    await expect(capabilities.getByText("2 changed files", { exact: true })).toBeVisible();
+    await expect(capabilities.getByRole("heading", { name: "Release Partner’s screen" })).toBeVisible();
+    await expect(capabilities.getByRole("tab", { name: "Changes" })).toHaveCount(0);
+    await expect(capabilities.getByRole("button", { name: "Refresh changes", exact: true })).toHaveCount(0);
     await expectInsideViewport(page, capabilities);
     await expect(conversation).toBeVisible();
     await expect(page.getByTestId("composer")).toBeVisible();
@@ -618,25 +596,25 @@ test.describe("ticket 13 responsive, accessible, and visual QA", () => {
     expect(desktopBox!.width).toBeLessThanOrEqual(560);
     await expect(page.getByRole("complementary")).toHaveCount(1);
 
-    const refresh = capabilities.getByRole("button", { name: "Refresh changes" });
-    await refresh.focus();
-    await expect(refresh).toBeFocused();
+    const close = capabilities.getByRole("button", { name: "Close capabilities" });
+    await close.focus();
+    await expect(close).toBeFocused();
     const capabilityHeading = capabilities.getByRole("heading", { name: "Capabilities", exact: true });
     const lightText = await capabilityHeading.evaluate((element) => getComputedStyle(element).color);
     await page.emulateMedia({ colorScheme: "dark", reducedMotion: "reduce" });
     await expect.poll(
       () => capabilityHeading.evaluate((element) => getComputedStyle(element).color),
     ).not.toBe(lightText);
-    await expectNoSeriousOrCriticalViolations(page, "Desktop Changes capability");
+    await expectNoSeriousOrCriticalViolations(page, "Desktop Computer capability");
 
     await page.setViewportSize(narrowViewport);
     await expect(conversation).toHaveCount(0);
     await expectInsideViewport(page, capabilities);
     const narrowBox = await capabilities.boundingBox();
     expect(narrowBox?.width).toBe(narrowViewport.width);
-    await expect(capabilities.getByRole("button", { name: "Close capabilities" })).toBeVisible();
-    await expectNoSeriousOrCriticalViolations(page, "Narrow dark reduced-motion Changes capability");
-    await capabilities.getByRole("button", { name: "Close capabilities" }).click();
+    await expect(close).toBeVisible();
+    await expectNoSeriousOrCriticalViolations(page, "Narrow dark reduced-motion Computer capability");
+    await close.click();
     await expect(conversation).toBeVisible();
     await expect(page.getByTestId("composer")).toBeVisible();
   });

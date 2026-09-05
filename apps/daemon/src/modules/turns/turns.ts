@@ -22,6 +22,7 @@ import type { Supervisor } from "../../supervision/supervisor.ts";
 import { HttpError } from "../bots/bots.ts";
 import type { ComputerBroker } from "../computer/broker.ts";
 import type { MailboxService } from "../mailbox/mailbox.ts";
+import { resolveWorkCwd } from "../workspace/sharedWorkspace.ts";
 
 interface TurnContext {
   turnId: string;
@@ -287,7 +288,7 @@ export class TurnService {
     const nativeSessionId = startOptions.freshSession
       ? undefined
       : this.threads.getNativeSession(threadId);
-    const options = { cwd: thread.cwd ?? process.cwd(), instructions: botRow?.instructions ?? "" };
+    const options = { cwd: resolveWorkCwd(thread.cwd), instructions: botRow?.instructions ?? "" };
     if (
       nativeSessionId !== undefined
       && !this.agents.capabilityInventory(agentId)?.nativeThreadActions.includes("resume")

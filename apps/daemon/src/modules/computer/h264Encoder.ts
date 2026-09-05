@@ -28,6 +28,8 @@ export interface H264EncoderProcess {
   requestKeyframe(): void;
   readonly done: Promise<void>;
   close(): Promise<void>;
+  /** Current ffmpeg generation pid, if a process is running. */
+  readonly pid: number | undefined;
 }
 
 interface H264EncoderOptions {
@@ -299,6 +301,9 @@ export function startH264Encoder(options: H264EncoderOptions): H264EncoderProces
 
   return {
     done: lifetime.promise,
+    get pid(): number | undefined {
+      return current?.process.pid;
+    },
     writeFrame(bytes): H264EncoderWriteResult {
       if (bytes.byteLength !== options.width * options.height * 4) {
         throw new Error("H.264 encoder received invalid RGBA frame geometry");

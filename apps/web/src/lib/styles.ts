@@ -50,6 +50,10 @@ const styles = stylex.create({
     whiteSpace: "normal",
     minWidth: 0,
   },
+  disclosureContent: {
+    minHeight: 0,
+    overflow: "hidden",
+  },
   markdownLink: {
     color: "var(--color-text-accent)",
     textDecoration: "underline",

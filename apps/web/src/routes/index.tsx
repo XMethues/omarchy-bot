@@ -23,7 +23,7 @@ import { CreateBotDialog } from "../components/CreateBotDialog.tsx";
 import { HistoryDialog } from "../components/HistoryDialog.tsx";
 import { BotSettingsPanel } from "../components/BotSettingsPanel.tsx";
 import { SettingsDialog } from "../components/SettingsDialog.tsx";
-import { CapabilityPanel, type WorkspaceCapability } from "../components/CapabilityPanel.tsx";
+import { CapabilityPanel } from "../components/CapabilityPanel.tsx";
 import { useVoiceAutoSendSetting } from "../components/VoiceSettingsControl.tsx";
 import { TranscriptAttention } from "../components/TranscriptAttention.tsx";
 
@@ -50,7 +50,7 @@ const QUERY_KEYS: Tags = {
 type RightRegionState =
   | { mode: "closed" }
   | { mode: "bot-settings" }
-  | { mode: "capabilities"; activeCapability: WorkspaceCapability };
+  | { mode: "capabilities" };
 
 interface ConversationWorkspaceProps {
   children: ReactNode;
@@ -75,8 +75,7 @@ function HomeScreen(): JSX.Element {
   const [historyOpen, setHistoryOpen] = useState(false);
   const [rightRegion, setRightRegion] = useState<RightRegionState>({ mode: "closed" });
   const botSettingsOpen = rightRegion.mode === "bot-settings";
-  const computerOpen =
-    rightRegion.mode === "capabilities" && rightRegion.activeCapability === "browser";
+  const computerOpen = rightRegion.mode === "capabilities";
   const [computerError, setComputerError] = useState<string | undefined>(undefined);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [pendingDeleteBot, setPendingDeleteBot] = useState<BotViewDto | undefined>(undefined);
@@ -527,6 +526,7 @@ function HomeScreen(): JSX.Element {
       <Layout
         height="fill"
         padding={0}
+        className="workspace-layout"
         header={
           <ConversationHeader
             {...(bot !== undefined ? { bot } : {})}
@@ -545,7 +545,7 @@ function HomeScreen(): JSX.Element {
                 setRightRegion({ mode: "closed" });
                 return;
               }
-              setRightRegion({ mode: "capabilities", activeCapability: "browser" });
+              setRightRegion({ mode: "capabilities" });
             }}
             mobileNavigationTriggerRef={mobileNavigationTriggerRef}
             computerTriggerRef={computerTriggerRef}
@@ -574,11 +574,11 @@ function HomeScreen(): JSX.Element {
                   );
                 }}
               />
-            ) : rightRegion.mode === "capabilities" ? (
+            ) : (
               <CapabilityPanel
                 key={`${bot.id}:${bot.surfaceId}`}
+                open={rightRegion.mode === "capabilities"}
                 bot={bot}
-                {...(thread !== undefined ? { threadId: thread.id } : {})}
                 view={
                   computer.data
                     ?? {
@@ -593,10 +593,6 @@ function HomeScreen(): JSX.Element {
                     }
                 }
                 projectionUrl={api.computerProjectionUrl({ botId: bot.id, surfaceId: bot.surfaceId })}
-                activeCapability={rightRegion.activeCapability}
-                onCapabilityChange={(activeCapability) =>
-                  setRightRegion({ mode: "capabilities", activeCapability })
-                }
                 returnFocusRef={computerTriggerRef}
                 busy={computerAction.isPending}
                 {...(computer.isPending ? { loading: true } : {})}
@@ -606,7 +602,7 @@ function HomeScreen(): JSX.Element {
                 onTakeControl={() => computerAction.mutateAsync("take").then(() => true, () => false)}
                 onReturnToBot={() => computerAction.mutateAsync("return").then(() => true, () => false)}
               />
-            ) : null
+            )
           ) : undefined
         }
       />

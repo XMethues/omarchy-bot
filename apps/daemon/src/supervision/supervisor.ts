@@ -9,6 +9,7 @@ import type {
   ComputerCommand,
 } from "@omarchy-bot/agent-contract";
 import { isSurfaceId, type AgentId, type SurfaceId } from "@omarchy-bot/domain";
+import { prepareSharedWorkspace } from "../modules/workspace/sharedWorkspace.ts";
 import { WorkerClient, sanitizedEnv } from "./workerClient.ts";
 
 export interface SupervisorHooks {
@@ -137,6 +138,7 @@ export class Supervisor {
       ...scope.env,
       OMARCHY_BOT_SURFACE_ID: scope.surfaceId,
       OMARCHY_BOT_RUNTIME_GENERATION: String(scope.runtimeGeneration),
+      OMARCHY_BOT_APPLICATION_CWD: prepareSharedWorkspace(),
     };
     const wrappedCommand = scope.wrapCommand?.(workerEnvironment);
     const client = new WorkerClient({
