@@ -31,7 +31,18 @@ export interface ComputerActPayload {
   text?: string;
   /** Screenshot as PNG/JPEG bytes — daemon persists to artifacts and returns a ref. */
   image?: { mediaType: "image/png" | "image/jpeg"; base64: string };
-  windowList?: { id: string; title: string; appId?: string; focused: boolean }[];
+  windowList?: ComputerWindowListItem[];
+}
+
+export interface ComputerWindowListItem {
+  id: string;
+  title: string;
+  appId?: string;
+  focused: boolean;
+  pid?: number;
+  bounds?: { x: number; y: number; width: number; height: number };
+  workspace?: string;
+  clientType?: "x11" | "wayland";
 }
 
 export type ComputerWorkerOutbound =

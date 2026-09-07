@@ -57,8 +57,8 @@ Implementation is tracked by the [Shared Workspace and Bot Desktop Boundary Corr
 
 - **Shared Workspace default implemented:** implicit Agent sessions and supported application launches use `~/.omarchy-bot/workspace` under the live user home. Explicit Thread cwd values are unchanged. Native `session.resume` still only proves the daemon supplied cwd, not that a backend relocated an existing Native Session.
 - **Changes removed:** the Changes UI, Git summary/detail service, public endpoints, and client methods are gone. Retired `/api/bots/:id/changes` routes return ordinary missing-interface 404s.
-- **Screen startup repaired, host disruption separate:** Cage output configuration is retried while the compositor is alive, and projection `releaseInput` / snapshot capture no longer destroy a ready desktop. Public state exposes the failing stage. Prior top-bar/shortcut breakage was not shown to share that cause. The live plugin daemon was not restarted onto this tree.
-- **Unused-Bot cost recorded; selected-view resource windows unmet in the checked-in JSON; human host acceptance pending:** unused Bots add no Cage/capture/encoder stack. The checked-in [normal-use JSON](../.scratch/shared-workspace-desktop-boundary/normal-use-resource-report.json) did not measure retained-desktop / one-selected-projection windows (`OMARCHY_BOT_REAL_SCREEN_LOAD` unset on that run). Top bar, shortcuts, and ordinary host input remain a mandatory user gate.
+- **Screen startup repaired; production compositor is Sway:** output configuration is retried while the compositor is alive, and projection `releaseInput` / snapshot capture no longer destroy a ready desktop. Public state exposes the failing stage. Computer ADR 0009 is the production stack. Prior top-bar/shortcut breakage was not shown to share the historical Cage startup cause.
+- **Unused-Bot cost recorded; selected-view evidence and human acceptance pending:** unused Bots add no desktop/capture/transport stack. Historical Cage measurements and the bounded Sway/Xvnc experiments are evidence with different workloads, not a current Sway capacity result. The Sway stack still requires matched retained-desktop / one-selected-projection measurements plus top-bar, shortcut, and ordinary host-input acceptance.
 
 ### Migration boundary
 
@@ -254,7 +254,7 @@ Each Bot owns one Bot Screen identity with independent windows, pixels, focus, p
 - Do not show controller epochs, queues, runtime generations, or engineering diagnostics in normal UI.
 - A Computer glyph is always present in the Conversation Header. It is visually quiet while inactive and gains state only while the Bot is using the computer or needs human input.
 - The glyph toggles a right-side Astryx `LayoutPanel` at every window width with a low-frequency, lossless, read-only Computer Preview and plain-language activity.
-- Expanding the preview opens Web Control backed only by the H.264 Screen Projection media track. The HTTP PNG snapshot is an explicit read-only fallback, never an interactive image stream.
+- Expanding the preview opens Web Control. Production uses an on-demand WayVNC RFB Screen Projection through a dedicated view-only WebSocket, separate from the versioned preview/control WebSocket. The browser client is bundled noVNC; SDP/ICE and WebRTC are removed. The HTTP PNG snapshot remains an explicit read-only fallback, never an interactive image stream.
 - Show **Take control** only when human input is relevant.
 - While the user controls the Screen, show **Return to Bot**; re-observe before resuming automation.
 - Permanent deletion removes plugin-owned desktop runtime and session metadata before its Screen identity. It does not authorize erasing Shared Workspace files or taking ownership of application-internal state.
@@ -262,15 +262,15 @@ Each Bot owns one Bot Screen identity with independent windows, pixels, focus, p
 
 ### Desktop implementation and host boundary
 
-- Retain one pure-headless Cage runtime per active Bot Desktop Session, as selected in [Computer ADR 0008](contexts/computer-control/adr/0008-run-cage-bot-desktops.md). Provision it on the first graphical action or requested desktop view, not simply because a Bot was created.
-- Run only lightweight desktop infrastructure: a private runtime directory and Wayland socket, headless output, persistent application surface, and explicitly targeted capture/input. There is no per-Bot Omarchy/UWSM login session, shell/bar stack, or host autostart configuration.
+- Adopt one pure-headless Sway runtime per running Bot Desktop Session, with view-only WayVNC projection, existing Computer Broker-authorized human input, and native Sway IPC window control, as selected in [Computer ADR 0009](contexts/computer-control/adr/0009-adopt-sway-bot-desktops.md). Production provisions Sway for every new Bot Desktop Session. Do not expose a compositor selector or retain dual production runtimes. Provision on the first graphical action or requested desktop view, not simply because a Bot was created.
+- Run only lightweight desktop infrastructure: private runtime, Wayland, Sway IPC, VNC, D-Bus, and application-profile endpoints; headless output; persistent application surface; and explicitly targeted capture/input. There is no per-Bot Omarchy/UWSM login session, shell/bar stack, or host autostart configuration.
 - Bot A and Bot B may operate independently. The Computer Broker coordinates Bot versus human input on the same Screen; it does not serialize unrelated Bots or manage workspace files.
 - A client switching from A to B releases its old projection and input authority and connects to B. A's background work continues under its existing authority rules; switching does not cancel a Turn, destroy A's desktop, or implicitly finish an outstanding human Takeover.
-- Each client projects only its selected Screen. When a Screen has no viewers, stop its continuous preview capture and video encoding; this does not prohibit screenshots explicitly requested by an Agent or stop its applications. A projection disconnect is not a session-destruction policy.
+- Each client projects only its selected Screen. When a Screen has no viewers, stop unused continuous capture and transport work; this does not prohibit screenshots explicitly requested by an Agent, interrupt an unfinished graphical task, or stop its applications. Reopening must show the same live page/window state. A projection disconnect is not a session-destruction policy.
 - Application launch and desktop tools receive the intended Bot display endpoint. Installing a browser per Bot, synchronizing Cookies, choosing shared versus separate browser profiles, and controlling application-internal concurrency are outside this contract.
 - The Host Session's top bar, shortcuts, focus, and physical input remain usable through provisioning, operation, projection switches, failures, and cleanup. Child environments never overwrite global systemd/D-Bus activation state; teardown addresses only plugin-owned child processes or transient application units.
 - Private display routing is operational isolation, not an Agent system-permission sandbox. Preserving native Agent capabilities does not authorize plugin development or runtime management to update the host OS or alter its graphical session.
-- A single shared window/focus/input state cannot satisfy parallel Bot desktop operation. VNC or SSH connections alone do not create independent surfaces; this revision neither replaces Cage nor rewrites transport on that assumption.
+- A single shared window/focus/input state cannot satisfy parallel Bot desktop operation. VNC or SSH connections alone do not create independent surfaces; Sway supplies the independent Bot Screen, view-only WayVNC supplies projection, the Computer Broker-authorized path supplies human input, and native Sway IPC supplies truthful window control.
 
 ### Required host-safety and resource evidence
 
@@ -278,7 +278,7 @@ Separate plugin desktop overhead (compositor, desktop surface, helpers, capture,
 
 Acceptance must exercise Bots with no graphical use, several retained Bot desktop sessions with only one viewed, repeated client A/B switches, and no viewers while background work continues. Verify release of unused capture/encoding paths without destroying applications; do not claim unmeasured resource savings or introduce idle-kill policies that discard work.
 
-Host-safety evidence must cover the original top bar, shortcuts, focus, and physical input across desktop start, use, failure, and targeted cleanup. The two-Cage smoke in `tests/integration/bot-screen-cage.smoke.test.ts` currently checks sibling-screen outcomes but does not directly assert host top-bar/shortcut usability; its historical ticket completion is not sufficient proof. Safe verification must use private runtime/profile artifacts and targeted child teardown, never host package updates or graphical-session restarts.
+Host-safety evidence must cover the original top bar, shortcuts, focus, and physical input across desktop start, use, failure, and targeted cleanup. The historical two-Cage smoke and bounded two-Sway experiment check sibling-screen outcomes but do not directly assert host top-bar/shortcut usability or complete target-stack conformance. Safe verification must use private runtime/profile artifacts and targeted child teardown, never host package updates or graphical-session restarts.
 
 Final acceptance also requires the user's own confirmation that the original top bar, shortcuts, ordinary desktop use, and Bot switching behave correctly. Record automated results, real-runtime evidence, and human acceptance separately; automated passes alone do not satisfy this gate.
 

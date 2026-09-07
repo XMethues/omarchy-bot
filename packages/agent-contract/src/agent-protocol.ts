@@ -160,6 +160,12 @@ export interface AgentComputerToolCancel {
 }
 
 export interface AgentComputerToolOutput {
+  /** Identity of the desktop that produced this result, not the Agent's Native Session. */
+  desktopSession: {
+    botId: string;
+    surfaceId: SurfaceId;
+    runtimeGeneration: number;
+  };
   text?: string;
   imageFile?: {
     mediaType: "image/png" | "image/jpeg";

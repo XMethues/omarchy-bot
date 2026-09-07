@@ -113,6 +113,10 @@ Use `createAgentSession`, `DefaultResourceLoader`, `SessionManager.create/open`,
 
 Pi Native Sessions are Agent-owned continuation state. Omarchy Bot does not advertise or invoke Native Session deletion; deleting a Bot leaves that native state intact.
 
+The Pi `computer` tool's native prompt guidance distinguishes the independent, on-demand Sway Bot Desktop Session from the user's Omarchy/Hyprland Host Session, other Bot Screens, the Agent's Native Session, and the client's Screen Projection. A gray or blank image describes only the owning Bot Screen, not the Host Session. The tool uses Omarchy's private `WAYLAND_DISPLAY`; native shell tools do not automatically inherit that desktop binding. Native capabilities and Shared Workspace access remain unchanged.
+
+Every successful computer result includes `desktopSession` with `botId`, `surfaceId`, and `runtimeGeneration` in both model-visible text and structured tool details. The Screen manager stamps that identity within the serialized action, including the fresh observation returned after Takeover. Desktop recreation changes the generation without changing the Bot's Surface or conversation; session creation and restoration load the same tool guidance without provisioning a desktop. Socket paths remain runtime-internal, and context metadata neither selects a target nor grants input authority.
+
 ### Codex
 
 Initialize the app-server connection and generate types matching the probed binary. Treat `turn/completed` as authoritative. Preserve native approval requests as Agent-native interaction rather than routing them through a second omarchy-bot policy.

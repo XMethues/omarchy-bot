@@ -1,300 +1,351 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { SCREEN_PROJECTION_PROTOCOL_VERSION } from "@omarchy-bot/protocol";
 import {
-  SCREEN_CONTROL_CHANNEL,
-  SCREEN_H264_CLOCK_RATE,
-  SCREEN_H264_PROFILE,
-  SCREEN_INPUT_CHANNEL,
-  SCREEN_PREVIEW_CHANNEL,
-  SCREEN_PROJECTION_PROTOCOL_VERSION,
-} from "@omarchy-bot/protocol";
-import { ScreenProjectionConnection } from "./screenProjection.ts";
+  ScreenProjectionConnection,
+  type ScreenExpandedView,
+  type ScreenProjectionState,
+} from "./screenProjection.ts";
 
-class FakeDataChannel {
-  readonly sent: string[] = [];
-  readonly listeners = new Map<string, Array<(event: { data: unknown }) => void>>();
-  binaryType = "blob";
-  readyState = "open";
+const SURFACE_ID = "surf_0123456789abcdef0123456789abcdef";
+const SESSION_ID = "projection-session";
+
+class FakeWebSocket extends EventTarget {
+  static readonly CONNECTING = 0;
+  static readonly OPEN = 1;
+  static readonly CLOSING = 2;
+  static readonly CLOSED = 3;
+  static readonly instances: FakeWebSocket[] = [];
+  readonly sent: Array<string | ArrayBufferLike | Blob | ArrayBufferView> = [];
+  binaryType: BinaryType = "blob";
   bufferedAmount = 0;
+  extensions = "";
+  protocol = "";
+  readyState = FakeWebSocket.CONNECTING;
 
-  addEventListener(type: string, listener: (event: { data: unknown }) => void): void {
-    const listeners = this.listeners.get(type) ?? [];
-    listeners.push(listener);
-    this.listeners.set(type, listeners);
+  constructor(readonly url: string | URL) {
+    super();
+    FakeWebSocket.instances.push(this);
   }
 
-  send(message: string): void {
-    this.sent.push(message);
+  open(): void {
+    this.readyState = FakeWebSocket.OPEN;
+    this.dispatchEvent(new Event("open"));
   }
 
-  emitMessage(data: unknown): void {
-    for (const listener of this.listeners.get("message") ?? []) listener({ data });
+  message(data: unknown): void {
+    this.dispatchEvent(new MessageEvent("message", { data }));
+  }
+
+  send(data: string | ArrayBufferLike | Blob | ArrayBufferView): void {
+    this.sent.push(data);
   }
 
   close(): void {
-    this.readyState = "closed";
+    if (this.readyState === FakeWebSocket.CLOSED) return;
+    this.readyState = FakeWebSocket.CLOSED;
+    this.dispatchEvent(new Event("close"));
   }
 }
 
-class FakePeerConnection {
-  static latest: FakePeerConnection | undefined;
-  readonly channels = new Map<string, FakeDataChannel>();
-  readonly listeners = new Map<string, Array<(event: Record<string, unknown>) => void>>();
-  iceGatheringState = "complete";
-  localDescription: RTCSessionDescriptionInit | null = { type: "offer", sdp: "v=0\r\n" };
-  connectionState = "connected";
+interface ProjectionRequest {
+  url: string;
+  method: string;
+  body: unknown;
+}
 
-  constructor() {
-    FakePeerConnection.latest = this;
-  }
+function sessionDescriptor(overrides: Partial<Record<string, unknown>> = {}): object {
+  return {
+    version: SCREEN_PROJECTION_PROTOCOL_VERSION,
+    sessionId: SESSION_ID,
+    surfaceId: SURFACE_ID,
+    runtimeGeneration: 1,
+    geometryGeneration: 1,
+    logicalWidth: 1920,
+    logicalHeight: 1080,
+    videoWidth: 1920,
+    videoHeight: 1080,
+    scale: 1,
+    state: "connecting",
+    controlUrl: `/api/computer/projection/control?botId=bot&surfaceId=${SURFACE_ID}&sessionId=${SESSION_ID}`,
+    rfbUrl: `/api/computer/projection/rfb?botId=bot&surfaceId=${SURFACE_ID}&sessionId=${SESSION_ID}`,
+    snapshotUrl: `/api/computer/snapshot?botId=bot&surfaceId=${SURFACE_ID}`,
+    security: { authentication: "none", httpsRequired: false },
+    ...overrides,
+  };
+}
 
-  createDataChannel(label: string): FakeDataChannel {
-    const channel = new FakeDataChannel();
-    this.channels.set(label, channel);
-    return channel;
-  }
+function installBrowser(descriptor: unknown = sessionDescriptor()): ProjectionRequest[] {
+  const requests: ProjectionRequest[] = [];
+  Object.assign(globalThis, {
+    RTCPeerConnection: undefined,
+    WebSocket: FakeWebSocket,
+    window: {
+      setTimeout,
+      clearTimeout,
+      location: new URL("https://client.example/thread"),
+    },
+    fetch: async (input: string | URL | Request, init?: RequestInit) => {
+      requests.push({
+        url: String(input),
+        method: init?.method ?? "GET",
+        body: init?.body === undefined ? undefined : JSON.parse(String(init.body)),
+      });
+      if (init?.method === "DELETE") return new Response(null, { status: 204 });
+      return new Response(JSON.stringify(descriptor), {
+        status: 201,
+        headers: { "content-type": "application/json" },
+      });
+    },
+  });
+  return requests;
+}
 
-  addTransceiver(): { setCodecPreferences(): void } {
-    return { setCodecPreferences() {} };
-  }
+function connection(callbacks: {
+  states?: ScreenProjectionState[];
+  frames?: Array<Blob | undefined>;
+  expanded?: Array<ScreenExpandedView | undefined>;
+  control?: boolean[];
+  errors?: string[];
+} = {}): ScreenProjectionConnection {
+  return new ScreenProjectionConnection(
+    "/api/computer/projection",
+    { botId: "bot", surfaceId: SURFACE_ID },
+    {
+      onState: (state) => callbacks.states?.push(state),
+      onFrame: (frame) => callbacks.frames?.push(frame),
+      onError: (error) => callbacks.errors?.push(error),
+      onExpandedView: (view) => callbacks.expanded?.push(view),
+      onControlStateChange: (active) => callbacks.control?.push(active),
+    },
+  );
+}
 
-  addEventListener(type: string, listener: (event: Record<string, unknown>) => void): void {
-    const listeners = this.listeners.get(type) ?? [];
-    listeners.push(listener);
-    this.listeners.set(type, listeners);
-  }
+function identity(type: string): Record<string, unknown> {
+  return {
+    version: SCREEN_PROJECTION_PROTOCOL_VERSION,
+    type,
+    sessionId: SESSION_ID,
+    surfaceId: SURFACE_ID,
+    runtimeGeneration: 1,
+  };
+}
 
-  removeEventListener(): void {}
+function geometry(): Record<string, unknown> {
+  return {
+    geometryGeneration: 1,
+    logicalWidth: 1920,
+    logicalHeight: 1080,
+    videoWidth: 1920,
+    videoHeight: 1080,
+    scale: 1,
+  };
+}
 
-  async createOffer(): Promise<RTCSessionDescriptionInit> {
-    return { type: "offer", sdp: "v=0\r\n" };
-  }
-
-  async setLocalDescription(description: RTCSessionDescriptionInit): Promise<void> {
-    this.localDescription = description;
-  }
-
-  remoteDescriptionCalls = 0;
-
-  async setRemoteDescription(): Promise<void> {
-    this.remoteDescriptionCalls += 1;
-  }
-  async addIceCandidate(): Promise<void> {}
-
-  emitTrack(): void {
-    const track = { kind: "video", addEventListener() {} };
-    for (const listener of this.listeners.get("track") ?? []) listener({ track, streams: [{}] });
-  }
-
-  async getStats(): Promise<Map<string, never>> {
-    return new Map<string, never>();
-  }
-
-  close(): void {
-    this.connectionState = "closed";
-  }
+function sentJson(socket: FakeWebSocket): Array<Record<string, unknown>> {
+  return socket.sent
+    .filter((message): message is string => typeof message === "string")
+    .map((message) => JSON.parse(message) as Record<string, unknown>);
 }
 
 const originalPeerConnection = globalThis.RTCPeerConnection;
-const originalRtpReceiver = globalThis.RTCRtpReceiver;
 const originalFetch = globalThis.fetch;
 const originalWindow = globalThis.window;
+const originalWebSocket = globalThis.WebSocket;
 
 afterEach(() => {
   Object.assign(globalThis, {
     RTCPeerConnection: originalPeerConnection,
-    RTCRtpReceiver: originalRtpReceiver,
     fetch: originalFetch,
     window: originalWindow,
+    WebSocket: originalWebSocket,
   });
-  FakePeerConnection.latest = undefined;
+  FakeWebSocket.instances.length = 0;
 });
 
-describe("Screen Projection input authority", () => {
-  test("keeps key sequencing across video frames that republish the same controller epoch", async () => {
-    Object.assign(globalThis, {
-      RTCPeerConnection: FakePeerConnection,
-      RTCRtpReceiver: {
-        getCapabilities: () => ({
-          codecs: [{
-            mimeType: "video/H264",
-            clockRate: SCREEN_H264_CLOCK_RATE,
-            sdpFmtpLine: `level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=${SCREEN_H264_PROFILE}`,
-          }],
-        }),
-      },
-      window: globalThis,
-      fetch: async () => new Response(JSON.stringify({
-        version: SCREEN_PROJECTION_PROTOCOL_VERSION,
-        type: "answer",
-        sdp: "v=0\r\n",
-        sessionId: "projection-session",
-        surfaceId: "surf_0123456789abcdef0123456789abcdef",
-        runtimeGeneration: 1,
-        geometryGeneration: 1,
-        logicalWidth: 1920,
-        logicalHeight: 1080,
-        videoWidth: 1920,
-        videoHeight: 1080,
-        scale: 1,
-        state: "connecting",
-        capabilities: {
-          previewImage: { transport: "data-channel", channel: SCREEN_PREVIEW_CHANNEL, mediaType: "image/png" },
-          expandedVideo: { transport: "webrtc-video-track", codec: "video/H264", profileLevelId: SCREEN_H264_PROFILE, clockRate: SCREEN_H264_CLOCK_RATE },
-          control: { transport: "data-channel", channel: SCREEN_CONTROL_CHANNEL },
-          input: { transport: "data-channel", channel: SCREEN_INPUT_CHANNEL },
-          snapshotFallback: { transport: "http", mediaType: "image/png" },
-        },
-        security: { authentication: "none", httpsRequired: false },
-        candidates: [],
-      }), { status: 200 }),
-    });
+test("connects a version 3 projection descriptor through its control WebSocket", async () => {
+  const requests = installBrowser();
+  const projection = connection();
 
-    const controlStates: boolean[] = [];
-    const connection = new ScreenProjectionConnection(
-      "/api/computer/projection",
-      { botId: "bot", surfaceId: "surf_0123456789abcdef0123456789abcdef" },
-      {
-        onState() {},
-        onFrame() {},
-        onVideo() {},
-        onError() {},
-        onControlStateChange: (active) => controlStates.push(active),
-      },
-    );
-    await connection.connect();
-    connection.setMode("expanded");
+  await projection.connect();
 
-    const peer = FakePeerConnection.latest!;
-    peer.emitTrack();
-    const input = peer.channels.get(SCREEN_INPUT_CHANNEL)!;
-    input.emitMessage(JSON.stringify({
-      version: SCREEN_PROJECTION_PROTOCOL_VERSION,
-      type: "input-authority",
+  expect(requests).toEqual([{
+    url: `https://client.example/api/computer/projection?botId=bot&surfaceId=${SURFACE_ID}`,
+    method: "POST",
+    body: { version: SCREEN_PROJECTION_PROTOCOL_VERSION },
+  }]);
+  expect(FakeWebSocket.instances.map(({ url }) => String(url))).toEqual([
+    `wss://client.example/api/computer/projection/control?botId=bot&surfaceId=${SURFACE_ID}&sessionId=${SESSION_ID}`,
+  ]);
+  projection.close();
+});
+
+describe("expanded view authority", () => {
+  test("waits for the matching expanded acknowledgement and noVNC connection before enabling input", async () => {
+    installBrowser();
+    const states: ScreenProjectionState[] = [];
+    const expanded: Array<ScreenExpandedView | undefined> = [];
+    const control: boolean[] = [];
+    const projection = connection({ states, expanded, control });
+    await projection.connect();
+    const socket = FakeWebSocket.instances[0]!;
+    socket.open();
+    projection.setMode("expanded");
+
+    socket.message(JSON.stringify({
+      ...identity("input-authority"),
+      ...geometry(),
+      geometryGeneration: 2,
       active: true,
-      surfaceId: "surf_0123456789abcdef0123456789abcdef",
-      runtimeGeneration: 1,
-      geometryGeneration: 1,
       controllerEpoch: 7,
-      logicalWidth: 1920,
-      logicalHeight: 1080,
-      videoWidth: 1920,
-      videoHeight: 1080,
-      scale: 1,
     }));
+    socket.message(JSON.stringify({
+      ...identity("view-state"),
+      sessionId: "stale-session",
+      mode: "expanded",
+    }));
+    expect(expanded).toEqual([]);
+    expect(projection.keyTransition("KeyA", "pressed", {
+      control: false,
+      alt: false,
+      shift: false,
+      meta: false,
+    })).toBe(false);
 
-    expect(connection.videoFramePainted(1920, 1080)).toBe(true);
-    expect(connection.keyTransition("KeyA", "pressed", { control: false, alt: false, shift: false, meta: false })).toBe(true);
-    expect(connection.keyTransition("KeyA", "released", { control: false, alt: false, shift: false, meta: false })).toBe(true);
+    socket.message(JSON.stringify({ ...identity("view-state"), mode: "expanded" }));
+    const view = expanded[0]!;
+    expect(view).toEqual({
+      protocol: "rfb",
+      viewOnly: true,
+      url: `wss://client.example/api/computer/projection/rfb?botId=bot&surfaceId=${SURFACE_ID}&sessionId=${SESSION_ID}`,
+    });
+    expect(states.at(-1)).toBe("connecting");
 
-    expect(connection.videoFramePainted(1920, 1080)).toBe(true);
-    expect(connection.keyTransition("KeyB", "pressed", { control: false, alt: false, shift: false, meta: false })).toBe(true);
-    expect(connection.keyTransition("KeyB", "released", { control: false, alt: false, shift: false, meta: false })).toBe(true);
+    socket.message(JSON.stringify({
+      ...identity("input-authority"),
+      ...geometry(),
+      active: true,
+      controllerEpoch: 7,
+    }));
+    projection.expandedConnected(view);
+    expect(states.at(-1)).toBe("expanded");
+    expect(control).toEqual([true]);
 
-    const keyMessages = input.sent.map((message) => JSON.parse(message)).filter((message) => message.type === "key");
-    expect(keyMessages.map((message) => [message.sequence, message.code, message.state])).toEqual([
-      [1, "KeyA", "pressed"],
-      [2, "KeyA", "released"],
-      [3, "KeyB", "pressed"],
-      [4, "KeyB", "released"],
+    expect(projection.keyTransition("KeyA", "pressed", {
+      control: false,
+      alt: false,
+      shift: false,
+      meta: false,
+    })).toBe(true);
+    expect(projection.keyTransition("KeyA", "released", {
+      control: false,
+      alt: false,
+      shift: false,
+      meta: false,
+    })).toBe(true);
+    socket.message(JSON.stringify({
+      ...identity("input-authority"),
+      ...geometry(),
+      active: true,
+      controllerEpoch: 7,
+    }));
+    expect(projection.keyTransition("KeyB", "pressed", {
+      control: false,
+      alt: false,
+      shift: false,
+      meta: false,
+    })).toBe(true);
+    expect(projection.keyTransition("KeyB", "released", {
+      control: false,
+      alt: false,
+      shift: false,
+      meta: false,
+    })).toBe(true);
+
+    const keys = sentJson(socket).filter(({ type }) => type === "key");
+    expect(keys.map(({ sessionId, sequence, code, state }) => [sessionId, sequence, code, state])).toEqual([
+      [SESSION_ID, 1, "KeyA", "pressed"],
+      [SESSION_ID, 2, "KeyA", "released"],
+      [SESSION_ID, 3, "KeyB", "pressed"],
+      [SESSION_ID, 4, "KeyB", "released"],
     ]);
-    expect(controlStates).toEqual([true]);
-    connection.close();
+    projection.close();
   });
 });
 
-describe("Screen Projection switch and stale responses", () => {
-  test("ignores a late offer answer and preview frame after the viewer has closed", async () => {
-    const surfaceId = "surf_0123456789abcdef0123456789abcdef";
+describe("preview routing", () => {
+  test("accepts exactly one matching PNG message and rejects stale identity and geometry", async () => {
+    installBrowser();
     const frames: Array<Blob | undefined> = [];
-    const states: string[] = [];
-    const errors: string[] = [];
-    let releaseAnswer: (response: Response) => void = () => {};
-    const answer = new Promise<Response>((resolve) => {
-      releaseAnswer = resolve;
-    });
-    const fetchStarted = Promise.withResolvers<void>();
-    Object.assign(globalThis, {
-      RTCPeerConnection: FakePeerConnection,
-      RTCRtpReceiver: {
-        getCapabilities: () => ({
-          codecs: [{
-            mimeType: "video/H264",
-            clockRate: SCREEN_H264_CLOCK_RATE,
-            sdpFmtpLine: `level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=${SCREEN_H264_PROFILE}`,
-          }],
-        }),
-      },
-      window: globalThis,
-      fetch: async () => {
-        fetchStarted.resolve();
-        return answer;
-      },
-    });
+    const projection = connection({ frames });
+    await projection.connect();
+    const socket = FakeWebSocket.instances[0]!;
+    socket.open();
+    socket.message(JSON.stringify({ ...identity("view-state"), mode: "preview" }));
 
-    const connection = new ScreenProjectionConnection(
-      "/api/computer/projection",
-      { botId: "bot-a", surfaceId },
-      {
-        onState: (state) => states.push(state),
-        onFrame: (frame) => frames.push(frame),
-        onVideo() {},
-        onError: (error) => errors.push(error),
-      },
-    );
-    const connecting = connection.connect();
-    await fetchStarted.promise;
-    connection.close();
-    releaseAnswer(new Response(JSON.stringify({
-      version: SCREEN_PROJECTION_PROTOCOL_VERSION,
-      type: "answer",
-      sdp: "v=0\r\n",
-      sessionId: "late-session",
-      surfaceId,
-      runtimeGeneration: 1,
-      geometryGeneration: 1,
-      logicalWidth: 1920,
-      logicalHeight: 1080,
-      videoWidth: 1920,
-      videoHeight: 1080,
-      scale: 1,
-      state: "connecting",
-      capabilities: {
-        previewImage: { transport: "data-channel", channel: SCREEN_PREVIEW_CHANNEL, mediaType: "image/png" },
-        expandedVideo: { transport: "webrtc-video-track", codec: "video/H264", profileLevelId: SCREEN_H264_PROFILE, clockRate: SCREEN_H264_CLOCK_RATE },
-        control: { transport: "data-channel", channel: SCREEN_CONTROL_CHANNEL },
-        input: { transport: "data-channel", channel: SCREEN_INPUT_CHANNEL },
-        snapshotFallback: { transport: "http", mediaType: "image/png" },
-      },
-      security: { authentication: "none", httpsRequired: false },
-      candidates: [],
-    }), { status: 200 }));
-    await connecting;
-
-    const peer = FakePeerConnection.latest!;
-    const preview = peer.channels.get(SCREEN_PREVIEW_CHANNEL)!;
-    preview.emitMessage(JSON.stringify({
-      version: SCREEN_PROJECTION_PROTOCOL_VERSION,
-      type: "preview-frame",
-      surfaceId,
-      runtimeGeneration: 1,
-      geometryGeneration: 1,
-      logicalWidth: 1920,
-      logicalHeight: 1080,
-      videoWidth: 1920,
-      videoHeight: 1080,
-      scale: 1,
+    socket.message(JSON.stringify({
+      ...identity("preview-frame"),
+      ...geometry(),
+      sessionId: "stale-session",
       sequence: 1,
       mediaType: "image/png",
-      capturedAt: "2026-09-05T00:00:00.000Z",
       byteLength: 1,
-      chunkCount: 1,
     }));
-    preview.emitMessage(new ArrayBuffer(1));
+    socket.message(new Uint8Array([1]).buffer);
+    socket.message(JSON.stringify({
+      ...identity("preview-frame"),
+      ...geometry(),
+      geometryGeneration: 2,
+      sequence: 2,
+      mediaType: "image/png",
+      byteLength: 1,
+    }));
+    socket.message(new Uint8Array([2]).buffer);
+    expect(frames).toEqual([]);
 
-    expect(states).toEqual(["connecting", "closed"]);
-    expect(frames).toEqual([undefined]);
-    expect(errors).toEqual([]);
-    expect(peer.remoteDescriptionCalls).toBe(0);
-    expect(peer.channels.get(SCREEN_CONTROL_CHANNEL)?.sent ?? []).toEqual([]);
+    socket.message(JSON.stringify({
+      ...identity("preview-frame"),
+      ...geometry(),
+      sequence: 3,
+      mediaType: "image/png",
+      capturedAt: new Date().toISOString(),
+      byteLength: 2,
+    }));
+    socket.message(new Uint8Array([3, 4]).buffer);
+    expect(frames).toHaveLength(1);
+    expect(await frames[0]!.arrayBuffer()).toEqual(new Uint8Array([3, 4]).buffer);
+    projection.close();
   });
+});
+
+test("ignores a late session descriptor after the viewer closes", async () => {
+  const release = Promise.withResolvers<Response>();
+  const fetchStarted = Promise.withResolvers<void>();
+  Object.assign(globalThis, {
+    RTCPeerConnection: undefined,
+    WebSocket: FakeWebSocket,
+    window: {
+      setTimeout,
+      clearTimeout,
+      location: new URL("https://client.example/thread"),
+    },
+    fetch: async () => {
+      fetchStarted.resolve();
+      return release.promise;
+    },
+  });
+  const states: ScreenProjectionState[] = [];
+  const frames: Array<Blob | undefined> = [];
+  const errors: string[] = [];
+  const projection = connection({ states, frames, errors });
+
+  const connecting = projection.connect();
+  await fetchStarted.promise;
+  projection.close();
+  release.resolve(new Response(JSON.stringify(sessionDescriptor()), { status: 201 }));
+  await connecting;
+
+  expect(states).toEqual(["connecting", "closed"]);
+  expect(frames).toEqual([undefined]);
+  expect(errors).toEqual([]);
+  expect(FakeWebSocket.instances).toEqual([]);
 });

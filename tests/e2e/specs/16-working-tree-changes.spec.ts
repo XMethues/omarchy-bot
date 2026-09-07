@@ -97,7 +97,7 @@ test.describe("Changes absent and Computer retained", () => {
         const trigger = document.querySelector<HTMLButtonElement>('[data-testid="header-computer"]')!;
         const close = document.querySelector<HTMLButtonElement>('[data-testid="capabilities-close"]')!;
         (closing ? close : trigger).click();
-        const samples: { panel: number; chat: number; surfaces: number }[] = [];
+        const samples: { panel: number; chat: number }[] = [];
         const start = performance.now();
         let reversed = false;
         await new Promise<void>((resolve) => {
@@ -110,7 +110,6 @@ test.describe("Changes absent and Computer retained", () => {
             samples.push({
               panel: shell.getBoundingClientRect().width,
               chat: chat.getBoundingClientRect().width,
-              surfaces: shell.querySelectorAll(".capability-tab-content").length,
             });
             if (elapsed >= 400) resolve();
             else requestAnimationFrame(frame);
@@ -125,7 +124,6 @@ test.describe("Changes absent and Computer retained", () => {
     expect(opening.some(({ panel }) => panel > 1 && panel < 559)).toBe(true);
     for (const frame of opening) {
       expect(Math.abs(frame.panel + frame.chat - fullWidth)).toBeLessThan(2);
-      expect(frame.surfaces).toBe(1);
     }
     expect(opening.at(-1)!.panel).toBeCloseTo(560, 0);
 
@@ -139,13 +137,13 @@ test.describe("Changes absent and Computer retained", () => {
 
     const reversing = await sampleTransition(true, true);
     expect(reversing.some(({ panel }) => panel > 1 && panel < 559)).toBe(true);
-    expect(reversing.every(({ panel, surfaces }) => panel > 0 && surfaces <= 1)).toBe(true);
+    expect(reversing.every(({ panel }) => panel > 0)).toBe(true);
     expect(reversing.at(-1)!.panel).toBeCloseTo(560, 0);
     const closing = await sampleTransition(true);
     expect(closing.some(({ panel }) => panel > 1 && panel < 559)).toBe(true);
-    expect(closing.every(({ surfaces }) => surfaces === 0)).toBe(true);
     expect(closing.at(-1)!.panel).toBe(0);
     expect(closing.at(-1)!.chat).toBeCloseTo(fullWidth, 0);
+    await expect(page.getByRole("heading", { name: "Motion Computer Bot’s screen" })).toHaveCount(0);
     await expect(page.getByRole("button", { name: "Open Computer Surface", exact: true })).toBeFocused();
     expect(changesRequests).toEqual([]);
   });

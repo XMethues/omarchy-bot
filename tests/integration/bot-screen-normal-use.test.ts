@@ -2,27 +2,18 @@ import { afterAll, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import rtc, { type DataChannel, type PeerConnection, type Track } from "node-datachannel";
 import type { SurfaceId } from "../../packages/domain/src/ids.ts";
-import {
-  SCREEN_CONTROL_CHANNEL,
-  SCREEN_H264_CLOCK_RATE,
-  SCREEN_H264_FMTP,
-  SCREEN_H264_PROFILE,
-  SCREEN_INPUT_CHANNEL,
-  SCREEN_PREVIEW_CHANNEL,
-  SCREEN_PROJECTION_PROTOCOL_VERSION,
-} from "../../packages/protocol/src/api.ts";
 import { api, makeBot, startDaemon, type Harness } from "./helpers/harness.ts";
+import { ProjectionClient } from "./helpers/projection-client.ts";
 import {
   HOST_INTERACTIONS_AUTOMATION_CANNOT_PROVE,
   HISTORICAL_FOUR_STREAM_BASELINE,
-  activeEncoderCount,
+  activeWayvncCount,
   attributeResourceWindow,
   createBackgroundWorkFixture,
   currentGeneration,
   daemonGitChildCount,
-  findPortableCageBundle,
+  findPortableSwayBundle,
   listScreenUnits,
   observeHostSession,
   resourceWindow,
@@ -39,7 +30,8 @@ import {
 } from "./helpers/bot-screen-load-observe.ts";
 
 const REAL_HOME = process.env.HOME ?? os.homedir();
-const loadTest = process.env.OMARCHY_BOT_REAL_SCREEN_LOAD === "1" ? test : test.skip;
+const realLoadEnabled = process.env.OMARCHY_BOT_REAL_SCREEN_LOAD === "1";
+const loadTest = realLoadEnabled ? test : test.skip;
 const REPORT_JSON = path.resolve(
   import.meta.dir,
   "../../.scratch/shared-workspace-desktop-boundary/normal-use-resource-report.json",
@@ -48,29 +40,8 @@ const REPORT_MD = path.resolve(
   import.meta.dir,
   "../../.scratch/shared-workspace-desktop-boundary/normal-use-resource-report.md",
 );
-const GRAPHICAL_STACK = ["cage", "ffmpeg", "omarchy-bot-wayland-capture"] as const;
+const GRAPHICAL_STACK = ["sway", "wayvnc", "omarchy-bot-wayland-capture"] as const;
 
-const PROJECTION_CAPABILITIES = {
-  previewImage: { transport: "data-channel", channel: SCREEN_PREVIEW_CHANNEL, mediaType: "image/png" },
-  expandedVideo: {
-    transport: "webrtc-video-track",
-    codec: "video/H264",
-    profileLevelId: SCREEN_H264_PROFILE,
-    clockRate: SCREEN_H264_CLOCK_RATE,
-  },
-  control: { transport: "data-channel", channel: SCREEN_CONTROL_CHANNEL },
-  input: { transport: "data-channel", channel: SCREEN_INPUT_CHANNEL },
-  snapshotFallback: { transport: "http", mediaType: "image/png" },
-} as const;
-
-interface ProjectionAnswer {
-  type: "answer";
-  sdp: string;
-  sessionId: string;
-  surfaceId: SurfaceId;
-  runtimeGeneration: number;
-  candidates: Array<{ candidate: string; sdpMid: string }>;
-}
 
 interface ScenarioMeasurement {
   name: string;
@@ -97,6 +68,7 @@ const report: Record<string, unknown> = {
 
 function persistReport(): void {
   report.updatedAt = new Date().toISOString();
+  if (!realLoadEnabled) return;
   mkdirSync(path.dirname(REPORT_JSON), { recursive: true });
   writeFileSync(REPORT_JSON, `${JSON.stringify(report, null, 2)}\n`);
   writeFileSync(REPORT_MD, renderMarkdown(report));
@@ -151,9 +123,8 @@ function renderMarkdown(value: Record<string, unknown>): string {
   }
   lines.push("## Measurement caveats");
   lines.push("");
-  lines.push("- CPU percent is process time over the named sample window, not a 15-second historical-row equivalent.");
-  lines.push("- Viewer-attached windows were shortened to 1500 ms because native WebRTC peers on this Cage path often close if held longer. No-viewer windows used the configured duration.");
-  lines.push("- Compact preview evidence is daemon `surfaceMedia` capture/viewer state. Native preview data-channel messages were not required.");
+  lines.push("- Viewer-attached windows use public control/RFB WebSockets and the embedded noVNC client. No H.264/WebRTC counters are inferred.");
+  lines.push("- Compact preview evidence includes the PNG received on the control WebSocket and daemon `surfaceMedia` capture/viewer state.");
   lines.push("- GPU VRAM is not attributable on this stack.");
   lines.push("");
   lines.push("## Unmet");
@@ -178,114 +149,6 @@ async function screenshotDigest(harness: Harness, owner: ScreenOwner): Promise<s
   return digestBytes(result.image.bytes);
 }
 
-function projectionOffer(sdp: string): object {
-  return {
-    version: SCREEN_PROJECTION_PROTOCOL_VERSION,
-    type: "offer",
-    sdp,
-    capabilities: PROJECTION_CAPABILITIES,
-  };
-}
-
-function receiveH264(peer: PeerConnection): Track {
-  const video = new rtc.Video("screen", "RecvOnly");
-  video.addH264Codec(96, SCREEN_H264_FMTP);
-  return peer.addTrack(video);
-}
-
-function openChannel(channel: DataChannel): Promise<void> {
-  if (channel.isOpen()) return Promise.resolve();
-  const { promise, resolve, reject } = Promise.withResolvers<void>();
-  channel.onOpen(resolve);
-  channel.onError((error) => reject(new Error(error)));
-  return promise;
-}
-
-class ProjectionClient {
-  frames = 0;
-
-  private constructor(
-    readonly owner: ScreenOwner,
-    readonly answer: ProjectionAnswer,
-    readonly peer: PeerConnection,
-    readonly controlChannel: DataChannel,
-  ) {}
-
-  static async connect(harness: Harness, owner: ScreenOwner, name: string): Promise<ProjectionClient> {
-    const peer = new rtc.PeerConnection(name, { iceServers: [] });
-    const described = Promise.withResolvers<void>();
-    peer.onLocalDescription(() => described.resolve());
-    const videoTrack = receiveH264(peer);
-    const frameChannel = peer.createDataChannel(SCREEN_PREVIEW_CHANNEL, { unordered: false });
-    const controlChannel = peer.createDataChannel(SCREEN_CONTROL_CHANNEL, { unordered: false });
-    const inputChannel = peer.createDataChannel(SCREEN_INPUT_CHANNEL, { unordered: false });
-    peer.setLocalDescription("offer");
-    await withTimeout(described.promise, 5_000, "WebRTC offer description timed out");
-    await until(
-      () => peer.localDescription()?.sdp.includes("a=candidate:") ? true : undefined,
-      5_000,
-      "WebRTC offer candidate gathering timed out",
-    );
-    const offer = peer.localDescription();
-    if (offer === null) throw new Error("WebRTC offer was not created");
-    const response = await withTimeout(fetch(
-      `${harness.baseUrl}/api/computer/projection?botId=${owner.botId}&surfaceId=${owner.surfaceId}`,
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(projectionOffer(offer.sdp)),
-      },
-    ), 15_000, "Screen Projection answer timed out");
-    if (response.status !== 201) throw new Error(`projection signaling failed: ${response.status} ${await response.text()}`);
-    const answer = await response.json() as ProjectionAnswer;
-    peer.setRemoteDescription(answer.sdp, "answer");
-    for (const candidate of answer.candidates) peer.addRemoteCandidate(candidate.candidate, candidate.sdpMid);
-    await withTimeout(
-      Promise.all([openChannel(frameChannel), openChannel(controlChannel), openChannel(inputChannel)]),
-      10_000,
-      "Screen Projection data channels did not open",
-    );
-    const client = new ProjectionClient(owner, answer, peer, controlChannel);
-    videoTrack.onMessage(() => {
-      client.frames += 1;
-    });
-    frameChannel.onMessage(() => {
-      client.frames += 1;
-    });
-    return client;
-  }
-
-  async mode(mode: "idle" | "preview" | "expanded"): Promise<void> {
-    if (!this.controlChannel.sendMessage(JSON.stringify({
-      version: SCREEN_PROJECTION_PROTOCOL_VERSION,
-      type: "view",
-      surfaceId: this.owner.surfaceId,
-      runtimeGeneration: this.answer.runtimeGeneration,
-      mode,
-    }))) throw new Error("projection control channel rejected view mode");
-  }
-
-  async close(harness: Harness): Promise<void> {
-    const peerClosed = until(
-      () => this.peer.state() === "closed" ? true : undefined,
-      5_000,
-      `Screen Projection peer ${this.answer.sessionId} did not close`,
-    );
-    try {
-      await fetch(
-        `${harness.baseUrl}/api/computer/projection?botId=${this.owner.botId}&surfaceId=${this.owner.surfaceId}`,
-        {
-          method: "DELETE",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ sessionId: this.answer.sessionId }),
-        },
-      );
-    } finally {
-      this.peer.close();
-      await peerClosed;
-    }
-  }
-}
 
 async function destroyBot(harness: Harness, owner: ScreenOwner): Promise<void> {
   const result = await api<{ status: string }>(harness, "DELETE", `/api/bots/${owner.botId}`, {});
@@ -313,13 +176,13 @@ test("observes Host Session read-only and unused Bots without a graphical stack"
     preExistingScreenUnitsNote: "Visible omarchy-bot-screen-* units at start belong to the already-running plugin, not this test. They were observed read-only and not stopped.",
     livePluginDaemon: "not restarted; isolated test daemon used",
     systemPackages: {
-      cage: Bun.which("cage"),
+      sway: Bun.which("sway"),
       wlrRandr: Bun.which("wlr-randr"),
       zenity: Bun.which("zenity"),
       grim: Bun.which("grim"),
-      ffmpeg: Bun.which("ffmpeg"),
+      wayvnc: Bun.which("wayvnc"),
     },
-    portableCage: findPortableCageBundle(REAL_HOME),
+    portableSway: findPortableSwayBundle(REAL_HOME),
     userSystemdManagerAvailable: userSystemdManagerAvailable(),
   };
 
@@ -340,16 +203,15 @@ test("observes Host Session read-only and unused Bots without a graphical stack"
     const runtimeDirs = unused.map((owner) => path.join(harness.svc.cfg.botScreenRuntimeDir, owner.surfaceId));
     const hiddenStack = unused.map((owner) => ({
       surfaceId: owner.surfaceId,
-      runtimeDir: existsSync(path.join(harness.svc.cfg.botScreenRuntimeDir, owner.surfaceId)),
-      cageOrCaptureOrEncoder: surfaceScopedProcessCount(owner.surfaceId, GRAPHICAL_STACK),
+      compositorCaptureOrWayvnc: surfaceScopedProcessCount(owner.surfaceId, GRAPHICAL_STACK),
       anySurfaceProcess: surfaceScopedProcessCount(owner.surfaceId),
       screenState: harness.svc.screens.status(owner).state,
     }));
     const resources = await resourceWindow(unused, new Map(), 500);
     const attribution = attributeResourceWindow(resources);
     const gitChildren = daemonGitChildCount();
-    expect(hiddenStack.every((row) => row.runtimeDir === false)).toBeTrue();
-    expect(hiddenStack.every((row) => row.cageOrCaptureOrEncoder === 0)).toBeTrue();
+    expect(runtimeDirs.every((directory) => !existsSync(directory))).toBeTrue();
+    expect(hiddenStack.every((row) => row.compositorCaptureOrWayvnc === 0)).toBeTrue();
     expect(hiddenStack.every((row) => row.anySurfaceProcess === 0)).toBeTrue();
     expect(hiddenStack.every((row) => row.screenState === "stopped")).toBeTrue();
     expect(resources.screens.every((screen) => screen.processes.length === 0)).toBeTrue();
@@ -362,7 +224,7 @@ test("observes Host Session read-only and unused Bots without a graphical stack"
       attribution,
       notes: [
         "Three Bots created and listed; no graphical action or Computer view.",
-        "No Cage, capture, or encoder process and no runtime directory per unused Bot.",
+        "No Sway, capture, or WayVNC process and no runtime directory per unused Bot.",
         "No daemon git child (Changes polling is gone).",
         "Whole-scenario total is the combined daemon/harness process only.",
         unusedSupervision.note,
@@ -397,22 +259,20 @@ loadTest("measures selected-view background-work unused-Bot cost on the existing
   if (!Number.isSafeInteger(durationMs) || durationMs < 1_000) {
     throw new Error("OMARCHY_BOT_NORMAL_USE_DURATION_MS must be an integer of at least 1000");
   }
-  const portable = findPortableCageBundle(REAL_HOME);
+  const portable = findPortableSwayBundle(REAL_HOME);
   const browserBinary = process.env.OMARCHY_BOT_LOAD_BROWSER_BIN
     ?? Bun.which("brave")
     ?? Bun.which("chromium")
     ?? Bun.which("chromium-browser");
   const grim = Bun.which("grim");
-  const ffmpeg = Bun.which("ffmpeg");
   const prerequisites: string[] = [];
-  if (portable === undefined && Bun.which("cage") === null) {
-    prerequisites.push("system cage is missing and no portable bundle was found under ~/.local/share/omarchy-bot/runtime/cage/");
+  if (portable === undefined && Bun.which("sway") === null) {
+    prerequisites.push("system sway is missing and no portable bundle was found under ~/.local/share/omarchy-bot/runtime/sway/");
   }
   if (portable === undefined && Bun.which("wlr-randr") === null) {
     prerequisites.push("system wlr-randr is missing and no portable bundle was found");
   }
   if (grim === null) prerequisites.push("grim is missing");
-  if (ffmpeg === null) prerequisites.push("ffmpeg is missing");
   if (browserBinary === null || browserBinary === undefined) prerequisites.push("Brave or Chromium is missing for the background workload");
   if (prerequisites.length > 0) {
     recordScenario("selectedViewBackgroundMatrix", {
@@ -429,13 +289,13 @@ loadTest("measures selected-view background-work unused-Bot cost on the existing
   const useHostUnits = userSystemdManagerAvailable();
   const label = supervisionLabel(useHostUnits);
   const prior = {
-    cage: process.env.OMARCHY_BOT_CAGE_BIN,
+    sway: process.env.OMARCHY_BOT_SWAY_BIN,
     wlr: process.env.OMARCHY_BOT_WLR_RANDR_BIN,
     app: process.env.OMARCHY_BOT_LOAD_APP_BIN,
     profile: process.env.OMARCHY_BOT_SCREEN_PROFILE,
   };
   if (portable !== undefined) {
-    process.env.OMARCHY_BOT_CAGE_BIN = portable.cageBin;
+    process.env.OMARCHY_BOT_SWAY_BIN = portable.swayBin;
     process.env.OMARCHY_BOT_WLR_RANDR_BIN = portable.wlrRandrBin;
   }
   const fixtureRoot = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-normal-use-"));
@@ -487,7 +347,7 @@ loadTest("measures selected-view background-work unused-Bot cost on the existing
     for (const owner of opened) generationBySurface.set(owner.surfaceId, await currentGeneration(harness, owner));
 
     const noViewer = await resourceWindow(opened, generationBySurface, durationMs);
-    expect(activeEncoderCount()).toBe(0);
+    expect(activeWayvncCount()).toBe(0);
     const backgroundA = opened[0]!;
     const backgroundB = opened[1]!;
     const selected = opened[2]!;
@@ -506,21 +366,22 @@ loadTest("measures selected-view background-work unused-Bot cost on the existing
       notes: [
         "Three retained desktops with the same browser workload and no viewers.",
         "Application output changed between Agent screenshots (timer ticks), not merely idle processes.",
-        "No H.264 encoder processes while no viewer was attached.",
+        "No WayVNC process while no viewer was attached; expanded projection starts it on demand.",
         label.note,
       ],
       evidence: {
-        startupMs,
-        encoders: activeEncoderCount(),
+        wayvncProcesses: activeWayvncCount(),
+        encoders: activeWayvncCount(),
         unusedAfterCreate,
         screenshotDigests: { firstShot, secondShot, changed: firstShot !== secondShot },
       },
     });
 
     const viewerSampleMs = Math.min(durationMs, 1_500);
-    const compact = await ProjectionClient.connect(harness, selected, "normal-use-compact");
+    const compact = await ProjectionClient.connect(harness.baseUrl, selected, "normal-use-compact");
     clients.push(compact);
-    await compact.mode("preview");
+    await compact.setMode("preview");
+    const compactFrame = await compact.waitForPreviewFrame();
     const compactMedia = await until(
       () => {
         const media = harness.svc.projections.surfaceMedia(selected.surfaceId);
@@ -529,15 +390,14 @@ loadTest("measures selected-view background-work unused-Bot cost on the existing
       10_000,
       "compact preview did not start viewer-driven capture",
     );
-    expect(activeEncoderCount()).toBe(0);
+    expect(activeWayvncCount()).toBe(0);
     expect(compactMedia).toMatchObject({
       viewers: 1,
-      previewViewers: 1,
-      encodingActive: false,
+      rfbActive: false,
       captureActive: true,
     });
     const compactWindow = await resourceWindow(opened, generationBySurface, viewerSampleMs);
-    await compact.close(harness);
+    await compact.close();
     clients.pop();
     expect(harness.svc.projections.surfaceMedia(backgroundA.surfaceId).captureActive).toBeFalse();
     recordScenario("oneSelectedCompact", {
@@ -547,32 +407,32 @@ loadTest("measures selected-view background-work unused-Bot cost on the existing
       resources: compactWindow,
       attribution: attributeResourceWindow(compactWindow),
       notes: [
-        "Exactly one selected compact preview. Two sibling desktops kept working with no capture/encode.",
-        "Compact preview did not start an H.264 encoder.",
-        compact.frames > 0
-          ? `Native WebRTC peer received ${compact.frames} preview messages.`
-          : "Daemon capture/viewer state was observed immediately after mode(preview); native preview messages are optional transport evidence.",
-        `Viewer-attached resource sample was ${viewerSampleMs} ms to avoid holding a flaky native peer across a long window.`,
+        "Exactly one selected compact preview. Two sibling desktops kept working with no capture/RFB transport.",
+        "Compact preview delivered one PNG over the control WebSocket without starting WayVNC.",
+        `Control WebSocket received preview sequence ${compactFrame.sequence} (${compactFrame.bytes.byteLength} bytes).`,
+        `Viewer-attached resource sample was ${viewerSampleMs} ms.`,
       ],
       evidence: {
         selectedMedia: harness.svc.projections.surfaceMedia(selected.surfaceId),
         backgroundMedia: harness.svc.projections.surfaceMedia(backgroundA.surfaceId),
-        encoders: activeEncoderCount(),
-        nativePreviewFrames: compact.frames,
+        wayvncProcesses: activeWayvncCount(),
+        previewFrame: { sequence: compactFrame.sequence, bytes: compactFrame.bytes.byteLength, digest: compactFrame.digest },
         compactMedia,
       },
     });
 
-    const expanded = await ProjectionClient.connect(harness, selected, "normal-use-expanded");
+    const expanded = await ProjectionClient.connect(harness.baseUrl, selected, "normal-use-expanded");
     clients.push(expanded);
-    await expanded.mode("expanded");
+    await expanded.setMode("expanded");
     const expandedMedia = await until(
       () => {
         const media = harness.svc.projections.surfaceMedia(selected.surfaceId);
-        return media.encodingActive && activeEncoderCount() === 1 ? media : undefined;
+        return media.expandedViewers === 1 && media.rfbActive && activeWayvncCount() === 1
+          ? media
+          : undefined;
       },
       8_000,
-      "expanded mode did not start one encoder",
+      "expanded mode did not start one RFB view",
     );
     const expandedWindow = await resourceWindow(opened, generationBySurface, viewerSampleMs);
     recordScenario("oneSelectedExpanded", {
@@ -582,48 +442,57 @@ loadTest("measures selected-view background-work unused-Bot cost on the existing
       resources: expandedWindow,
       attribution: attributeResourceWindow(expandedWindow),
       notes: [
-        "Exactly one selected expanded projection. Encoder count is 1, not one-per-desktop.",
-        "Background desktops remained ready with no viewer-driven encode.",
+        "Exactly one selected expanded RFB view with one WayVNC process.",
+        "Background desktops remained ready with no viewer-driven projection work.",
       ],
       evidence: {
-        encoders: activeEncoderCount(),
+        wayvncProcesses: activeWayvncCount(),
         selectedMedia: expandedMedia,
       },
     });
-
-    try {
-      await expanded.mode("preview");
-    } catch (error) {
-      if (!(error instanceof Error) || !error.message.includes("DataChannel is closed")) throw error;
-    }
-    await until(() => activeEncoderCount() === 0 ? true : undefined, 8_000, "leaving expanded did not release the encoder");
-    recordScenario("leaveExpandedReleaseEncode", {
-      name: "leaveExpandedReleaseEncode",
+    await expanded.setMode("preview");
+    await until(
+      () => harness.svc.projections.surfaceMedia(selected.surfaceId).expandedViewers === 0
+        && activeWayvncCount() === 0
+        ? true
+        : undefined,
+      8_000,
+      "leaving expanded did not release the RFB view",
+    );
+    recordScenario("leaveExpandedReleaseRfb", {
+      name: "leaveExpandedReleaseRfb",
       ran: true,
       supervision: label,
-      notes: ["Leaving expanded released the unused encoder while the compact viewer and desktops remained."],
+      notes: ["Leaving expanded released the unused RFB view while the compact viewer and desktops remained."],
       evidence: {
-        encoders: activeEncoderCount(),
+        wayvncProcesses: activeWayvncCount(),
         selectedMedia: harness.svc.projections.surfaceMedia(selected.surfaceId),
         selectedReady: harness.svc.screens.status(selected).state,
       },
     });
 
-    await expanded.close(harness);
+    await expanded.close();
     clients.pop();
-    const switched = await ProjectionClient.connect(harness, backgroundA, "normal-use-switch-a");
+    const switched = await ProjectionClient.connect(harness.baseUrl, backgroundA, "normal-use-switch-a");
     clients.push(switched);
-    await switched.mode("expanded");
-    await until(() => activeEncoderCount() === 1 ? true : undefined, 8_000, "switch to A did not start A's encoder");
-    await switched.close(harness);
+    await switched.setMode("expanded");
+    await until(
+      () => harness.svc.projections.surfaceMedia(backgroundA.surfaceId).expandedViewers === 1
+        && activeWayvncCount() === 1
+        ? true
+        : undefined,
+      8_000,
+      "switch to A did not start A's RFB view",
+    );
+    await switched.close();
     clients.pop();
-    const switchedB = await ProjectionClient.connect(harness, backgroundB, "normal-use-switch-b");
+    const switchedB = await ProjectionClient.connect(harness.baseUrl, backgroundB, "normal-use-switch-b");
     clients.push(switchedB);
-    await switchedB.mode("expanded");
+    await switchedB.setMode("expanded");
     await until(
       () =>
         harness.svc.projections.surfaceMedia(backgroundA.surfaceId).viewers === 0
-          && harness.svc.projections.surfaceMedia(backgroundB.surfaceId).encodingActive
+          && harness.svc.projections.surfaceMedia(backgroundB.surfaceId).expandedViewers === 1
           ? true
           : undefined,
       8_000,
@@ -638,7 +507,7 @@ loadTest("measures selected-view background-work unused-Bot cost on the existing
       supervision: label,
       notes: [
         "A→B replaced that client's projection. A stayed ready and continued producing screenshot output.",
-        "A's capture/encode released after the switch.",
+        "A's RFB view released after the switch.",
       ],
       evidence: {
         aMedia: harness.svc.projections.surfaceMedia(backgroundA.surfaceId),
@@ -648,11 +517,11 @@ loadTest("measures selected-view background-work unused-Bot cost on the existing
       },
     });
 
-    await switchedB.close(harness).catch(() => undefined);
+    await switchedB.close().catch(() => undefined);
     clients.splice(0, clients.length);
-    const firstRemaining = await ProjectionClient.connect(harness, backgroundB, "normal-use-remaining-1");
+    const firstRemaining = await ProjectionClient.connect(harness.baseUrl, backgroundB, "normal-use-remaining-1");
     clients.push(firstRemaining);
-    await firstRemaining.mode("preview");
+    await firstRemaining.setMode("preview");
     await until(
       () => harness.svc.projections.surfaceMedia(backgroundB.surfaceId).captureActive ? true : undefined,
       8_000,
@@ -660,15 +529,15 @@ loadTest("measures selected-view background-work unused-Bot cost on the existing
     );
     let secondRemaining: ProjectionClient | undefined;
     try {
-      secondRemaining = await ProjectionClient.connect(harness, backgroundB, "normal-use-remaining-2");
+      secondRemaining = await ProjectionClient.connect(harness.baseUrl, backgroundB, "normal-use-remaining-2");
       clients.push(secondRemaining);
-      await secondRemaining.mode("preview");
+      await secondRemaining.setMode("preview");
       await until(
         () => harness.svc.projections.surfaceMedia(backgroundB.surfaceId).viewers === 2 ? true : undefined,
         5_000,
         "second viewer did not attach",
       );
-      await firstRemaining.close(harness);
+      await firstRemaining.close();
       clients.splice(clients.indexOf(firstRemaining), 1);
       await until(
         () => {
@@ -691,24 +560,24 @@ loadTest("measures selected-view background-work unused-Bot cost on the existing
         ran: false,
         supervision: label,
         notes: [
-          "Two simultaneous native WebRTC viewers did not stay attached on this real-Cage run.",
-          "Harness-mode coverage remains in tests/integration/screen-projection.test.ts (real ffmpeg encoder, injectable desktop).",
+          "Two simultaneous control WebSocket viewers did not stay attached on this real-Sway run.",
+          "Harness-mode coverage remains in tests/integration/screen-projection.test.ts (Fake RFB, injectable desktop).",
         ],
         unmet: error instanceof Error ? error.message : String(error),
         evidence: { media: harness.svc.projections.surfaceMedia(backgroundB.surfaceId) },
       });
     }
 
-    await Promise.all(clients.splice(0, clients.length).map((client) => client.close(harness).catch(() => undefined)));
+    await Promise.all(clients.splice(0, clients.length).map((client) => client.close().catch(() => undefined)));
     await until(
       () => {
         const media = harness.svc.projections.surfaceMedia(backgroundB.surfaceId);
-        return media.viewers === 0 && !media.captureActive && !media.encodingActive && activeEncoderCount() === 0
+        return media.viewers === 0 && !media.captureActive && !media.rfbActive && activeWayvncCount() === 0
           ? media
           : undefined;
       },
       8_000,
-      "last viewer did not release capture and encoding",
+      "last viewer did not release capture and RFB projection",
     );
     const noViewerShot = await screenshotDigest(harness, backgroundB);
     expect(harness.svc.screens.status(backgroundB).state).toBe("ready");
@@ -718,12 +587,12 @@ loadTest("measures selected-view background-work unused-Bot cost on the existing
       ran: true,
       supervision: label,
       notes: [
-        "Last viewer close released capture/encode without stopping applications.",
+        "Last viewer close released capture/RFB transport without stopping applications.",
         "Agent screenshot succeeded with no viewer. Unsaved/timer state was still on the desktop.",
       ],
       evidence: {
         media: harness.svc.projections.surfaceMedia(backgroundB.surfaceId),
-        encoders: activeEncoderCount(),
+        wayvncProcesses: activeWayvncCount(),
         noViewerShot,
         ready: opened.map((owner) => harness.svc.screens.status(owner).state),
       },
@@ -743,7 +612,7 @@ loadTest("measures selected-view background-work unused-Bot cost on the existing
     });
     throw error;
   } finally {
-    await Promise.all(clients.splice(0, clients.length).map((client) => client.close(harness).catch(() => undefined)));
+    await Promise.all(clients.splice(0, clients.length).map((client) => client.close().catch(() => undefined)));
     for (const owner of [...opened, ...unused]) {
       try {
         await destroyBot(harness, owner);
@@ -767,7 +636,7 @@ loadTest("measures selected-view background-work unused-Bot cost on the existing
     });
     rmSync(fixtureRoot, { recursive: true, force: true });
     for (const [name, value] of [
-      ["OMARCHY_BOT_CAGE_BIN", prior.cage],
+      ["OMARCHY_BOT_SWAY_BIN", prior.sway],
       ["OMARCHY_BOT_WLR_RANDR_BIN", prior.wlr],
       ["OMARCHY_BOT_LOAD_APP_BIN", prior.app],
       ["OMARCHY_BOT_SCREEN_PROFILE", prior.profile],
@@ -783,12 +652,12 @@ loadTest("measures selected-view background-work unused-Bot cost on the existing
       ran: true,
       supervision: label,
       notes: [
-        "Selected-view / background / unused matrix completed on the existing public projection + production Cage seam.",
-        "Viewing used the public projection HTTP API and a native WebRTC peer, not a mocked UI test.",
+        "Selected-view / background / unused matrix completed on the existing public projection + production Sway seam.",
+        "Viewing used the public v3 projection HTTP API plus control and view-only RFB WebSockets, not a mocked UI test.",
         "Workload was the same class of real browser application used by the capacity load fixture, with a timer so background output is observable without a viewer.",
         label.note,
       ],
-      evidence: { durationMs, useHostApplicationUnits: useHostUnits, portableCage: portable ?? null },
+      evidence: { durationMs, useHostApplicationUnits: useHostUnits, portableSway: portable ?? null },
     });
   }
   persistReport();
@@ -805,8 +674,8 @@ test("attributes plugin infrastructure separately from application and combined 
       cpuPercent: 30,
       gpu: { attributable: false, utilizationPercent: null, vramMiB: null },
       processes: [
-        { pid: 1, role: "compositor", executable: "cage", pssMiB: 40, rssMiB: 40, cpuPercent: 10 },
-        { pid: 2, role: "encoder", executable: "ffmpeg", pssMiB: 20, rssMiB: 20, cpuPercent: 10 },
+        { pid: 1, role: "compositor", executable: "sway", pssMiB: 40, rssMiB: 40, cpuPercent: 10 },
+        { pid: 2, role: "wayvnc", executable: "wayvnc", pssMiB: 20, rssMiB: 20, cpuPercent: 10 },
         { pid: 3, role: "application", executable: "chrome", pssMiB: 30, rssMiB: 30, cpuPercent: 10 },
       ],
     }],

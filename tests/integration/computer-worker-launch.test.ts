@@ -96,3 +96,58 @@ test("open_app launches directly in the owning Screen environment and applicatio
     watcher.close();
   }
 });
+
+test("open_url returns after dispatch while its opener keeps running in the owning Screen", async () => {
+  root = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-url-launch-"));
+  const binDir = path.join(root, "bin");
+  const marker = path.join(root, "url-environment");
+  const applicationCwd = path.join(root, ".omarchy-bot", "workspace");
+  mkdirSync(binDir, { recursive: true });
+  mkdirSync(applicationCwd, { recursive: true });
+  const opener = path.join(binDir, "xdg-open");
+  writeFileSync(opener, [
+    "#!/bin/sh",
+    `printf '%s|%s|%s|%s' "$1" "$WAYLAND_DISPLAY" "$(pwd)" "$XDG_RUNTIME_DIR" > ${JSON.stringify(`${marker}.tmp`)}`,
+    `mv ${JSON.stringify(`${marker}.tmp`)} ${JSON.stringify(marker)}`,
+    "sleep 30",
+    "",
+  ].join("\n"));
+  chmodSync(opener, 0o700);
+
+  const worker = new WorkerClient({
+    name: "computer-url-launch-test",
+    script: WORKER_SCRIPT,
+    env: {
+      HOME: root,
+      PATH: `${binDir}:/usr/bin:/bin`,
+      XDG_RUNTIME_DIR: root,
+      WAYLAND_DISPLAY: "wayland-private",
+      OMARCHY_BOT_SURFACE_ID: SURFACE_ID,
+      OMARCHY_BOT_RUNTIME_GENERATION: "1",
+      OMARCHY_BOT_APPLICATION_CWD: applicationCwd,
+    },
+    onEvent: () => {},
+  });
+  const markerWritten = Promise.withResolvers<void>();
+  const watcher = watch(root, (_event, filename) => {
+    if (filename === path.basename(marker)) markerWritten.resolve();
+  });
+  try {
+    await worker.start();
+    await expect(worker.request({
+      type: "act",
+      surfaceId: SURFACE_ID,
+      runtimeGeneration: 1,
+      action: { name: "open_url", args: { url: "https://example.com/path" } },
+      inputAuthority: { botId: "bot_url_test", surfaceId: SURFACE_ID, turnId: "turn-url-test" },
+    }, 1_000)).resolves.toMatchObject({ done: true });
+    await markerWritten.promise;
+    expect(await Bun.file(marker).text()).toBe(
+      `https://example.com/path|wayland-private|${applicationCwd}|${root}`,
+    );
+    expect(worker.alive).toBeTrue();
+  } finally {
+    await worker.stop();
+    watcher.close();
+  }
+});

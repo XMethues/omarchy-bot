@@ -1,0 +1,343 @@
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import os from "node:os";
+import path from "node:path";
+import { SwayBotScreenRuntimeAdapter } from "../../../apps/daemon/src/modules/computer/swayBotScreenRuntime.ts";
+import type {
+  BotScreenProvision,
+  BotScreenRuntimeAdapter,
+} from "../../../apps/daemon/src/modules/computer/botScreenManager.ts";
+import type { ComputerAction } from "../../../packages/domain/src/computer.ts";
+import type { SurfaceComputerWorker } from "../../../apps/daemon/src/supervision/supervisor.ts";
+import { writeFakeSwayIpcMode, writeFakeSwayTree } from "./fakeSwayIpc.ts";
+
+const LIVE_UNICODE_TITLE = "未保存 你好";
+
+function liveSwayTree(title: string): unknown {
+  return {
+    id: 1,
+    type: "root",
+    name: "root",
+    nodes: [
+      {
+        id: 2,
+        type: "output",
+        name: "HEADLESS-1",
+        nodes: [
+          {
+            id: 3,
+            type: "workspace",
+            name: "1",
+            nodes: [
+              {
+                id: 10,
+                type: "con",
+                name: title,
+                app_id: "firefox",
+                pid: 1001,
+                focused: true,
+                shell: "xdg_shell",
+                rect: { x: 0, y: 0, width: 800, height: 600 },
+              },
+            ],
+            floating_nodes: [],
+          },
+        ],
+      },
+    ],
+  };
+}
+
+function executable(directory: string, name: string, body: string): string {
+  const target = path.join(directory, name);
+  writeFileSync(target, body);
+  chmodSync(target, 0o700);
+  return target;
+}
+
+export interface ScriptedSwayFixture {
+  adapter: BotScreenRuntimeAdapter;
+  runtimeRoot: string;
+  profileRoot: string;
+  starts: BotScreenProvision[];
+  stops: Array<{ surfaceId: string; runtimeGeneration: number }>;
+  failSurfacePath: string;
+  wayvncBin: string;
+  advanceLiveProgress: () => void;
+  inputCommands: () => string[];
+  wayvncStarts: () => number;
+  wayvncArgvTokens: () => string[];
+  wayvncEnv: () => string[];
+  exitWayvnc: () => void;
+  exitWayvncFor: (surfaceId: string, generation: number) => void;
+  blockActions: () => void;
+  waitForActions: (count: number) => Promise<void>;
+  releaseActions: () => void;
+  dispose: () => void;
+}
+
+export function createFakeWayvncBin(directory: string, paths: {
+  startsPath: string;
+  argvPath: string;
+  envPath: string;
+  exitPath: string;
+}): string {
+  return executable(directory, "wayvnc", `#!/usr/bin/env bun
+import { appendFileSync, chmodSync, existsSync, unlinkSync, writeFileSync } from "node:fs";
+import path from "node:path";
+const startsPath = ${JSON.stringify(paths.startsPath)};
+const argvPath = ${JSON.stringify(paths.argvPath)};
+const envPath = ${JSON.stringify(paths.envPath)};
+const exitPath = ${JSON.stringify(paths.exitPath)};
+appendFileSync(startsPath, "1\\n");
+const tokens = process.argv.slice(2);
+writeFileSync(argvPath, tokens.join("\\n") + "\\n");
+writeFileSync(envPath, [
+  "WAYLAND_DISPLAY=" + (process.env.WAYLAND_DISPLAY ?? ""),
+  "XDG_RUNTIME_DIR=" + (process.env.XDG_RUNTIME_DIR ?? ""),
+  "SWAYSOCK=" + (process.env.SWAYSOCK ?? ""),
+].join("\\n") + "\\n");
+if (existsSync(exitPath)) process.exit(1);
+const socketPath = (() => {
+  const prefixed = tokens.find((token) => token.startsWith("unix:"));
+  if (prefixed !== undefined) return prefixed.replace(/^unix:(?:path=)?/, "");
+  const flag = tokens.indexOf("--unix-socket");
+  if (flag >= 0) {
+    for (let i = flag + 1; i < tokens.length; i++) {
+      const token = tokens[i]!;
+      if (token.startsWith("-")) continue;
+      if (tokens[i - 1] === "--output") continue;
+      return token;
+    }
+  }
+  return tokens.find((token, i) => token.startsWith("/") && tokens[i - 1] !== "--output");
+})();
+if (socketPath === undefined) {
+  await new Promise(() => {});
+}
+try { unlinkSync(socketPath); } catch {}
+Bun.listen({
+  unix: socketPath,
+  socket: {
+    open(socket) {
+      socket.write("RFB 003.008\\n");
+    },
+    data(socket, data) {
+      socket.write(data);
+    },
+  },
+});
+chmodSync(socketPath, 0o600);
+for (;;) {
+  if (existsSync(exitPath)) process.exit(1);
+  const runtimeExit = path.join(process.env.XDG_RUNTIME_DIR ?? "", "wayvnc-exit");
+  if (existsSync(runtimeExit)) process.exit(1);
+  await Bun.sleep(20);
+}
+`);
+}
+
+export async function createScriptedSwayFixture(options?: {
+  waylandDisplay?: string;
+}): Promise<ScriptedSwayFixture> {
+  const root = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-sway-public-"));
+  const bin = path.join(root, "bin");
+  const runtimeRoot = path.join(root, "runtime");
+  const profileRoot = path.join(root, "profiles");
+  const failSurfacePath = path.join(root, "fail-surface");
+  const controlDir = path.join(root, "ipc-control");
+  const wayvncStartsPath = path.join(root, "wayvnc-starts");
+  const wayvncArgvPath = path.join(root, "wayvnc-argv");
+  const wayvncEnvPath = path.join(root, "wayvnc-env");
+  const wayvncExitPath = path.join(root, "wayvnc-exit");
+  mkdirSync(bin);
+  mkdirSync(controlDir);
+  writeFileSync(wayvncStartsPath, "");
+  const wayvnc = createFakeWayvncBin(bin, {
+    startsPath: wayvncStartsPath,
+    argvPath: wayvncArgvPath,
+    envPath: wayvncEnvPath,
+    exitPath: wayvncExitPath,
+  });
+  let liveProgress = 0;
+  writeFakeSwayTree(controlDir, liveSwayTree(LIVE_UNICODE_TITLE));
+  writeFakeSwayIpcMode(controlDir, "ok");
+  const png = path.join(root, "screen.png");
+  const sharp = createRequire(
+    path.resolve(import.meta.dir, "../../../apps/daemon/src/bootstrap/main.ts"),
+  )("sharp") as (input: unknown) => { png: () => { toFile: (file: string) => Promise<unknown> } };
+  await sharp({
+    create: {
+      width: 1920,
+      height: 1080,
+      channels: 4,
+      background: { r: 0, g: 0, b: 0, alpha: 1 },
+    },
+  }).png().toFile(png);
+
+  const helperPath = path.resolve(import.meta.dir, "fakeSwayIpc.ts");
+  const sway = executable(bin, "sway", `#!/usr/bin/env bun
+import { existsSync, readFileSync } from "node:fs";
+import path from "node:path";
+import { serveFakeSwayIpc } from ${JSON.stringify(helperPath)};
+const runtimeDir = process.env.XDG_RUNTIME_DIR ?? "";
+const failSurfaceFile = ${JSON.stringify(failSurfacePath)};
+if (existsSync(failSurfaceFile)) {
+  const failSurface = readFileSync(failSurfaceFile, "utf8").trim();
+  if (failSurface !== "" && runtimeDir.includes(failSurface)) process.exit(1);
+}
+const wayland = path.join(runtimeDir, ${JSON.stringify(options?.waylandDisplay ?? "wayland-0")});
+const swaySock = process.env.SWAYSOCK ?? path.join(runtimeDir, "sway-ipc.sock");
+Bun.listen({ unix: wayland, socket: { data() {} } });
+await serveFakeSwayIpc({
+  socketPath: swaySock,
+  controlDir: ${JSON.stringify(controlDir)},
+});
+`);
+  const desktop = executable(bin, "bot-desktop", [
+    "#!/bin/sh",
+    "printf 'READY %s %s\\n' \"$1\" \"$2\"",
+    "while :; do sleep 60; done",
+    "",
+  ].join("\n"));
+  const inner = new SwayBotScreenRuntimeAdapter({
+    runtimeRoot,
+    profileRoot,
+    swayBin: sway,
+    wlrRandrBin: executable(bin, "wlr-randr", "#!/bin/sh\nexit 0\n"),
+    grimBin: executable(bin, "grim", `#!/bin/sh\ncat ${JSON.stringify(png)}\n`),
+    inputHelperBin: executable(bin, "input", `#!/usr/bin/env bun
+import { appendFileSync } from "node:fs";
+const logPath = ${JSON.stringify(path.join(root, "input.log"))};
+process.stdout.write("READY\\n");
+const decoder = new TextDecoder();
+let buffer = "";
+let highestEpoch = 0;
+for await (const chunk of Bun.stdin.stream()) {
+  buffer += decoder.decode(chunk);
+  let newline = buffer.indexOf("\\n");
+  while (newline >= 0) {
+    const line = buffer.slice(0, newline);
+    buffer = buffer.slice(newline + 1);
+    appendFileSync(logPath, line + "\\n");
+    const parts = line.split(" ");
+    const request = parts[1] ?? "0";
+    if (parts[0] === "authority") {
+      const epoch = Number(parts[parts.length - 1]);
+      if (!Number.isSafeInteger(epoch) || epoch <= highestEpoch) {
+        process.stdout.write("ERR " + request + " invalid-authority\\n");
+        newline = buffer.indexOf("\\n");
+        continue;
+      }
+      highestEpoch = epoch;
+    }
+    process.stdout.write("OK " + request + "\\n");
+    newline = buffer.indexOf("\\n");
+  }
+}
+`),
+    captureHelperBin: executable(bin, "capture", "#!/bin/sh\nprintf 'READY\\n'\nwhile read -r command; do [ \"$command\" = close ] && exit 0; done\n"),
+    botDesktopBin: desktop,
+    wayvncBin: wayvnc,
+    computerWorkers: {
+      startComputerWorker: async (scope): Promise<SurfaceComputerWorker> => ({
+        surfaceId: scope.surfaceId,
+        runtimeGeneration: scope.runtimeGeneration,
+        exited: new Promise<Error>(() => {}),
+        act: async (action: ComputerAction) => {
+          actionsStarted += 1;
+          const ready = actionWaiters.filter((waiter) => actionsStarted >= waiter.count);
+          actionWaiters = actionWaiters.filter((waiter) => actionsStarted < waiter.count);
+          for (const waiter of ready) waiter.resolve();
+          if (blockActions) await actionGate.promise;
+          return { done: true, text: `worker-${action.name}` };
+        },
+        stop: async () => {},
+      }),
+    },
+  });
+  const starts: BotScreenProvision[] = [];
+  const stops: Array<{ surfaceId: string; runtimeGeneration: number }> = [];
+  let blockActions = false;
+  let actionGate = Promise.withResolvers<void>();
+  let actionsStarted = 0;
+  let actionWaiters: Array<{ count: number; resolve: () => void }> = [];
+  const adapter: BotScreenRuntimeAdapter = {
+    start: async (provision) => {
+      starts.push(provision);
+      await Bun.sleep(30);
+      const runtime = await inner.start(provision);
+      const stop = runtime.stop.bind(runtime);
+      runtime.stop = async () => {
+        stops.push({ surfaceId: provision.surfaceId, runtimeGeneration: provision.generation });
+        await stop();
+      };
+      return runtime;
+    },
+    reconcile: (provision) => inner.reconcile(provision),
+    destroy: (surfaceId) => inner.destroy(surfaceId),
+  };
+  return {
+    adapter,
+    runtimeRoot,
+    profileRoot,
+    starts,
+    stops,
+    failSurfacePath,
+    wayvncBin: wayvnc,
+    advanceLiveProgress: () => {
+      liveProgress += 1;
+      writeFakeSwayTree(controlDir, liveSwayTree(`${LIVE_UNICODE_TITLE} · ${liveProgress}`));
+    },
+    inputCommands: () => {
+      const logPath = path.join(root, "input.log");
+      try {
+        return readFileSync(logPath, "utf8").split("\n").filter((line) => line !== "");
+      } catch {
+        return [];
+      }
+    },
+    wayvncStarts: () => {
+      try {
+        return readFileSync(wayvncStartsPath, "utf8").split("\n").filter((line) => line !== "").length;
+      } catch {
+        return 0;
+      }
+    },
+    wayvncArgvTokens: () => {
+      try {
+        return readFileSync(wayvncArgvPath, "utf8").split("\n").filter((line) => line !== "");
+      } catch {
+        return [];
+      }
+    },
+    wayvncEnv: () => {
+      try {
+        return readFileSync(wayvncEnvPath, "utf8").split("\n").filter((line) => line !== "");
+      } catch {
+        return [];
+      }
+    },
+    exitWayvnc: () => {
+      writeFileSync(wayvncExitPath, "1\n");
+    },
+    exitWayvncFor: (surfaceId, generation) => {
+      writeFileSync(path.join(runtimeRoot, surfaceId, String(generation), "wayvnc-exit"), "1\n");
+    },
+    blockActions: () => {
+      blockActions = true;
+      actionGate = Promise.withResolvers<void>();
+    },
+    waitForActions: (count) => {
+      if (actionsStarted >= count) return Promise.resolve();
+      const { promise, resolve } = Promise.withResolvers<void>();
+      actionWaiters.push({ count, resolve });
+      return promise;
+    },
+    releaseActions: () => {
+      blockActions = false;
+      actionGate.resolve();
+    },
+    dispose: () => rmSync(root, { recursive: true, force: true }),
+  };
+}

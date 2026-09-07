@@ -1,10 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { createRequire } from "node:module";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import os from "node:os";
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { BotDto, ComputerViewDto, DeleteBotResultDto, ThreadDto } from "../../packages/protocol/src/index.ts";
-import { CageBotScreenRuntimeAdapter } from "../../apps/daemon/src/modules/computer/cageBotScreenRuntime.ts";
 import { FakeBotScreenRuntimeAdapter } from "../../apps/daemon/src/modules/computer/fakeBotScreenRuntime.ts";
 import {
   api,
@@ -16,6 +13,7 @@ import {
   waitThreadIdle,
   type Harness,
 } from "./helpers/harness.ts";
+import { createScriptedSwayFixture } from "./helpers/swayBotScreen.ts";
 
 async function bot(h: Harness, botId: string): Promise<BotDto> {
   return api(h, "GET", `/api/bots/${botId}`);
@@ -830,159 +828,640 @@ describe("Bot Screen lifecycle", () => {
     });
   });
 
-  test("public deletion and recovery clean a Cage private runtime without touching shared or leftover profile paths", async () => {
-    const fixture = await createScriptedCageFixture();
+  test("a ready Screen can acquire an expanded view without changing lifecycle or starting a second runtime", async () => {
+    const adapter = new FakeBotScreenRuntimeAdapter();
+    h = await startDaemon(undefined, { botScreenAdapter: adapter });
+    const owner = await bot(h, await makeBot(h, "Expanded view acquire"));
+    await activateScreen(h, owner);
+
+    expect(h.svc.screens.status({ botId: owner.id, surfaceId: owner.surfaceId })).toEqual({
+      state: "ready",
+    });
+    expect(adapter.starts).toHaveLength(1);
+
+    const source = await h.svc.screens.projectionSource({ botId: owner.id, surfaceId: owner.surfaceId });
+    const view = await source!.acquireExpandedView();
+
+    expect(typeof view.send).toBe("function");
+    expect(typeof view.receive).toBe("function");
+    expect(typeof view.close).toBe("function");
+    expect(h.svc.screens.status({ botId: owner.id, surfaceId: owner.surfaceId })).toEqual({
+      state: "ready",
+    });
+    expect(adapter.starts).toHaveLength(1);
+  });
+
+  test("expanded-view RFB bytes stay on the projection lease and confer no input authority", async () => {
+    const adapter = new FakeBotScreenRuntimeAdapter();
+    h = await startDaemon(undefined, { botScreenAdapter: adapter });
+    const owner = await bot(h, await makeBot(h, "Expanded view bytes"));
+    await activateScreen(h, owner);
+    const source = await h.svc.screens.projectionSource({ botId: owner.id, surfaceId: owner.surfaceId });
+    const view = await source!.acquireExpandedView();
+    const rfbBanner = new Uint8Array([
+      0x52, 0x46, 0x42, 0x20, 0x30, 0x30, 0x33, 0x2e, 0x30, 0x30, 0x38, 0x0a,
+    ]);
+
+    await view.send(rfbBanner);
+    const received = await view.receive();
+
+    expect(received).toEqual(rfbBanner);
+    expect(adapter.inputEvents).toEqual([]);
+    expect(adapter.pointerEvents).toEqual([]);
+  });
+
+  test("closing an expanded view leaves the Bot Desktop Session ready for capture", async () => {
+    const adapter = new FakeBotScreenRuntimeAdapter();
+    h = await startDaemon(undefined, { botScreenAdapter: adapter });
+    const owner = await bot(h, await makeBot(h, "Expanded view close"));
+    await activateScreen(h, owner);
+    const source = await h.svc.screens.projectionSource({ botId: owner.id, surfaceId: owner.surfaceId });
+    const view = await source!.acquireExpandedView();
+    const generation = adapter.running(owner.surfaceId);
+
+    await view.close();
+
+    expect(adapter.stops).toEqual([]);
+    expect(adapter.expandedViewsReleased).toBe(1);
+    expect(adapter.running(owner.surfaceId)).toEqual(generation);
+    expect(await waitForState(h, owner, "ready")).toMatchObject({
+      botId: owner.id,
+      surfaceId: owner.surfaceId,
+    });
+    expect(await source!.capture()).toMatchObject({ mediaType: "image/png" });
+    const stream = await source!.openCaptureStream();
+    expect(await stream.next()).toMatchObject({ pixelFormat: "rgba" });
+    await stream.close();
+  });
+
+  test("reprovision rejects a stale expanded view and lets the replacement acquire a new lease", async () => {
+    const adapter = new FakeBotScreenRuntimeAdapter();
+    h = await startDaemon(undefined, { botScreenAdapter: adapter });
+    const owner = await bot(h, await makeBot(h, "Stale expanded view"));
+    await activateScreen(h, owner);
+    const stale = await h.svc.screens.projectionSource({ botId: owner.id, surfaceId: owner.surfaceId });
+    const lease = await stale!.acquireExpandedView();
+    const rfbBanner = new Uint8Array([
+      0x52, 0x46, 0x42, 0x20, 0x30, 0x30, 0x33, 0x2e, 0x30, 0x30, 0x38, 0x0a,
+    ]);
+    // The fake lease emits the RFB banner on acquire; drain it so the next
+    // receive is actually in flight when the desktop exits.
+    expect(await lease.receive()).toEqual(rfbBanner);
+    const inFlightReceive = lease.receive();
+    void inFlightReceive.catch(() => {});
+
+    adapter.exitDesktop(owner.surfaceId);
+    await waitForState(h, owner, "unavailable");
+
+    await expect(inFlightReceive).rejects.toThrow();
+    await expect(lease.send(rfbBanner)).rejects.toThrow();
+    await expect(lease.receive()).rejects.toThrow();
+    await expect(stale!.acquireExpandedView()).rejects.toThrow("stale");
+
+    await activateScreen(h, owner);
+    const replacement = await h.svc.screens.projectionSource({ botId: owner.id, surfaceId: owner.surfaceId });
+    expect(replacement).toMatchObject({
+      surfaceId: owner.surfaceId,
+      runtimeGeneration: 2,
+    });
+    const next = await replacement!.acquireExpandedView();
+    await next.send(rfbBanner);
+    expect(await next.receive()).toEqual(rfbBanner);
+    await next.close();
+  });
+});
+
+describe("Sway-injected Bot Screen public lifecycle", () => {
+  let h: Harness | undefined;
+
+  afterEach(async () => {
+    await h?.stop();
+  });
+
+  test("creating a Bot and opening Threads does not start Sway until a Computer Surface request", async () => {
+    const fixture = await createScriptedSwayFixture();
     const previousProfile = process.env.OMARCHY_BOT_SCREEN_PROFILE;
     process.env.OMARCHY_BOT_SCREEN_PROFILE = "1080p";
     try {
       h = await startDaemon(undefined, { botScreenAdapter: fixture.adapter });
-      const deleted = await bot(h, await makeBot(h, "Cage cleanup deleted"));
-      const sibling = await bot(h, await makeBot(h, "Cage cleanup sibling"));
-      const workspace = path.join(h.home, ".omarchy-bot", "workspace");
-      mkdirSync(workspace, { recursive: true });
-      const sharedSentinel = path.join(workspace, "cage-cleanup-shared.txt");
-      const legacyProfile = path.join(h.home, ".omarchy-bot", "legacy-profiles", "keep-me.txt");
-      mkdirSync(path.dirname(legacyProfile), { recursive: true });
-      writeFileSync(sharedSentinel, "shared work");
-      writeFileSync(legacyProfile, "old profile residue");
+      const owner = await bot(h, await makeBot(h, "Sway on-demand unused"));
+      const other = await bot(h, await makeBot(h, "Sway on-demand sibling"));
+      const first = await sendToBot(h, owner.id, "say: first conversation");
+      await waitThreadIdle(h, first.threadId);
+      const second = await sendToBot(h, owner.id, "say: second conversation");
+      await waitThreadIdle(h, second.threadId);
+      expect(fixture.starts).toHaveLength(0);
+      expect(existsSync(path.join(fixture.runtimeRoot, owner.surfaceId))).toBeFalse();
+      expect(h.svc.screens.status({ botId: owner.id, surfaceId: owner.surfaceId })).toEqual({ state: "stopped" });
+      expect((await apiStatus(h, "GET", computerPath(owner))).body).toMatchObject({
+        botId: owner.id,
+        surfaceId: owner.surfaceId,
+        state: "starting",
+      });
 
-      expect(await h.svc.screens.ensureReady({ botId: deleted.id, surfaceId: deleted.surfaceId })).toBeTrue();
-      expect(h.svc.screens.status({ botId: deleted.id, surfaceId: deleted.surfaceId })).toEqual({ state: "ready" });
-      expect(await h.svc.screens.ensureReady({ botId: sibling.id, surfaceId: sibling.surfaceId })).toBeTrue();
-      const firstPid = Number(readFileSync(fixture.desktopPid(deleted.surfaceId), "utf8"));
-      expect(processAlive(firstPid)).toBeTrue();
-      expect(existsSync(path.join(fixture.runtimeRoot, deleted.surfaceId, "1"))).toBeTrue();
-
-      const home = h.home;
-      await h.disconnectForRestart();
-      h = await startDaemon(home, { botScreenAdapter: fixture.adapter });
-
-      expect(processAlive(firstPid)).toBeFalse();
-      expect(existsSync(path.join(fixture.runtimeRoot, deleted.surfaceId, "1"))).toBeFalse();
-      expect(h.svc.screens.status({ botId: deleted.id, surfaceId: deleted.surfaceId })).toEqual({ state: "ready" });
-      expect(h.svc.screens.status({ botId: sibling.id, surfaceId: sibling.surfaceId })).toEqual({ state: "ready" });
-      const recoveredPid = Number(readFileSync(fixture.desktopPid(deleted.surfaceId), "utf8"));
-      expect(recoveredPid).not.toBe(firstPid);
-      expect(processAlive(recoveredPid)).toBeTrue();
-      expect(existsSync(path.join(fixture.runtimeRoot, deleted.surfaceId, "2"))).toBeTrue();
-      expect(readFileSync(sharedSentinel, "utf8")).toBe("shared work");
-      expect(readFileSync(legacyProfile, "utf8")).toBe("old profile residue");
-
-      const result = await api<DeleteBotResultDto>(h, "DELETE", `/api/bots/${deleted.id}`, {});
-      expect(result).toMatchObject({ status: "deleted", removed: { surface: true } });
-      expect(processAlive(recoveredPid)).toBeFalse();
-      expect(existsSync(path.join(fixture.runtimeRoot, deleted.surfaceId))).toBeFalse();
-      expect(existsSync(path.join(fixture.profileRoot, deleted.surfaceId))).toBeFalse();
-      expect(existsSync(path.join(fixture.runtimeRoot, sibling.surfaceId))).toBeTrue();
-      expect(h.svc.screens.status({ botId: sibling.id, surfaceId: sibling.surfaceId })).toEqual({ state: "ready" });
-      expect((await apiStatus(h, "GET", `/api/bots/${sibling.id}`)).status).toBe(200);
-      expect(readFileSync(sharedSentinel, "utf8")).toBe("shared work");
-      expect(readFileSync(legacyProfile, "utf8")).toBe("old profile residue");
-      expect((await apiStatus(h, "GET", `/api/bots/${deleted.id}`)).status).toBe(404);
+      const snapshot = fetch(
+        `${h.baseUrl}/api/computer/snapshot?botId=${encodeURIComponent(owner.id)}&surfaceId=${encodeURIComponent(owner.surfaceId)}`,
+      );
+      const seen = new Set<ComputerViewDto["state"]>();
+      const deadline = Date.now() + 5_000;
+      while (Date.now() < deadline) {
+        const response = await fetch(`${h.baseUrl}${computerPath(owner)}`);
+        if (response.status === 200) {
+          const view = await response.json() as ComputerViewDto;
+          seen.add(view.state);
+          if (view.state === "ready") break;
+        }
+      }
+      expect((await snapshot).status).toBe(200);
+      expect(seen.has("starting")).toBeTrue();
+      expect(seen.has("ready")).toBeTrue();
+      expect(await waitForState(h, owner, "ready")).toMatchObject({
+        botId: owner.id,
+        surfaceId: owner.surfaceId,
+        state: "ready",
+      });
+      expect(fixture.starts).toEqual([
+        expect.objectContaining({ surfaceId: owner.surfaceId, generation: 1 }),
+      ]);
+      expect(existsSync(path.join(fixture.runtimeRoot, owner.surfaceId, "1"))).toBeTrue();
+      expect(existsSync(path.join(fixture.runtimeRoot, other.surfaceId))).toBeFalse();
+      expect(h.svc.screens.status({ botId: other.id, surfaceId: other.surfaceId })).toEqual({ state: "stopped" });
     } finally {
+      await h?.stop();
+      h = undefined;
       if (previousProfile === undefined) delete process.env.OMARCHY_BOT_SCREEN_PROFILE;
       else process.env.OMARCHY_BOT_SCREEN_PROFILE = previousProfile;
       fixture.dispose();
     }
-  }, 60_000);
-});
-
-function processAlive(pid: number): boolean {
-  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function executable(directory: string, name: string, body: string): string {
-  const target = path.join(directory, name);
-  writeFileSync(target, body);
-  chmodSync(target, 0o700);
-  return target;
-}
-
-async function createScriptedCageFixture(): Promise<{
-  adapter: CageBotScreenRuntimeAdapter;
-  runtimeRoot: string;
-  profileRoot: string;
-  desktopPid: (surfaceId: string) => string;
-  dispose: () => void;
-}> {
-  const root = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-cage-cleanup-"));
-  const bin = path.join(root, "bin");
-  const runtimeRoot = path.join(root, "runtime");
-  const profileRoot = path.join(root, "profiles");
-  mkdirSync(bin);
-  const png = path.join(root, "screen.png");
-  const sharp = createRequire(
-    path.resolve(import.meta.dir, "../../apps/daemon/src/bootstrap/main.ts"),
-  )("sharp") as (input: unknown) => { png: () => { toFile: (file: string) => Promise<unknown> } };
-  await sharp({
-    create: {
-      width: 1920,
-      height: 1080,
-      channels: 4,
-      background: { r: 0, g: 0, b: 0, alpha: 1 },
-    },
-  }).png().toFile(png);
-  const cage = executable(bin, "cage", `#!/usr/bin/env bun
-import path from "node:path";
-const separator = process.argv.indexOf("--");
-const application = process.argv.slice(separator + 1);
-const socket = path.join(process.env.XDG_RUNTIME_DIR ?? "", "wayland-0");
-const server = Bun.listen({ unix: socket, socket: { data() {} } });
-const child = Bun.spawn(application, { env: { ...process.env, WAYLAND_DISPLAY: "wayland-0" }, stdin: "ignore", stdout: "inherit", stderr: "inherit" });
-const status = await child.exited;
-server.stop(true);
-process.exit(status);
-`);
-  const desktop = executable(bin, "bot-desktop", [
-    "#!/bin/sh",
-    "if [ \"$1\" = \"--host\" ]; then while :; do sleep 60; done; fi",
-    "printf '%s' \"$$\" > \"$XDG_CONFIG_HOME/../desktop.pid\"",
-    "printf 'READY %s %s\\n' \"$1\" \"$2\"",
-    "while :; do sleep 60; done",
-    "",
-  ].join("\n"));
-  const inert = "#!/bin/sh\nexit 0\n";
-  const adapter = new CageBotScreenRuntimeAdapter({
-    runtimeRoot,
-    profileRoot,
-    cageBin: cage,
-    wlrRandrBin: executable(bin, "wlr-randr", inert),
-    grimBin: executable(bin, "grim", `#!/bin/sh\ncat ${JSON.stringify(png)}\n`),
-    inputHelperBin: executable(bin, "input", [
-      "#!/bin/sh",
-      "printf 'READY\\n'",
-      "while IFS=' ' read -r command request rest; do",
-      "  printf 'OK %s\\n' \"$request\"",
-      "done",
-      "",
-    ].join("\n")),
-    captureHelperBin: executable(bin, "capture", "#!/bin/sh\nprintf 'READY\\n'\nwhile read -r command; do [ \"$command\" = close ] && exit 0; done\n"),
-    botDesktopBin: desktop,
-    ffmpegBin: executable(bin, "ffmpeg", "#!/bin/sh\nprintf ' V..... libx264 H.264 encoder\\n'\n"),
-    computerWorkers: {
-      startComputerWorker: async (scope) => ({
-        surfaceId: scope.surfaceId,
-        runtimeGeneration: scope.runtimeGeneration,
-        exited: new Promise<Error>(() => {}),
-        act: async () => ({}),
-        stop: async () => {},
-      }),
-    },
   });
-  return {
-    adapter,
-    runtimeRoot,
-    profileRoot,
-    desktopPid: (surfaceId) => path.join(profileRoot, surfaceId, "desktop.pid"),
-    dispose: () => rmSync(root, { recursive: true, force: true }),
-  };
-}
+
+  test("concurrent first Computer Surface requests converge on one Sway generation", async () => {
+    const fixture = await createScriptedSwayFixture();
+    const previousProfile = process.env.OMARCHY_BOT_SCREEN_PROFILE;
+    process.env.OMARCHY_BOT_SCREEN_PROFILE = "1080p";
+    try {
+      h = await startDaemon(undefined, { botScreenAdapter: fixture.adapter });
+      const owner = await bot(h, await makeBot(h, "Sway concurrent first use"));
+      const [first, second] = await Promise.all([
+        fetch(`${h.baseUrl}/api/computer/snapshot?botId=${encodeURIComponent(owner.id)}&surfaceId=${encodeURIComponent(owner.surfaceId)}`),
+        fetch(`${h.baseUrl}/api/computer/snapshot?botId=${encodeURIComponent(owner.id)}&surfaceId=${encodeURIComponent(owner.surfaceId)}`),
+      ]);
+      expect(first.status).toBe(200);
+      expect(second.status).toBe(200);
+      expect(fixture.starts.filter((start) => start.surfaceId === owner.surfaceId)).toHaveLength(1);
+      expect(fixture.starts[0]?.generation).toBe(1);
+      expect(await waitForState(h, owner, "ready")).toMatchObject({
+        botId: owner.id,
+        surfaceId: owner.surfaceId,
+      });
+      expect(existsSync(path.join(fixture.runtimeRoot, owner.surfaceId, "1"))).toBeTrue();
+      expect(existsSync(path.join(fixture.runtimeRoot, owner.surfaceId, "2"))).toBeFalse();
+    } finally {
+      await h?.stop();
+      h = undefined;
+      if (previousProfile === undefined) delete process.env.OMARCHY_BOT_SCREEN_PROFILE;
+      else process.env.OMARCHY_BOT_SCREEN_PROFILE = previousProfile;
+      fixture.dispose();
+    }
+  });
+
+  test("a Sway start failure stays on its Bot and leaves the sibling ready-capable", async () => {
+    const fixture = await createScriptedSwayFixture();
+    const previousProfile = process.env.OMARCHY_BOT_SCREEN_PROFILE;
+    process.env.OMARCHY_BOT_SCREEN_PROFILE = "1080p";
+    try {
+      h = await startDaemon(undefined, { botScreenAdapter: fixture.adapter });
+      const failed = await bot(h, await makeBot(h, "Sway provision failure"));
+      const sibling = await bot(h, await makeBot(h, "Sway provision sibling"));
+      writeFileSync(fixture.failSurfacePath, failed.surfaceId);
+
+      const rejected = await fetch(
+        `${h.baseUrl}/api/computer/snapshot?botId=${encodeURIComponent(failed.id)}&surfaceId=${encodeURIComponent(failed.surfaceId)}`,
+      );
+      expect(rejected.status).toBe(503);
+      expect(await waitForState(h, failed, "unavailable")).toMatchObject({
+        botId: failed.id,
+        surfaceId: failed.surfaceId,
+        state: "unavailable",
+      });
+      expect(existsSync(path.join(fixture.runtimeRoot, failed.surfaceId))).toBeFalse();
+
+      await activateScreen(h, sibling);
+      expect(h.svc.screens.status({ botId: sibling.id, surfaceId: sibling.surfaceId })).toEqual({ state: "ready" });
+      expect(existsSync(path.join(fixture.runtimeRoot, sibling.surfaceId, "1"))).toBeTrue();
+      expect(existsSync(path.join(fixture.runtimeRoot, failed.surfaceId))).toBeFalse();
+    } finally {
+      await h?.stop();
+      h = undefined;
+      if (previousProfile === undefined) delete process.env.OMARCHY_BOT_SCREEN_PROFILE;
+      else process.env.OMARCHY_BOT_SCREEN_PROFILE = previousProfile;
+      fixture.dispose();
+    }
+  });
+
+  test("closing the Computer Surface releases projection work without stopping Sway", async () => {
+    const fixture = await createScriptedSwayFixture();
+    const previousProfile = process.env.OMARCHY_BOT_SCREEN_PROFILE;
+    process.env.OMARCHY_BOT_SCREEN_PROFILE = "1080p";
+    try {
+      h = await startDaemon(undefined, { botScreenAdapter: fixture.adapter });
+      const owner = await bot(h, await makeBot(h, "Sway viewer close keeps desktop"));
+      await activateScreen(h, owner);
+      const source = await h.svc.screens.projectionSource({ botId: owner.id, surfaceId: owner.surfaceId });
+      expect(source?.runtimeGeneration).toBe(1);
+      const stream = await source!.openCaptureStream();
+      await stream.close();
+
+      await h.svc.projections.closeSurface(owner.surfaceId);
+
+      expect(h.svc.screens.status({ botId: owner.id, surfaceId: owner.surfaceId })).toEqual({ state: "ready" });
+      expect(source!.runtimeGeneration).toBe(1);
+      expect(existsSync(path.join(fixture.runtimeRoot, owner.surfaceId, "1"))).toBeTrue();
+      expect(fixture.stops).toEqual([]);
+      expect(h.svc.projections.surfaceMedia(owner.surfaceId)).toMatchObject({
+        viewers: 0,
+        captureActive: false,
+      });
+      expect((await fetch(
+        `${h.baseUrl}/api/computer/snapshot?botId=${encodeURIComponent(owner.id)}&surfaceId=${encodeURIComponent(owner.surfaceId)}`,
+      )).status).toBe(200);
+      const shot = await h.svc.screens.act(
+        { botId: owner.id, surfaceId: owner.surfaceId },
+        { name: "screenshot", args: {} },
+      );
+      expect(shot).toMatchObject({
+        image: { mediaType: "image/png" },
+        desktopSession: { botId: owner.id, surfaceId: owner.surfaceId, runtimeGeneration: 1 },
+      });
+      expect(await waitForState(h, owner, "ready")).toMatchObject({
+        botId: owner.id,
+        surfaceId: owner.surfaceId,
+      });
+    } finally {
+      await h?.stop();
+      h = undefined;
+      if (previousProfile === undefined) delete process.env.OMARCHY_BOT_SCREEN_PROFILE;
+      else process.env.OMARCHY_BOT_SCREEN_PROFILE = previousProfile;
+      fixture.dispose();
+    }
+  });
+
+  test("Sway window identity and Unicode progress stay live after viewers leave", async () => {
+    const fixture = await createScriptedSwayFixture();
+    const previousProfile = process.env.OMARCHY_BOT_SCREEN_PROFILE;
+    process.env.OMARCHY_BOT_SCREEN_PROFILE = "1080p";
+    try {
+      h = await startDaemon(undefined, { botScreenAdapter: fixture.adapter });
+      const owner = await bot(h, await makeBot(h, "Sway live state without viewers"));
+      await activateScreen(h, owner);
+      const source = await h.svc.screens.projectionSource({ botId: owner.id, surfaceId: owner.surfaceId });
+      const stream = await source!.openCaptureStream();
+      await stream.close();
+      await h.svc.projections.closeSurface(owner.surfaceId);
+
+      await Bun.sleep(300);
+      fixture.advanceLiveProgress();
+
+      const listed = await h.svc.screens.act(
+        { botId: owner.id, surfaceId: owner.surfaceId },
+        { name: "list_windows", args: {} },
+      );
+      expect(listed.desktopSession).toEqual({
+        botId: owner.id,
+        surfaceId: owner.surfaceId,
+        runtimeGeneration: 1,
+      });
+      expect(listed.windowList).toEqual([
+        expect.objectContaining({
+          id: "10",
+          title: "未保存 你好 · 1",
+          focused: true,
+        }),
+      ]);
+      const observed = await h.svc.screens.act(
+        { botId: owner.id, surfaceId: owner.surfaceId },
+        { name: "observe", args: {} },
+      );
+      expect(observed.windowList).toEqual(listed.windowList);
+      expect(observed.image?.mediaType).toBe("image/png");
+      expect(h.svc.screens.status({ botId: owner.id, surfaceId: owner.surfaceId })).toEqual({ state: "ready" });
+      expect(existsSync(path.join(fixture.runtimeRoot, owner.surfaceId, "1"))).toBeTrue();
+      expect(fixture.stops).toEqual([]);
+    } finally {
+      await h?.stop();
+      h = undefined;
+      if (previousProfile === undefined) delete process.env.OMARCHY_BOT_SCREEN_PROFILE;
+      else process.env.OMARCHY_BOT_SCREEN_PROFILE = previousProfile;
+      fixture.dispose();
+    }
+  });
+
+  test("ending viewer authority releases held Sway input without stopping the desktop", async () => {
+    const fixture = await createScriptedSwayFixture();
+    const previousProfile = process.env.OMARCHY_BOT_SCREEN_PROFILE;
+    process.env.OMARCHY_BOT_SCREEN_PROFILE = "1080p";
+    try {
+      h = await startDaemon(undefined, { botScreenAdapter: fixture.adapter });
+      const owner = await bot(h, await makeBot(h, "Sway held input release"));
+      await activateScreen(h, owner);
+      const source = await h.svc.screens.projectionSource({ botId: owner.id, surfaceId: owner.surfaceId });
+      const stream = await source!.openCaptureStream();
+      await source!.setInputAuthority(3);
+      await source!.input({
+        surfaceId: owner.surfaceId,
+        runtimeGeneration: source!.runtimeGeneration,
+        geometryGeneration: source!.geometryGeneration,
+        controllerEpoch: 3,
+        sequence: 1,
+        type: "button",
+        x: 12,
+        y: 18,
+        button: "left",
+        state: "pressed",
+      });
+      await source!.input({
+        surfaceId: owner.surfaceId,
+        runtimeGeneration: source!.runtimeGeneration,
+        geometryGeneration: source!.geometryGeneration,
+        controllerEpoch: 3,
+        sequence: 2,
+        type: "key",
+        keyCode: 29,
+        state: "pressed",
+      });
+
+      await h.svc.projections.closeSurface(owner.surfaceId);
+      await source!.releaseInput(3);
+      await stream.close();
+
+      expect(fixture.inputCommands().some((line) => line.startsWith("release "))).toBeTrue();
+      expect(fixture.stops).toEqual([]);
+      expect(h.svc.screens.status({ botId: owner.id, surfaceId: owner.surfaceId })).toEqual({ state: "ready" });
+      expect(source!.runtimeGeneration).toBe(1);
+    } finally {
+      await h?.stop();
+      h = undefined;
+      if (previousProfile === undefined) delete process.env.OMARCHY_BOT_SCREEN_PROFILE;
+      else process.env.OMARCHY_BOT_SCREEN_PROFILE = previousProfile;
+      fixture.dispose();
+    }
+  });
+
+  test("closing a Sway view does not settle an in-flight act or Takeover", async () => {
+    const fixture = await createScriptedSwayFixture();
+    const previousProfile = process.env.OMARCHY_BOT_SCREEN_PROFILE;
+    process.env.OMARCHY_BOT_SCREEN_PROFILE = "1080p";
+    try {
+      h = await startDaemon(undefined, { botScreenAdapter: fixture.adapter });
+      const owner = await bot(h, await makeBot(h, "Sway pending act survives view close"));
+      await activateScreen(h, owner);
+      const source = await h.svc.screens.projectionSource({ botId: owner.id, surfaceId: owner.surfaceId });
+      const stream = await source!.openCaptureStream();
+      fixture.blockActions();
+      const pending = h.svc.computer.agentToolAct(
+        { botId: owner.id, surfaceId: owner.surfaceId },
+        "sway-viewer-close-turn",
+        "sway-viewer-close-tool",
+        { name: "open_app", args: { app: "held.desktop" } },
+        new AbortController().signal,
+      );
+      void pending.catch(() => {});
+      await fixture.waitForActions(1);
+      const takeover = h.svc.computer.takeOver({ botId: owner.id, surfaceId: owner.surfaceId });
+      void takeover.catch(() => {});
+
+      await h.svc.projections.closeSurface(owner.surfaceId);
+      await stream.close();
+
+      expect(await Promise.race([
+        pending.then(() => "settled" as const, () => "settled" as const),
+        Bun.sleep(50).then(() => "pending" as const),
+      ])).toBe("pending");
+      expect(await Promise.race([
+        takeover.then(() => "settled" as const, () => "settled" as const),
+        Bun.sleep(50).then(() => "pending" as const),
+      ])).toBe("pending");
+      expect(h.svc.computer.state({ botId: owner.id, surfaceId: owner.surfaceId }).takeover).not.toBe("unavailable");
+      expect((await apiStatus(h, "GET", computerPath(owner))).body).toMatchObject({
+        takeover: "available",
+      });
+      expect(source!.runtimeGeneration).toBe(1);
+      expect(fixture.stops).toEqual([]);
+      expect(h.svc.screens.status({ botId: owner.id, surfaceId: owner.surfaceId })).toEqual({ state: "ready" });
+
+      fixture.releaseActions();
+      expect(await takeover).toEqual({ ok: true });
+      expect(h.svc.computer.state({ botId: owner.id, surfaceId: owner.surfaceId }).takeover).toBe("active");
+      expect(await Promise.race([
+        pending.then(() => "settled" as const, () => "settled" as const),
+        Bun.sleep(50).then(() => "pending" as const),
+      ])).toBe("pending");
+      await expect(h.svc.computer.imDone({ botId: owner.id, surfaceId: owner.surfaceId }))
+        .resolves.toMatchObject({});
+      await expect(pending).resolves.toMatchObject({
+        desktopSession: { runtimeGeneration: 1 },
+      });
+    } finally {
+      await h?.stop();
+      h = undefined;
+      if (previousProfile === undefined) delete process.env.OMARCHY_BOT_SCREEN_PROFILE;
+      else process.env.OMARCHY_BOT_SCREEN_PROFILE = previousProfile;
+      fixture.dispose();
+    }
+  });
+
+  test("daemon restart removes a broken Sway tree and reprovisions a fresh generation", async () => {
+    const fixture = await createScriptedSwayFixture();
+    const previousProfile = process.env.OMARCHY_BOT_SCREEN_PROFILE;
+    process.env.OMARCHY_BOT_SCREEN_PROFILE = "1080p";
+    try {
+      h = await startDaemon(undefined, { botScreenAdapter: fixture.adapter });
+      const broken = await bot(h, await makeBot(h, "Sway restart invalid"));
+      const sibling = await bot(h, await makeBot(h, "Sway restart sibling"));
+      await Promise.all([activateScreen(h, broken), activateScreen(h, sibling)]);
+      const stale = await h.svc.screens.projectionSource({ botId: broken.id, surfaceId: broken.surfaceId });
+      expect(stale?.runtimeGeneration).toBe(1);
+      unlinkSync(path.join(fixture.runtimeRoot, broken.surfaceId, "1", "wayland-0"));
+      const home = h.home;
+
+      await h.disconnectForRestart();
+      h = await startDaemon(home, { botScreenAdapter: fixture.adapter });
+
+      expect(await waitForState(h, broken, "ready")).toMatchObject({
+        botId: broken.id,
+        surfaceId: broken.surfaceId,
+      });
+      expect(fixture.starts.filter((start) => start.surfaceId === broken.surfaceId).map((start) => start.generation))
+        .toEqual([1, 2]);
+      expect(existsSync(path.join(fixture.runtimeRoot, broken.surfaceId, "1"))).toBeFalse();
+      expect(existsSync(path.join(fixture.runtimeRoot, broken.surfaceId, "2"))).toBeTrue();
+      expect(await waitForState(h, sibling, "ready")).toMatchObject({
+        botId: sibling.id,
+        surfaceId: sibling.surfaceId,
+      });
+      expect(fixture.starts.filter((start) => start.surfaceId === sibling.surfaceId)).toHaveLength(1);
+      expect(existsSync(path.join(fixture.runtimeRoot, sibling.surfaceId, "1"))).toBeTrue();
+      const replacement = await h.svc.screens.projectionSource({ botId: broken.id, surfaceId: broken.surfaceId });
+      expect(replacement).toMatchObject({
+        surfaceId: broken.surfaceId,
+        runtimeGeneration: 2,
+      });
+      expect(stale!.runtimeGeneration).toBe(1);
+    } finally {
+      await h?.stop();
+      h = undefined;
+      if (previousProfile === undefined) delete process.env.OMARCHY_BOT_SCREEN_PROFILE;
+      else process.env.OMARCHY_BOT_SCREEN_PROFILE = previousProfile;
+      fixture.dispose();
+    }
+  }, 20_000);
+
+  test("capacity rejection leaves no Sway runtime directory or start", async () => {
+    const fixture = await createScriptedSwayFixture();
+    const previousProfile = process.env.OMARCHY_BOT_SCREEN_PROFILE;
+    process.env.OMARCHY_BOT_SCREEN_PROFILE = "1080p";
+    try {
+      h = await startDaemon(undefined, { botScreenAdapter: fixture.adapter, botScreenCapacity: 1 });
+      const first = await bot(h, await makeBot(h, "Sway capacity admitted"));
+      const second = await bot(h, await makeBot(h, "Sway capacity rejected"));
+      await activateScreen(h, first);
+      const startsBeforeRejection = fixture.starts.length;
+
+      const rejected = await apiStatus(h, "GET", computerPath(second));
+      expect(rejected.status).toBe(503);
+      expect(rejected.body).toMatchObject({
+        unavailableReason: "capacity",
+        capacity: { active: 1, limit: 1 },
+      });
+      expect(fixture.starts).toHaveLength(startsBeforeRejection);
+      expect(existsSync(path.join(fixture.runtimeRoot, second.surfaceId))).toBeFalse();
+      expect(existsSync(path.join(fixture.profileRoot, second.surfaceId))).toBeFalse();
+      expect(fixture.wayvncStarts()).toBe(0);
+      expect(existsSync(path.join(fixture.runtimeRoot, first.surfaceId, "1"))).toBeTrue();
+    } finally {
+      await h?.stop();
+      h = undefined;
+      if (previousProfile === undefined) delete process.env.OMARCHY_BOT_SCREEN_PROFILE;
+      else process.env.OMARCHY_BOT_SCREEN_PROFILE = previousProfile;
+      fixture.dispose();
+    }
+  }, 15_000);
+
+  test("deleting a Sway Bot removes runtime and profile while keeping Shared Workspace files", async () => {
+    const fixture = await createScriptedSwayFixture();
+    const previousProfile = process.env.OMARCHY_BOT_SCREEN_PROFILE;
+    process.env.OMARCHY_BOT_SCREEN_PROFILE = "1080p";
+    try {
+      h = await startDaemon(undefined, { botScreenAdapter: fixture.adapter });
+      const deleted = await bot(h, await makeBot(h, "Sway delete runtime"));
+      const sibling = await bot(h, await makeBot(h, "Sway delete sibling"));
+      await Promise.all([activateScreen(h, deleted), activateScreen(h, sibling)]);
+      const workspace = path.join(h.home, ".omarchy-bot", "workspace");
+      mkdirSync(workspace, { recursive: true });
+      const sentinel = path.join(workspace, "keep-after-sway-delete.txt");
+      const leftoverProfile = path.join(h.home, ".omarchy-bot", "legacy-profiles", "keep-me.txt");
+      mkdirSync(path.dirname(leftoverProfile), { recursive: true });
+      writeFileSync(sentinel, "shared work");
+      writeFileSync(leftoverProfile, "old profile residue");
+      await h.svc.screens.projectionSource({ botId: deleted.id, surfaceId: deleted.surfaceId });
+
+      const result = await api<DeleteBotResultDto>(h, "DELETE", `/api/bots/${deleted.id}`, {});
+
+      expect(result).toMatchObject({ status: "deleted", removed: { surface: true } });
+      expect(existsSync(path.join(fixture.runtimeRoot, deleted.surfaceId))).toBeFalse();
+      expect(existsSync(path.join(fixture.profileRoot, deleted.surfaceId))).toBeFalse();
+      expect(existsSync(path.join(fixture.runtimeRoot, sibling.surfaceId, "1"))).toBeTrue();
+      expect(h.svc.screens.status({ botId: sibling.id, surfaceId: sibling.surfaceId })).toEqual({ state: "ready" });
+      expect(readFileSync(sentinel, "utf8")).toBe("shared work");
+      expect(readFileSync(leftoverProfile, "utf8")).toBe("old profile residue");
+      expect((await apiStatus(h, "GET", `/api/bots/${deleted.id}`)).status).toBe(404);
+    } finally {
+      await h?.stop();
+      h = undefined;
+      if (previousProfile === undefined) delete process.env.OMARCHY_BOT_SCREEN_PROFILE;
+      else process.env.OMARCHY_BOT_SCREEN_PROFILE = previousProfile;
+      fixture.dispose();
+    }
+  }, 15_000);
+
+  test("daemon restart reattaches a valid Sway session without changing its generation", async () => {
+    const fixture = await createScriptedSwayFixture();
+    const previousProfile = process.env.OMARCHY_BOT_SCREEN_PROFILE;
+    process.env.OMARCHY_BOT_SCREEN_PROFILE = "1080p";
+    try {
+      h = await startDaemon(undefined, { botScreenAdapter: fixture.adapter });
+      const owner = await bot(h, await makeBot(h, "Sway restart reattach"));
+      await activateScreen(h, owner);
+      const listed = await h.svc.screens.act(
+        { botId: owner.id, surfaceId: owner.surfaceId },
+        { name: "list_windows", args: {} },
+      );
+      expect(listed.windowList).toEqual([
+        expect.objectContaining({ id: "10" }),
+      ]);
+      const home = h.home;
+
+      await h.disconnectForRestart();
+      h = await startDaemon(home, { botScreenAdapter: fixture.adapter });
+
+      expect(await waitForState(h, owner, "ready")).toMatchObject({
+        botId: owner.id,
+        surfaceId: owner.surfaceId,
+      });
+      expect(fixture.starts.filter((start) => start.surfaceId === owner.surfaceId)).toHaveLength(1);
+      expect(fixture.starts[0]?.generation).toBe(1);
+      expect(existsSync(path.join(fixture.runtimeRoot, owner.surfaceId, "1"))).toBeTrue();
+      expect(existsSync(path.join(fixture.runtimeRoot, owner.surfaceId, "2"))).toBeFalse();
+      expect((await fetch(
+        `${h.baseUrl}/api/computer/snapshot?botId=${encodeURIComponent(owner.id)}&surfaceId=${encodeURIComponent(owner.surfaceId)}`,
+      )).status).toBe(200);
+      const after = await h.svc.screens.act(
+        { botId: owner.id, surfaceId: owner.surfaceId },
+        { name: "list_windows", args: {} },
+      );
+      expect(after.desktopSession).toEqual({
+        botId: owner.id,
+        surfaceId: owner.surfaceId,
+        runtimeGeneration: 1,
+      });
+      expect(after.windowList).toEqual([
+        expect.objectContaining({ id: "10" }),
+      ]);
+    } finally {
+      await h?.stop();
+      h = undefined;
+      if (previousProfile === undefined) delete process.env.OMARCHY_BOT_SCREEN_PROFILE;
+      else process.env.OMARCHY_BOT_SCREEN_PROFILE = previousProfile;
+      fixture.dispose();
+    }
+  }, 15_000);
+
+  test("a Sway Bot Desktop Session is not idle-evicted while no viewer is attached", async () => {
+    const fixture = await createScriptedSwayFixture();
+    const previousProfile = process.env.OMARCHY_BOT_SCREEN_PROFILE;
+    process.env.OMARCHY_BOT_SCREEN_PROFILE = "1080p";
+    try {
+      h = await startDaemon(undefined, { botScreenAdapter: fixture.adapter });
+      const owner = await bot(h, await makeBot(h, "Sway idle does not evict"));
+      await activateScreen(h, owner);
+      await h.svc.projections.closeSurface(owner.surfaceId);
+
+      await Bun.sleep(1_000);
+
+      expect(h.svc.screens.status({ botId: owner.id, surfaceId: owner.surfaceId })).toEqual({ state: "ready" });
+      expect(existsSync(path.join(fixture.runtimeRoot, owner.surfaceId, "1"))).toBeTrue();
+      expect(fixture.stops).toEqual([]);
+      const source = await h.svc.screens.projectionSource({ botId: owner.id, surfaceId: owner.surfaceId });
+      expect(source?.runtimeGeneration).toBe(1);
+    } finally {
+      await h?.stop();
+      h = undefined;
+      if (previousProfile === undefined) delete process.env.OMARCHY_BOT_SCREEN_PROFILE;
+      else process.env.OMARCHY_BOT_SCREEN_PROFILE = previousProfile;
+      fixture.dispose();
+    }
+  }, 15_000);
+});
 
 function workerSessions(h: Harness): Array<{ botId?: string; threadId?: string; nativeSessionId?: string }> {
   const log = path.join(h.home, "fake-agent-observations.ndjson");

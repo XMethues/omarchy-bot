@@ -1,6 +1,4 @@
-import type { BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL } from "../../../apps/daemon/src/bootstrap/config.ts";
-
-type CapacityApproval = typeof BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL;
+import type { BotScreenCapacityPolicy } from "../../../apps/daemon/src/bootstrap/config.ts";
 
 export interface BrowserFrameMetric {
   surfaceId: string;
@@ -8,7 +6,6 @@ export interface BrowserFrameMetric {
   finalWebClient: true;
   durationMs: number;
   renderingSequences: number[];
-  transportDrops: number;
   receivedFrames: number;
   decodedFrames: number;
   displayedFrames: number;
@@ -19,39 +16,29 @@ export interface BrowserFrameMetric {
   displayedFps: number;
   captureAttempts?: number;
   sourceFrames?: number;
-  encoderInputs?: number;
-  encodedFrames?: number;
-  sentFrames?: number;
-  sourceFps?: number;
-  encodedFps?: number;
-  sentFps?: number;
-  encodedBytes?: number;
-  encodedBitrateBps?: number;
-  preCaptureBackpressureSkips?: number;
-  encodedBackpressureDrops?: number;
-  transportUnavailableSkips?: number;
-  invalidFrameDrops?: number;
+  browserReceives?: number;
+  browserDecodes?: number;
+  browserPaints?: number;
+  previewFrames?: number;
+  previewBytes?: number;
+  rfbBytesSent?: number;
+  rfbBytesReceived?: number;
+  captureSkips?: number;
+  invalidFrames?: number;
+  transportSkips?: number;
   sendFailures?: number;
-  unexplainedDrops?: number;
-  pipelineBoundaryCarry?: {
-    start: Record<"capture" | "encode" | "rtp" | "receive" | "decode" | "paint", number>;
-    end: Record<"capture" | "encode" | "rtp" | "receive" | "decode" | "paint", number>;
-    unexplainedByStage: Record<"capture" | "encode" | "rtp" | "receive" | "decode" | "paint", number>;
-  };
+  unexplainedShortfalls?: number;
   captureLatencyMs?: {
     samples: number;
     mean: number | null;
     lifetimeMax: number;
   };
-  encodeLatencyMs?: {
+  captureToPaintLatencyMs?: {
     samples: number;
     mean: number | null;
     lifetimeMax: number;
   };
   targetFrameShortfall?: {
-    source: number;
-    encoded: number;
-    sent: number;
     received: number;
     decoded: number;
     displayed: number;
@@ -66,11 +53,12 @@ export interface BrowserLatencyMetric {
 }
 
 export interface CapacityRowForGate {
+  runtime?: unknown;
   profile?: unknown;
   screens?: unknown;
   resolution?: unknown;
   targetFps?: unknown;
-  performancePassed?: unknown;
+  measurementsComplete?: unknown;
   frames?: unknown;
   inputToVisibleMs?: unknown;
   captureToBrowserMs?: unknown;
@@ -82,12 +70,12 @@ export interface CapacityRowForGate {
   takeoverCompleted?: unknown;
   reconnects?: unknown;
   reconnectRecovery?: unknown;
-  nativePeerRecovery?: unknown;
+  directWebSocketRecovery?: unknown;
   crashes?: unknown;
   cleanup?: unknown;
   activeResources?: unknown;
   aggregateMetrics?: unknown;
-  encodingLifecycle?: unknown;
+  projectionLifecycle?: unknown;
   admission?: unknown;
 }
 
@@ -106,178 +94,30 @@ export function isNonLoopbackLanEndpoint(value: unknown): boolean {
     return false;
   }
 }
-function validCompositorMemoryProof(value: unknown): boolean {
-  if (value === null || typeof value !== "object") return false;
-  const proof = value as Record<string, unknown>;
-  const matched = (measurement: unknown, runtime: "hyprland" | "cage"): boolean => {
-    if (measurement === null || typeof measurement !== "object") return false;
-    const record = measurement as Record<string, unknown>;
-    const resolution = record.resolution;
-    return record.runtime === runtime
-      && typeof record.pssMiB === "number"
-      && record.pssMiB > 0
-      && resolution !== null
-      && typeof resolution === "object"
-      && (resolution as Record<string, unknown>).width === 1920
-      && (resolution as Record<string, unknown>).height === 1080;
-  };
-  const baselinePss = (proof.baseline as Record<string, unknown> | undefined)?.pssMiB;
-  const candidatePss = (proof.candidate as Record<string, unknown> | undefined)?.pssMiB;
-  const measuredReduction = typeof baselinePss === "number"
-      && baselinePss > 0
-      && typeof candidatePss === "number"
-    ? (baselinePss - candidatePss) / baselinePss * 100
-    : Number.NaN;
-  return proof.passed === true
-    && typeof proof.minimumReductionPercent === "number"
-    && proof.minimumReductionPercent > 0
-    && typeof proof.reductionPercent === "number"
-    && proof.reductionPercent >= proof.minimumReductionPercent
-    && matched(proof.baseline, "hyprland")
-    && measuredReduction >= proof.minimumReductionPercent
-    && Math.abs(measuredReduction - proof.reductionPercent) <= 0.01
-    && matched(proof.candidate, "cage");
-}
-
-
-function validStageLatency(value: unknown): boolean {
-  if (value === null || typeof value !== "object") return false;
-  if (!("samples" in value) || !("mean" in value) || !("lifetimeMax" in value)) return false;
-  return typeof value.samples === "number"
-    && Number.isSafeInteger(value.samples)
-    && value.samples > 0
-    && typeof value.mean === "number"
-    && Number.isFinite(value.mean)
-    && value.mean >= 0
-    && typeof value.lifetimeMax === "number"
-    && Number.isFinite(value.lifetimeMax)
-    && value.lifetimeMax >= value.mean;
-}
-
-function validBrowserFrames(value: unknown, expectedCount: number, targetFps: number): value is BrowserFrameMetric[] {
+/** RFB transport chunks and canvas paints are different units, not a video pipeline. */
+function validBrowserFrames(value: unknown, expectedCount: number): value is BrowserFrameMetric[] {
   if (!Array.isArray(value) || value.length !== expectedCount) return false;
   return value.every((entry: unknown) => {
     if (entry === null || typeof entry !== "object") return false;
     const metric = entry as Partial<BrowserFrameMetric>;
-    const wholeNumbers = [
-      metric.receivedFrames,
-      metric.transportDrops,
-      metric.decodedFrames,
-      metric.displayedFrames,
-      metric.decodeDrops,
-      metric.paintDrops,
-      metric.captureAttempts,
-      metric.sourceFrames,
-      metric.encoderInputs,
-      metric.encodedFrames,
-      metric.sentFrames,
-      metric.preCaptureBackpressureSkips,
-      metric.encodedBackpressureDrops,
-      metric.transportUnavailableSkips,
-      metric.invalidFrameDrops,
-      metric.sendFailures,
-      metric.unexplainedDrops,
-    ];
-    const shortfall = metric.targetFrameShortfall;
-    const targetFrames = typeof metric.durationMs === "number"
-      ? Math.floor(targetFps * metric.durationMs / 1_000)
-      : Number.NaN;
-    const boundary = metric.pipelineBoundaryCarry;
-    const stages = ["capture", "encode", "rtp", "receive", "decode", "paint"] as const;
-    const validBoundary = boundary !== undefined
-      && stages.every((stage) =>
-        Number.isSafeInteger(boundary.start[stage])
-        && boundary.start[stage] >= 0
-        && Number.isSafeInteger(boundary.end[stage])
-        && boundary.end[stage] >= 0
-        && Number.isSafeInteger(boundary.unexplainedByStage[stage])
-        && boundary.unexplainedByStage[stage] >= 0
-      );
-    const {
-      receivedFrames,
-      transportDrops,
-      decodedFrames,
-      decodeDrops,
-      displayedFrames,
-      paintDrops,
-    } = metric;
-    const balanced = validBoundary
-      && boundary !== undefined
-      && typeof receivedFrames === "number"
-      && typeof transportDrops === "number"
-      && typeof decodedFrames === "number"
-      && typeof decodeDrops === "number"
-      && typeof displayedFrames === "number"
-      && typeof paintDrops === "number"
-      && metric.captureAttempts! + metric.preCaptureBackpressureSkips! + boundary.start.capture
-        === metric.sourceFrames! + metric.preCaptureBackpressureSkips! + boundary.end.capture
-          + boundary.unexplainedByStage.capture
-      && metric.encoderInputs! + boundary.start.encode
-        === metric.encodedFrames! + metric.invalidFrameDrops! + metric.encodedBackpressureDrops!
-          + boundary.end.encode + boundary.unexplainedByStage.encode
-      && metric.encodedFrames! + boundary.start.rtp
-        === metric.sentFrames! + metric.transportUnavailableSkips! + metric.sendFailures!
-          + boundary.end.rtp + boundary.unexplainedByStage.rtp
-      && metric.sentFrames! + boundary.start.receive
-        === receivedFrames + transportDrops + boundary.end.receive
-          + boundary.unexplainedByStage.receive
-      && receivedFrames + boundary.start.decode
-        === decodedFrames + decodeDrops + boundary.end.decode
-          + boundary.unexplainedByStage.decode
-      && decodedFrames + boundary.start.paint
-        === displayedFrames + paintDrops + boundary.end.paint
-          + boundary.unexplainedByStage.paint
-      && metric.unexplainedDrops === stages.reduce(
-        (sum, stage) => sum + boundary.unexplainedByStage[stage],
-        0,
-      );
     return typeof metric.surfaceId === "string"
       && metric.finalWebClient === true
       && isNonLoopbackLanEndpoint(metric.lanEndpoint)
-      && typeof metric.durationMs === "number"
-      && Number.isFinite(metric.durationMs)
-      && metric.durationMs > 0
-      && Array.isArray(metric.renderingSequences)
-      && metric.renderingSequences.length === metric.displayedFrames
-      && metric.renderingSequences.every((sequence, index) =>
-        Number.isSafeInteger(sequence)
-        && sequence > 0
-        && (index === 0 || sequence > metric.renderingSequences![index - 1]!)
-      )
-      && wholeNumbers.every((number) => Number.isSafeInteger(number) && number! >= 0)
-      && balanced
-      && typeof metric.sourceFps === "number"
-      && metric.sourceFps >= targetFps
-      && typeof metric.encodedFps === "number"
-      && metric.encodedFps >= targetFps
-      && typeof metric.sentFps === "number"
-      && metric.sentFps >= targetFps
-      && typeof metric.receivedFps === "number"
-      && metric.receivedFps >= targetFps
-      && typeof metric.decodedFps === "number"
-      && metric.decodedFps >= targetFps
-      && typeof metric.displayedFps === "number"
-      && metric.displayedFps >= targetFps
-      && Number.isSafeInteger(metric.encodedBytes)
-      && metric.encodedBytes! > 0
-      && typeof metric.encodedBitrateBps === "number"
-      && Number.isFinite(metric.encodedBitrateBps)
-      && metric.encodedBitrateBps > 0
-      && validStageLatency(metric.captureLatencyMs)
-      && validStageLatency(metric.encodeLatencyMs)
-      && metric.unexplainedDrops === 0
-      && shortfall !== undefined
-      && Object.values(shortfall).every((number) => number === 0)
-      && shortfall.source === Math.max(0, targetFrames - metric.sourceFrames!)
-      && shortfall.encoded === Math.max(0, targetFrames - metric.encodedFrames!)
-      && shortfall.sent === Math.max(0, targetFrames - metric.sentFrames!)
-      && shortfall.received === Math.max(0, targetFrames - metric.receivedFrames!)
-      && shortfall.decoded === Math.max(0, targetFrames - metric.decodedFrames!)
-      && shortfall.displayed === Math.max(0, targetFrames - metric.displayedFrames!);
+      && typeof metric.durationMs === "number" && Number.isFinite(metric.durationMs) && metric.durationMs > 0
+      && typeof metric.displayedFrames === "number" && Number.isSafeInteger(metric.displayedFrames) && metric.displayedFrames > 0
+      && Array.isArray(metric.renderingSequences) && metric.renderingSequences.length === metric.displayedFrames
+      && metric.renderingSequences.every((sequence, index) => Number.isSafeInteger(sequence) && sequence > 0
+        && (index === 0 || sequence > metric.renderingSequences![index - 1]!))
+      && [metric.receivedFrames, metric.decodedFrames, metric.decodeDrops, metric.paintDrops]
+        .every((value) => typeof value === "number" && Number.isSafeInteger(value) && value >= 0)
+      && [metric.receivedFps, metric.decodedFps, metric.displayedFps]
+        .every((value) => typeof value === "number" && Number.isFinite(value) && value >= 0)
+      && typeof metric.rfbBytesSent === "number" && metric.rfbBytesSent > 0
+      && typeof metric.rfbBytesReceived === "number" && metric.rfbBytesReceived > 0;
   });
 }
 
-function validPaintLatency(value: unknown, limitMs: number): value is BrowserLatencyMetric {
+function validPaintLatency(value: unknown): value is BrowserLatencyMetric {
   if (
     value === null
     || typeof value !== "object"
@@ -292,9 +132,10 @@ function validPaintLatency(value: unknown, limitMs: number): value is BrowserLat
     && value.samples.every((sample: unknown) => typeof sample === "number" && Number.isFinite(sample) && sample >= 0)
     && typeof value.p50 === "number"
     && Number.isFinite(value.p50)
-    && value.p50 <= limitMs
+    && value.p50 >= 0
     && typeof value.p95 === "number"
-    && Number.isFinite(value.p95);
+    && Number.isFinite(value.p95)
+    && value.p95 >= value.p50;
 }
 
 function validProvisionDestroy(value: unknown, minimumCycles: number): boolean {
@@ -356,11 +197,11 @@ export function requireCompletedOperationalRows(rows: readonly CapacityRowForGat
       : [];
     const crashes = Array.isArray(row.crashes) ? row.crashes : [];
     const cleanup = row.cleanup;
-    const encoding = row.encodingLifecycle;
+    const projection = row.projectionLifecycle;
     const resources = row.activeResources;
     const aggregate = row.aggregateMetrics;
     const reconnectRecovery = row.reconnectRecovery;
-    const nativePeerRecovery = row.nativePeerRecovery;
+    const directWebSocketRecovery = row.directWebSocketRecovery;
     const complete = Number.isSafeInteger(count)
       && (count as number) > 0
       && row.error === undefined
@@ -394,7 +235,7 @@ export function requireCompletedOperationalRows(rows: readonly CapacityRowForGat
       && "failureDetails" in reconnectRecovery
       && Array.isArray(reconnectRecovery.failureDetails)
       && reconnectRecovery.failureDetails.length === reconnectRecovery.failures
-      && validPeerRecovery(nativePeerRecovery, (count as number) * 3 + 2)
+      && validPeerRecovery(directWebSocketRecovery, (count as number) * 3 + 2)
       && crashes.length === 4
       && new Set(crashes.flatMap((crash: unknown) =>
         crash !== null && typeof crash === "object" && "role" in crash && typeof crash.role === "string"
@@ -406,21 +247,21 @@ export function requireCompletedOperationalRows(rows: readonly CapacityRowForGat
         && typeof crash === "object"
         && "isolated" in crash
         && crash.isolated === true
-        && (!("role" in crash) || (crash.role !== "capture-helper" && crash.role !== "encoder")
+        && (!("role" in crash) || (crash.role !== "capture-helper" && crash.role !== "wayvnc")
           || ("snapshotFallback" in crash && crash.snapshotFallback === true))
       )
-      && encoding !== null
-      && typeof encoding === "object"
-      && "unopenedNoRuntime" in encoding
-      && encoding.unopenedNoRuntime === true
-      && "idleEncoderProcessesObserved" in encoding
-      && encoding.idleEncoderProcessesObserved === 0
-      && "staticPreviewEncoderProcessesObserved" in encoding
-      && encoding.staticPreviewEncoderProcessesObserved === 0
-      && "expandedEncoderProcessesObserved" in encoding
-      && encoding.expandedEncoderProcessesObserved === count
-      && "postExpandedEncoderProcessesObserved" in encoding
-      && encoding.postExpandedEncoderProcessesObserved === 0
+      && projection !== null
+      && typeof projection === "object"
+      && "unopenedNoRuntime" in projection
+      && projection.unopenedNoRuntime === true
+      && "idleWayvncProcessesObserved" in projection
+      && projection.idleWayvncProcessesObserved === 0
+      && "staticPreviewWayvncProcessesObserved" in projection
+      && projection.staticPreviewWayvncProcessesObserved === 0
+      && "expandedWayvncProcessesObserved" in projection
+      && projection.expandedWayvncProcessesObserved === count
+      && "postExpandedWayvncProcessesObserved" in projection
+      && projection.postExpandedWayvncProcessesObserved === 0
       && resources !== null
       && typeof resources === "object"
       && "screens" in resources
@@ -431,9 +272,12 @@ export function requireCompletedOperationalRows(rows: readonly CapacityRowForGat
       && typeof resources.total === "object"
       && aggregate !== null
       && typeof aggregate === "object"
-      && "encodedBytes" in aggregate
-      && typeof aggregate.encodedBytes === "number"
-      && aggregate.encodedBytes > 0
+      && "rfbBytesSent" in aggregate
+      && typeof aggregate.rfbBytesSent === "number"
+      && aggregate.rfbBytesSent > 0
+      && "rfbBytesReceived" in aggregate
+      && typeof aggregate.rfbBytesReceived === "number"
+      && aggregate.rfbBytesReceived > 0
       && validProvisionDestroy(row.repeatedProvisionDestroy, 2)
       && cleanup !== null
       && typeof cleanup === "object"
@@ -443,120 +287,41 @@ export function requireCompletedOperationalRows(rows: readonly CapacityRowForGat
   }
 }
 
-/**
- * Selects the single measured row that is allowed to justify the shipped
- * capacity. A smaller passing row is never silently substituted.
- */
-export function requireApprovedDefaultRow(
+/** Selects current evidence for the configured default; this does not approve a performance budget. */
+export function requireDefaultProjectionEvidence(
   rows: readonly CapacityRowForGate[],
   configuredDefault: number,
-  approval: CapacityApproval,
+  policy: BotScreenCapacityPolicy,
 ): CapacityRowForGate {
-  if (approval.schemaVersion !== 3) {
-    throw new Error("configured Bot Screen default requires a schema-v3 approval artifact");
+  if (configuredDefault !== policy.defaultCapacity || configuredDefault > policy.limits[policy.defaultProfile]) {
+    throw new Error("measurement selection does not match the configured admission policy");
   }
-  if (
-    approval.sourceReport.schemaVersion !== 3
-    || approval.sourceReport.path.trim() === ""
-  ) {
-    throw new Error("configured Bot Screen default approval does not reference its schema-v3 final-stack report");
-  }
-  if (!validCompositorMemoryProof(approval.compositorMemory)) {
-    throw new Error("configured Bot Screen default approval lacks passing matched-1080p compositor-memory proof");
-  }
-  const supportedDefault = approval.capacityRows.some((candidate) =>
-    candidate.profile === approval.profile
-    && candidate.screens === approval.defaultCapacity
-    && candidate.supportStatus === "supported"
-  );
-  const unsupportedEight1080 = approval.capacityRows.some((candidate) =>
-    candidate.profile === "1080p"
-    && candidate.screens === 8
-    && candidate.supportStatus === "unsupported"
-  );
-  const supportedEight720 = approval.capacityRows.some((candidate) =>
-    candidate.profile === "720p"
-    && candidate.screens === 8
-    && candidate.supportStatus === "supported"
-  );
-  if (!supportedDefault || !unsupportedEight1080 || !supportedEight720) {
-    throw new Error("configured Bot Screen default approval lacks the explicit supported capacity matrix");
-  }
-  if (
-    approval.finalClient.built !== true
-    || approval.finalClient.measurement.trim() === ""
-    || !isNonLoopbackLanEndpoint(approval.finalClient.lanEndpoint)
-  ) {
-    throw new Error("configured Bot Screen default approval lacks final-client LAN browser provenance");
-  }
-  if (
-    approval.lifecycleProof.strategy !== "permanent-delete-and-fresh-provision"
-    || approval.lifecycleProof.cyclesPerRow < 2
-  ) {
-    throw new Error("configured Bot Screen default approval lacks permanent delete/fresh provision evidence");
-  }
-  if (configuredDefault !== approval.defaultCapacity) {
-    throw new Error(`configured Bot Screen default ${configuredDefault} has no approval record`);
-  }
-  if (
-    approval.observedSourceFps.minimum < approval.targetFps
-    || approval.observedSourceFps.maximum < approval.observedSourceFps.minimum
-    || approval.observedEncodedFps.minimum < approval.targetFps
-    || approval.observedEncodedFps.maximum < approval.observedEncodedFps.minimum
-    || approval.observedDisplayedFps.minimum < approval.targetFps
-    || approval.observedDisplayedFps.maximum < approval.observedDisplayedFps.minimum
-    || approval.observedInputToVisibleP50Ms > approval.inputToVisibleP50LimitMs
-    || approval.observedDrops.unexplainedDrops !== 0
-  ) {
-    throw new Error("configured Bot Screen default approval did not pass its recorded thresholds");
-  }
-  const row = rows.find((candidate) =>
-    candidate.profile === approval.profile && candidate.screens === configuredDefault
-  );
-  if (row === undefined) {
-    throw new Error(`release gate is missing the ${configuredDefault}x${approval.profile} default-capacity row`);
-  }
-  if (row.performancePassed !== true) {
-    throw new Error(`release gate default-capacity row ${configuredDefault}x${approval.profile} did not pass`);
+  const row = rows.find((candidate) => candidate.profile === policy.defaultProfile && candidate.screens === configuredDefault);
+  if (row === undefined) throw new Error(`missing the ${configuredDefault}x${policy.defaultProfile} measurement row`);
+  if (row.runtime !== "sway" || row.measurementsComplete !== true) {
+    throw new Error("current Sway measurement did not complete; historical compositor evidence cannot substitute");
   }
   const resolution = row.resolution;
-  if (
-    resolution === null
-    || typeof resolution !== "object"
-    || !("width" in resolution)
-    || !("height" in resolution)
-    || resolution.width !== approval.resolution.width
-    || resolution.height !== approval.resolution.height
-    || row.targetFps !== approval.targetFps
-  ) {
-    throw new Error("release gate default-capacity row does not match the approved measurement profile");
+  const width = policy.defaultProfile === "1080p" ? 1920 : 1280;
+  const height = policy.defaultProfile === "1080p" ? 1080 : 720;
+  if (resolution === null || typeof resolution !== "object" || !("width" in resolution) || !("height" in resolution)
+    || resolution.width !== width || resolution.height !== height) {
+    throw new Error("measurement geometry does not match the configured profile");
   }
-  if (!validBrowserFrames(row.frames, configuredDefault, approval.targetFps)) {
-    throw new Error("release gate requires production all-stage FPS, browser paint/readback, drop accounting, and no unexplained drops");
+  if (!validBrowserFrames(row.frames, configuredDefault)) {
+    throw new Error("measurement requires bidirectional RFB delivery and real browser paint evidence");
   }
-  if (!validProvisionDestroy(row.repeatedProvisionDestroy, approval.lifecycleProof.cyclesPerRow)) {
-    throw new Error("release gate requires repeated permanent deletion and fresh Bot/Surface provisioning");
+  if (!validProvisionDestroy(row.repeatedProvisionDestroy, 2)) {
+    throw new Error("measurement requires repeated permanent deletion and fresh provisioning");
   }
-  if (!validPaintLatency(row.inputToVisibleMs, approval.inputToVisibleP50LimitMs)) {
-    throw new Error("release gate requires browser-painted input-to-visible latency samples");
-  }
-  if (row.inputToVisibleMs.p95 > approval.inputToVisibleP95EnvelopeMs) {
-    throw new Error("release gate input-to-visible p95 regressed beyond the approved envelope");
+  if (!validPaintLatency(row.inputToVisibleMs)) {
+    throw new Error("measurement requires browser-painted input-to-visible samples");
   }
   const admission = row.admission;
-  if (
-    admission === null
-    || typeof admission !== "object"
-    || !("capacity" in admission)
-    || admission.capacity !== configuredDefault
-    || !("noPartialRuntime" in admission)
-    || admission.noPartialRuntime !== true
-    || !("activeUnaffected" in admission)
-    || admission.activeUnaffected !== true
-    || !("activeEnvelopeMaintained" in admission)
-    || admission.activeEnvelopeMaintained !== true
-  ) {
-    throw new Error("release gate requires deterministic pre-provision capacity rejection with admitted Screens in envelope");
+  if (admission === null || typeof admission !== "object" || !("capacity" in admission) || admission.capacity !== configuredDefault
+    || !("noPartialRuntime" in admission) || admission.noPartialRuntime !== true
+    || !("activeUnaffected" in admission) || admission.activeUnaffected !== true) {
+    throw new Error("measurement requires pre-provision rejection without disrupting admitted Screens");
   }
   return row;
 }

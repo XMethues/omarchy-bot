@@ -2,10 +2,18 @@ import { mkdirSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { sharedWorkspaceDir } from "../modules/workspace/sharedWorkspace.ts";
-import capacityApproval from "./bot-screen-capacity-approval.json";
+export interface BotScreenCapacityPolicy {
+  readonly defaultCapacity: number;
+  readonly defaultProfile: "1080p" | "720p";
+  readonly limits: Readonly<Record<"1080p" | "720p", number>>;
+}
 
-/** Checked-in schema-v3 final-stack measurement that authorizes production capacity. */
-export const BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL = Object.freeze(capacityApproval);
+/** Conservative admission limits, not a measured Sway performance approval. */
+export const BOT_SCREEN_CAPACITY_POLICY: BotScreenCapacityPolicy = Object.freeze({
+  defaultCapacity: 4,
+  defaultProfile: "1080p",
+  limits: Object.freeze({ "1080p": 4, "720p": 8 }),
+});
 
 export interface Config {
   dataDir: string;
@@ -21,14 +29,12 @@ export interface Config {
   /** Transient child sockets and retained Bot-owned application profiles. */
   botScreenRuntimeDir: string;
   botScreenProfileDir: string;
-  /** Lazily provisioned portable compositor files owned by this application. */
-  botScreenRuntimeSupplyDir: string;
+  /** Lazy Sway/WayVNC pack root used by production Bot Desktop Sessions. */
+  botScreenSwayRuntimeSupplyDir: string;
   conformanceDir: string;
   statusPath: string;
   /** Voxtype binary override (defaults to `voxtype` on PATH). */
   voxtypeBin?: string;
-  /** ffmpeg override shared by Cage preflight and H.264 Screen Projection. */
-  botScreenFfmpegBin?: string;
   /** HTTP listener address. Non-loopback values expose unauthenticated control APIs. */
   host: string;
   port: number;
@@ -38,10 +44,7 @@ export interface Config {
   botScreenCapacity: number;
   botScreenProfile: "1080p" | "720p";
   botScreenLogicalWidth: number;
-  /** Single UDP port used by multiplexed WebRTC Screen Projection peers. */
-  botScreenWebRtcPort: number;
   botScreenLogicalHeight: number;
-  botScreenFrameRate: number;
 }
 
 function positiveInteger(name: string, fallback: number): number {
@@ -59,7 +62,7 @@ function botScreenProfile(): {
   logicalWidth: number;
   logicalHeight: number;
 } {
-  const name = process.env.OMARCHY_BOT_SCREEN_PROFILE ?? "1080p";
+  const name = process.env.OMARCHY_BOT_SCREEN_PROFILE ?? BOT_SCREEN_CAPACITY_POLICY.defaultProfile;
   if (name === "1080p") return { name, logicalWidth: 1920, logicalHeight: 1080 };
   if (name === "720p") return { name, logicalWidth: 1280, logicalHeight: 720 };
   throw new Error("OMARCHY_BOT_SCREEN_PROFILE must be 1080p or 720p");
@@ -68,53 +71,22 @@ function botScreenProfile(): {
 function botScreenCapacity(profile: "1080p" | "720p"): number {
   const capacity = positiveInteger(
     "OMARCHY_BOT_SCREEN_CAPACITY",
-    BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.defaultCapacity,
+    BOT_SCREEN_CAPACITY_POLICY.defaultCapacity,
   );
-  const supported = BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.capacityRows
-    .filter((row) => row.profile === profile && row.supportStatus === "supported")
-    .reduce((maximum, row) => Math.max(maximum, row.screens), 0);
+  const supported = BOT_SCREEN_CAPACITY_POLICY.limits[profile];
   if (capacity > supported) {
     throw new Error(
-      `OMARCHY_BOT_SCREEN_CAPACITY=${capacity} exceeds the approved ${profile} capacity of ${supported}`,
+      `OMARCHY_BOT_SCREEN_CAPACITY=${capacity} exceeds the configured ${profile} capacity of ${supported}`,
     );
   }
   return capacity;
 }
-function validateApprovedCompositorMemory(): void {
-  const proof = BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.compositorMemory;
-  const matched1080p = (
-    measurement: { runtime: string; resolution: { width: number; height: number }; pssMiB: number },
-    runtime: "hyprland" | "cage",
-  ): boolean =>
-    measurement.runtime === runtime
-    && measurement.resolution.width === 1920
-    && measurement.resolution.height === 1080
-    && measurement.pssMiB > 0;
-  const measuredReduction =
-    (proof.baseline.pssMiB - proof.candidate.pssMiB) / proof.baseline.pssMiB * 100;
-  if (
-    proof.passed !== true
-    || !matched1080p(proof.baseline, "hyprland")
-    || !matched1080p(proof.candidate, "cage")
-    || proof.minimumReductionPercent <= 0
-    || proof.reductionPercent < proof.minimumReductionPercent
-    || proof.candidate.pssMiB >= proof.baseline.pssMiB
-    || measuredReduction < proof.minimumReductionPercent
-    || Math.abs(measuredReduction - proof.reductionPercent) > 0.01
-  ) {
-    throw new Error("checked Bot Screen approval lacks a passing matched-1080p compositor-memory proof");
-  }
-}
-
-
 
 export function loadConfig(): Config {
-  validateApprovedCompositorMemory();
   const dataDir = process.env.OMARCHY_BOT_HOME ?? path.join(os.homedir(), ".local/share/omarchy-bot");
   const stateDir = process.env.OMARCHY_BOT_STATE ?? path.join(os.homedir(), ".local/state/omarchy-bot");
   const runtimeDir = process.env.XDG_RUNTIME_DIR;
   const voxtypeBin = process.env.OMARCHY_BOT_VOXTYPE_BIN;
-  const botScreenFfmpegBin = process.env.OMARCHY_BOT_FFMPEG_BIN;
   const screenProfile = botScreenProfile();
   const cfg: Config = {
     dataDir,
@@ -129,21 +101,18 @@ export function loadConfig(): Config {
       ? path.join(runtimeDir, "omarchy-bot", "screens")
       : path.join(stateDir, "screen-runtime"),
     botScreenProfileDir: path.join(dataDir, "screens"),
-    botScreenRuntimeSupplyDir: path.join(dataDir, "runtime", "cage"),
+    botScreenSwayRuntimeSupplyDir: path.join(dataDir, "runtime", "sway"),
     conformanceDir: path.join(dataDir, "conformance"),
     statusPath: path.join(stateDir, "status.json"),
     ...(voxtypeBin !== undefined ? { voxtypeBin } : {}),
-    ...(botScreenFfmpegBin === undefined ? {} : { botScreenFfmpegBin }),
     host: process.env.OMARCHY_BOT_HOST ?? "127.0.0.1",
     port: Number(process.env.OMARCHY_BOT_PORT ?? 7321),
     turnTimeoutMs: Number(process.env.OMARCHY_BOT_TURN_TIMEOUT_MS ?? 600_000),
     botDeletionTerminalTimeoutMs: Number(process.env.OMARCHY_BOT_DELETION_TERMINAL_TIMEOUT_MS ?? 30_000),
     botScreenCapacity: botScreenCapacity(screenProfile.name),
-    botScreenWebRtcPort: Number(process.env.OMARCHY_BOT_SCREEN_WEBRTC_PORT ?? 7323),
     botScreenProfile: screenProfile.name,
     botScreenLogicalWidth: screenProfile.logicalWidth,
     botScreenLogicalHeight: screenProfile.logicalHeight,
-    botScreenFrameRate: positiveInteger("OMARCHY_BOT_SCREEN_FRAME_RATE", BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.captureFrameRate),
   };
   mkdirSync(dataDir, { recursive: true });
   mkdirSync(stateDir, { recursive: true });

@@ -8,8 +8,7 @@ export type ApplicationUnitRole =
   | "worker"
   | "capture"
   | `capture-${string}`
-  | "encoder"
-  | `encoder-${string}`;
+  | "wayvnc";
 
 
 function socketExists(candidate: string): boolean {

@@ -9,7 +9,11 @@ import type { ThreadsService } from "../modules/threads/threads.ts";
 import type { TurnService } from "../modules/turns/turns.ts";
 import type { ComputerBroker } from "../modules/computer/broker.ts";
 import type { BotScreenManager } from "../modules/computer/botScreenManager.ts";
-import type { ScreenProjectionService } from "../modules/computer/screenProjection.ts";
+import type {
+  ProjectionSocketKind,
+  ProjectionSocketReservation,
+  ScreenProjectionService,
+} from "../modules/computer/screenProjection.ts";
 import type { AvatarService } from "../modules/avatars/avatarService.ts";
 import type { DictationService } from "../modules/dictation/dictationService.ts";
 import type { AttachmentsService } from "../modules/attachments/attachments.ts";
@@ -50,10 +54,19 @@ export interface DaemonServices {
 const JSON_HEADERS = { "content-type": "application/json" };
 const json = (data: unknown, status = 200): Response => new Response(JSON.stringify(data), { status, headers: JSON_HEADERS });
 
-interface WsData {
+interface EventsWsData {
+  kind: "events";
   svc: DaemonServices;
   sub?: () => void;
 }
+
+interface ProjectionWsData {
+  kind: "projection";
+  svc: DaemonServices;
+  reservation: ProjectionSocketReservation;
+}
+
+type WsData = EventsWsData | ProjectionWsData;
 
 /** Parse a JSON body with zod; 400 with the first issue on failure. */
 async function parseBody<T>(req: Request, schema: z.ZodType<T>): Promise<T> {
@@ -81,8 +94,37 @@ export function startHttp(svc: DaemonServices): { stop: () => Promise<void>; por
     const pathname = url.pathname;
 
     if (pathname === "/api/events") {
-      const upgraded = server.upgrade(req, { data: { svc } as WsData });
+      const upgraded = server.upgrade(req, { data: { kind: "events", svc } satisfies EventsWsData });
       if (upgraded) return undefined as unknown as Response;
+      return json({ error: "expected websocket upgrade" }, 426);
+    }
+
+    const projectionSocket = pathname.match(/^\/api\/computer\/projection\/(control|rfb)$/);
+    if (projectionSocket !== null) {
+      const botId = url.searchParams.get("botId");
+      const surfaceId = url.searchParams.get("surfaceId");
+      const sessionId = url.searchParams.get("sessionId");
+      if (botId === null || surfaceId === null || sessionId === null) {
+        return json({ error: "botId, surfaceId, and sessionId are required" }, 400);
+      }
+      const owner = svc.computer.resolveOwner(botId, surfaceId);
+      if (owner === undefined) return json({ error: "Computer Surface was not found for this Bot" }, 404);
+      if (svc.projections.status(owner, sessionId) === undefined) {
+        return json({ error: "Screen Projection was not found" }, 404);
+      }
+      const reservation = svc.projections.reserveSocket(
+        owner,
+        sessionId,
+        projectionSocket[1] as ProjectionSocketKind,
+      );
+      if (reservation === undefined) {
+        return json({ error: "Screen Projection socket is not available in its current state" }, 409);
+      }
+      const upgraded = server.upgrade(req, {
+        data: { kind: "projection", svc, reservation } satisfies ProjectionWsData,
+      });
+      if (upgraded) return undefined as unknown as Response;
+      svc.projections.cancelSocketReservation(reservation);
       return json({ error: "expected websocket upgrade" }, 426);
     }
 
@@ -203,9 +245,21 @@ export function startHttp(svc: DaemonServices): { stop: () => Promise<void>; por
     hostname: svc.cfg.host,
     fetch: handle,
     websocket: {
-      open(_ws) {},
+      open(ws) {
+        const data = ws.data;
+        if (data.kind === "projection" && !data.svc.projections.openSocket(data.reservation, ws)) {
+          ws.close(1008, "Screen Projection socket is no longer valid");
+        }
+      },
       message(ws, raw) {
-        const data = (ws.data as WsData)!;
+        const data = ws.data;
+        if (data.kind === "projection") {
+          const message = typeof raw === "string"
+            ? raw
+            : new Uint8Array(raw.buffer, raw.byteOffset, raw.byteLength).slice();
+          data.svc.projections.socketMessage(data.reservation, message);
+          return;
+        }
         let msg: { type: string; lastCursor?: number };
         try {
           msg = JSON.parse(String(raw));
@@ -225,7 +279,9 @@ export function startHttp(svc: DaemonServices): { stop: () => Promise<void>; por
         }
       },
       close(ws) {
-        (ws.data as WsData | undefined)?.sub?.();
+        const data = ws.data;
+        if (data.kind === "events") data.sub?.();
+        else data.svc.projections.socketClosed(data.reservation);
       },
     },
   });

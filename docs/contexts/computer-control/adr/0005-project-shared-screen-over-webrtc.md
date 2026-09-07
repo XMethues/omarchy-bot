@@ -1,6 +1,6 @@
 # Project the Shared Screen over WebRTC instead of creating Bot Screens
 
-_Superseded. The Shared Screen projection model was replaced by per-Bot Screens in [ADR 0007](./0007-provision-nested-hyprland-per-bot.md) (historical nested-Hyprland). Current compositor, transport, and lifetime: [ADR 0008](./0008-run-cage-bot-desktops.md) and [system ADR 0009](../../../adr/0009-share-work-files-isolate-bot-screens.md)._
+_Superseded. The Shared Screen projection model was replaced by per-Bot Screens in [ADR 0007](./0007-provision-nested-hyprland-per-bot.md) (historical nested-Hyprland). Current compositor, transport, and lifetime: [ADR 0009](./0009-adopt-sway-bot-desktops.md) and [system ADR 0009](../../../adr/0009-share-work-files-isolate-bot-screens.md). [ADR 0008](./0008-run-cage-bot-desktops.md) is historical Cage evidence._
 
 The Computer Surface will mirror one user-selected physical display from the current Shared Screen; it will not create an independent desktop. The compact Computer Preview remains read-only and low-frequency, while expanding it starts Web Control through an XDG ScreenCast/PipeWire capture path and WebRTC media, targeting at least 15 FPS and 200 ms median input-to-visible-feedback latency on a 1080p LAN reference setup.
 

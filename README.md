@@ -17,7 +17,7 @@ The current Web frontend will be reused for a future Tauri desktop client. [ADR 
 
 ## Status
 
-The user-created-Bot application is implemented, but the [2026-09-05 model correction](docs/workspace-redesign.md#implementation-gaps-in-the-2026-09-05-revision) is not yet fully implemented: the Shared Workspace default and Changes removal remain pending, and reported Screen startup and host-session failures remain unresolved by this documentation update.
+The application now uses private Sway Bot Desktop Sessions, view-only RFB over WebSockets, and the existing Computer Broker input path. Automated and real two-Bot conformance are recorded in [.scratch/sway-bot-desktop-runtime/completion-report.md](.scratch/sway-bot-desktop-runtime/completion-report.md). Hands-on Host Session acceptance remains pending; automated process/socket checks do not prove the user’s bar, shortcuts, or physical input experience. The [product model](docs/workspace-redesign.md) remains the authority for broader workspace work.
 
 The current vertical slice uses Pi and includes a Bun daemon, React web client, SQLite persistence, worker protocol, and computer worker. Other Agents become selectable only after their adapter and versioned conformance inventory pass.
 
@@ -46,7 +46,11 @@ Install and enable Omarchy Bot through Omarchy's official plugin manager:
 omarchy plugin add https://github.com/XMethues/omarchy-bot.git --enable
 ```
 
-The repository root is the plugin contract. Omarchy Shell loads `plugin/Service.qml`, which owns the daemon lifecycle. On first activation of each Git revision, the launcher copies the tracked source into a private versioned directory under `XDG_DATA_HOME`, installs the pinned Bun workspace dependencies there, and builds the web client and native Wayland helpers. The plugin checkout remains clean and fast-forwardable for `omarchy plugin update`; no Omarchy package files or host packages are modified.
+The repository root is the plugin contract. Omarchy Shell loads `plugin/Service.qml`. The launcher resolves Bun from PATH, then mise, then a checksum-verified official Bun 1.4.2 download under `OMARCHY_BOT_HOME`. For the current Git SHA it downloads the HTTPS release asset `omarchy-bot-runtime-<sha>-x86_64.tar.zst` and its SHA-256 sidecar, verifies and atomically prepares `$XDG_DATA_HOME/omarchy-bot/app/<sha>/` (or `$OMARCHY_BOT_HOME/app/<sha>/`). The runtime contains the built web client, native helpers, application source, and production dependencies; a published runtime does not run an install or compiler on first enable.
+
+CI publishes assets under `https://github.com/XMethues/omarchy-bot/releases/download/runtime-<sha>/`. Source-build fallback is reserved for a confirmed missing artifact, such as a local/unpublished SHA. Network, server, and integrity failures stop startup rather than silently compiling. The checkout stays clean and fast-forwardable; no host packages or Omarchy files are changed.
+
+Startup output goes to `$XDG_STATE_HOME/omarchy-bot/plugin-launch.log` (default `~/.local/state/omarchy-bot/plugin-launch.log`), and the service invokes `notify-send` on failure. A private supervisor lifeline requests graceful daemon cleanup even when Quickshell destroys the plugin process; the startup lock remains held until cleanup finishes.
 
 Omarchy Bot supports Omarchy on x86_64 only. Other Linux distributions, standalone service installation, and generic Linux release archives are outside the supported product contract.
 
@@ -55,13 +59,13 @@ Omarchy Bot supports Omarchy on x86_64 only. Other Linux distributions, standalo
 Requirements:
 
 - Bun 1.4+
-- `grim`, FFmpeg with `libx264`, and `tar` with zstd archive support for Bot Screens
+- `grim` and `tar` with zstd archive support for Bot Screens
 - Wayland development headers, `wayland-scanner`, a C compiler, and `pkg-config` for the capture/input helpers
 - `computer-use-linux` for real desktop control
 - a configured Pi installation for real Pi conformance
 - Voxtype for Composer dictation
 
-Cage remains the internal compositor because each Bot needs an independent, pure-headless Wayland Screen; it is not a portability layer for other Linux distributions. On the first Bot Screen, the plugin uses an installed `cage`/`wlr-randr` pair when available, otherwise it downloads the pinned Arch packages appropriate to Omarchy, verifies every SHA-256 digest, and publishes them under `OMARCHY_BOT_HOME`. Explicit development overrides remain authoritative.
+Sway is the internal compositor because each Bot needs an independent, pure-headless Wayland Screen; it is not a portability layer for other Linux distributions. On the first Bot Screen, the plugin uses an installed `sway`/`wlr-randr`/`wayvnc` set when available, otherwise it downloads the pinned Arch packages appropriate to Omarchy, verifies every SHA-256 digest, and publishes them under `OMARCHY_BOT_HOME`. Explicit development overrides remain authoritative.
 
 ```bash
 bun install
@@ -96,9 +100,9 @@ For access from another machine on a trusted LAN, opt in to non-loopback listene
 OMARCHY_BOT_HOST=0.0.0.0 bun run dev
 ```
 
-Each Bot Screen is a pure-headless Cage compositor with a private Wayland socket and a persistent Bot Desktop; it does not depend on the user's compositor or `WAYLAND_DISPLAY`. Computer Preview receives a low-frequency lossless PNG projection. Opening Web Control switches that connection to an H.264 WebRTC video track, while `/api/computer/snapshot` remains a read-only PNG fallback.
+Each Bot Screen is a pure-headless Sway compositor with private endpoints and a retained Bot Desktop Session; it does not attach to the Host Session. Projection protocol v3 uses one WebSocket for PNG preview and Broker-authorized control/input, and a separate bidirectional RFB WebSocket consumed by bundled noVNC 1.7 in view-only mode. WayVNC remote input is disabled. `/api/computer/snapshot` remains a read-only fallback; closing a viewer does not stop Sway or its applications.
 
-The checked schema-v3 capacity approval ships with a default limit of four 1080p Screens. Eight concurrent Screens are supported only with the measured 720p fallback:
+Conservative admission policy defaults to at most four 1080p Screens and permits up to eight with the 720p profile. These limits are not a measured Sway performance approval; historical Cage measurements are archived and no longer authorize production startup:
 
 ```bash
 OMARCHY_BOT_SCREEN_PROFILE=720p OMARCHY_BOT_SCREEN_CAPACITY=8 bun run dev
@@ -106,15 +110,7 @@ OMARCHY_BOT_SCREEN_PROFILE=720p OMARCHY_BOT_SCREEN_CAPACITY=8 bun run dev
 
 An eight-Screen 1080p configuration is rejected before any excess Screen is provisioned.
 
-Screen Projection uses multiplexed WebRTC on `7323/UDP` by default. If a host firewall is active, allow that port only from the trusted LAN:
-
-```bash
-sudo ufw allow from <lan-cidr> to any port 7323 proto udp
-```
-
-Set `OMARCHY_BOT_SCREEN_WEBRTC_PORT` to use a different UDP port.
-
-Then open `http://<host-lan-ip>:7322`. This exposes the unauthenticated control API, Bot Screen observation, and desktop input on the network. WebRTC media encryption and private Wayland sockets do not authenticate the remote peer; do not use non-loopback mode on an untrusted network.
+Projection uses the same HTTP(S) listener and WebSockets; there is no separate WebRTC/UDP listener. When opting into LAN access, open `http://<host-lan-ip>:7322` for development, or the configured production daemon address. Non-loopback access exposes an unauthenticated control API, Screen observation, and desktop input. Private Wayland sockets are not remote authentication; do not expose this listener on an untrusted network.
 
 Useful checks:
 

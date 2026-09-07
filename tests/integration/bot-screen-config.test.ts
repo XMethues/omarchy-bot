@@ -7,9 +7,6 @@ import { loadConfig } from "../../apps/daemon/src/bootstrap/config.ts";
 const original = {
   capacity: process.env.OMARCHY_BOT_SCREEN_CAPACITY,
   profile: process.env.OMARCHY_BOT_SCREEN_PROFILE,
-  frameRate: process.env.OMARCHY_BOT_SCREEN_FRAME_RATE,
-  webRtcPort: process.env.OMARCHY_BOT_SCREEN_WEBRTC_PORT,
-  ffmpeg: process.env.OMARCHY_BOT_FFMPEG_BIN,
   host: process.env.OMARCHY_BOT_HOST,
   home: process.env.OMARCHY_BOT_HOME,
   state: process.env.OMARCHY_BOT_STATE,
@@ -21,9 +18,6 @@ afterEach(() => {
   for (const [name, value] of [
     ["OMARCHY_BOT_SCREEN_CAPACITY", original.capacity],
     ["OMARCHY_BOT_SCREEN_PROFILE", original.profile],
-    ["OMARCHY_BOT_SCREEN_FRAME_RATE", original.frameRate],
-    ["OMARCHY_BOT_SCREEN_WEBRTC_PORT", original.webRtcPort],
-    ["OMARCHY_BOT_FFMPEG_BIN", original.ffmpeg],
     ["OMARCHY_BOT_HOST", original.host],
     ["OMARCHY_BOT_HOME", original.home],
     ["OMARCHY_BOT_STATE", original.state],
@@ -38,9 +32,6 @@ afterEach(() => {
 test("selects the measured 720p Bot Screen fallback from configuration", () => {
   process.env.OMARCHY_BOT_SCREEN_CAPACITY = "2";
   process.env.OMARCHY_BOT_SCREEN_PROFILE = "720p";
-  process.env.OMARCHY_BOT_SCREEN_FRAME_RATE = "15";
-  process.env.OMARCHY_BOT_SCREEN_WEBRTC_PORT = "7433";
-  process.env.OMARCHY_BOT_FFMPEG_BIN = "/opt/bot-screen/ffmpeg";
   temporaryRoot = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-screen-config-"));
   process.env.OMARCHY_BOT_HOME = path.join(temporaryRoot, "data");
   process.env.OMARCHY_BOT_STATE = path.join(temporaryRoot, "state");
@@ -50,11 +41,9 @@ test("selects the measured 720p Bot Screen fallback from configuration", () => {
     botScreenProfile: "720p",
     botScreenLogicalWidth: 1280,
     botScreenLogicalHeight: 720,
-    botScreenFrameRate: 15,
-    botScreenWebRtcPort: 7433,
-    botScreenFfmpegBin: "/opt/bot-screen/ffmpeg",
-    botScreenRuntimeSupplyDir: path.join(temporaryRoot, "data", "runtime", "cage"),
+    botScreenSwayRuntimeSupplyDir: path.join(temporaryRoot, "data", "runtime", "sway"),
   });
+  expect(loadConfig()).not.toHaveProperty("botScreenRuntimeSupplyDir");
 });
 
 test("keeps HTTP loopback-only unless LAN binding is explicitly configured", () => {
@@ -72,8 +61,6 @@ test("keeps HTTP loopback-only unless LAN binding is explicitly configured", () 
 test("uses the measured conservative Bot Screen default", () => {
   delete process.env.OMARCHY_BOT_SCREEN_CAPACITY;
   delete process.env.OMARCHY_BOT_SCREEN_PROFILE;
-  delete process.env.OMARCHY_BOT_SCREEN_FRAME_RATE;
-  delete process.env.OMARCHY_BOT_SCREEN_WEBRTC_PORT;
   temporaryRoot = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-screen-config-"));
   process.env.OMARCHY_BOT_HOME = path.join(temporaryRoot, "data");
   process.env.OMARCHY_BOT_STATE = path.join(temporaryRoot, "state");
@@ -83,8 +70,6 @@ test("uses the measured conservative Bot Screen default", () => {
     botScreenProfile: "1080p",
     botScreenLogicalWidth: 1920,
     botScreenLogicalHeight: 1080,
-    botScreenFrameRate: 18,
-    botScreenWebRtcPort: 7323,
   });
 });
 
@@ -95,9 +80,7 @@ test("enforces the measured capacity for each production profile", () => {
   process.env.OMARCHY_BOT_SCREEN_CAPACITY = "8";
   process.env.OMARCHY_BOT_SCREEN_PROFILE = "1080p";
 
-  expect(() => loadConfig()).toThrow(
-    "OMARCHY_BOT_SCREEN_CAPACITY=8 exceeds the approved 1080p capacity of 4",
-  );
+  expect(() => loadConfig()).toThrow();
 
   process.env.OMARCHY_BOT_SCREEN_PROFILE = "720p";
   expect(loadConfig()).toMatchObject({

@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "kind": "normal-use-selected-view-matrix",
-  "generatedAt": "2026-09-05T16:27:47.586Z",
+  "generatedAt": "2026-09-07T02:01:10.889Z",
   "status": "complete",
   "historicalBaseline": {
     "source": ".scratch/bot-screen-media-desktop/capacity-report.json",
@@ -28,7 +28,7 @@
   },
   "hostSafety": {
     "before": {
-      "observedAt": "2026-09-05T16:27:47.611Z",
+      "observedAt": "2026-09-07T02:01:10.910Z",
       "method": "systemctl --user show-environment / list-units / is-active",
       "userManagerEnvironment": {
         "available": true,
@@ -64,13 +64,7 @@
         ]
       },
       "leftoverScreenUnits": [],
-      "visibleScreenUnits": [
-        "omarchy-bot-screen-5ba031c74224f14a6b279e7c343cba25-g181-application.service",
-        "omarchy-bot-screen-5ba031c74224f14a6b279e7c343cba25-g181-capture-2.service",
-        "omarchy-bot-screen-5ba031c74224f14a6b279e7c343cba25-g181-compositor.service",
-        "omarchy-bot-screen-5ba031c74224f14a6b279e7c343cba25-g181-input.service",
-        "omarchy-bot-screen-5ba031c74224f14a6b279e7c343cba25-g181-worker.service"
-      ],
+      "visibleScreenUnits": [],
       "cannotProve": [
         "Original Omarchy top bar remains clickable and visually available during Bot desktop start, work, switching, failure, and cleanup",
         "Existing Omarchy keyboard shortcuts continue to fire in the Host Session through the same lifecycle",
@@ -79,25 +73,19 @@
         "Sibling Bot screenshots or service existence do not prove host usability"
       ]
     },
-    "preExistingScreenUnits": [
-      "omarchy-bot-screen-5ba031c74224f14a6b279e7c343cba25-g181-application.service",
-      "omarchy-bot-screen-5ba031c74224f14a6b279e7c343cba25-g181-capture-2.service",
-      "omarchy-bot-screen-5ba031c74224f14a6b279e7c343cba25-g181-compositor.service",
-      "omarchy-bot-screen-5ba031c74224f14a6b279e7c343cba25-g181-input.service",
-      "omarchy-bot-screen-5ba031c74224f14a6b279e7c343cba25-g181-worker.service"
-    ],
+    "preExistingScreenUnits": [],
     "preExistingScreenUnitsNote": "Visible omarchy-bot-screen-* units at start belong to the already-running plugin, not this test. They were observed read-only and not stopped.",
     "livePluginDaemon": "not restarted; isolated test daemon used",
     "systemPackages": {
-      "cage": null,
+      "sway": null,
       "wlrRandr": null,
       "zenity": null,
       "grim": "/usr/bin/grim",
-      "ffmpeg": "/usr/bin/ffmpeg"
+      "wayvnc": null
     },
     "userSystemdManagerAvailable": true,
     "afterUnusedBots": {
-      "observedAt": "2026-09-05T16:27:52.291Z",
+      "observedAt": "2026-09-07T02:01:15.253Z",
       "method": "systemctl --user show-environment / list-units / is-active",
       "userManagerEnvironment": {
         "available": true,
@@ -133,13 +121,7 @@
         ]
       },
       "leftoverScreenUnits": [],
-      "visibleScreenUnits": [
-        "omarchy-bot-screen-5ba031c74224f14a6b279e7c343cba25-g181-application.service",
-        "omarchy-bot-screen-5ba031c74224f14a6b279e7c343cba25-g181-capture-2.service",
-        "omarchy-bot-screen-5ba031c74224f14a6b279e7c343cba25-g181-compositor.service",
-        "omarchy-bot-screen-5ba031c74224f14a6b279e7c343cba25-g181-input.service",
-        "omarchy-bot-screen-5ba031c74224f14a6b279e7c343cba25-g181-worker.service"
-      ],
+      "visibleScreenUnits": [],
       "cannotProve": [
         "Original Omarchy top bar remains clickable and visually available during Bot desktop start, work, switching, failure, and cleanup",
         "Existing Omarchy keyboard shortcuts continue to fire in the Host Session through the same lifecycle",
@@ -159,10 +141,10 @@
         "note": "Standard integration harness disables host application units. Results are harness-mode evidence, not deployment-path supervision evidence."
       },
       "resources": {
-        "durationMs": 502.98,
+        "durationMs": 500.14,
         "screens": [
           {
-            "surfaceId": "surf_568114febff8438aa6d1aa4fbfec6f2c",
+            "surfaceId": "surf_d6ae8b721ba849bd9767cb032d92bd61",
             "pids": [],
             "pssMiB": 0,
             "rssMiB": 0,
@@ -175,7 +157,7 @@
             "processes": []
           },
           {
-            "surfaceId": "surf_1f5c7b296f6245a6b41410eafd6ca1e4",
+            "surfaceId": "surf_6b169dfbd02342cfb65d6bc17861715b",
             "pids": [],
             "pssMiB": 0,
             "rssMiB": 0,
@@ -188,7 +170,7 @@
             "processes": []
           },
           {
-            "surfaceId": "surf_309ac6a4f31e4f28b54eb076b013c939",
+            "surfaceId": "surf_46bb25f52495442ea993e32193298cb0",
             "pids": [],
             "pssMiB": 0,
             "rssMiB": 0,
@@ -202,15 +184,15 @@
           }
         ],
         "daemonAndHarness": {
-          "pssMiB": 242.29,
-          "rssMiB": 295.11,
-          "cpuPercent": 19.88,
+          "pssMiB": 263.65,
+          "rssMiB": 280.48,
+          "cpuPercent": 6,
           "note": "daemon and test harness share this process; combined measurement, not a split"
         },
         "total": {
-          "pssMiB": 242.29,
-          "rssMiB": 295.11,
-          "cpuPercent": 19.88
+          "pssMiB": 263.65,
+          "rssMiB": 280.48,
+          "cpuPercent": 6
         }
       },
       "attribution": {
@@ -234,20 +216,20 @@
           "processes": 0
         },
         "daemonAndHarness": {
-          "pssMiB": 242.29,
-          "rssMiB": 295.11,
-          "cpuPercent": 19.88,
+          "pssMiB": 263.65,
+          "rssMiB": 280.48,
+          "cpuPercent": 6,
           "note": "daemon and test harness share this process; combined measurement, not a split"
         },
         "wholeScenario": {
-          "pssMiB": 242.29,
-          "rssMiB": 295.11,
-          "cpuPercent": 19.88
+          "pssMiB": 263.65,
+          "rssMiB": 280.48,
+          "cpuPercent": 6
         }
       },
       "notes": [
         "Three Bots created and listed; no graphical action or Computer view.",
-        "No Cage, capture, or encoder process and no runtime directory per unused Bot.",
+        "No Sway, capture, or encoder process and no runtime directory per unused Bot.",
         "No daemon git child (Changes polling is gone).",
         "Whole-scenario total is the combined daemon/harness process only.",
         "Standard integration harness disables host application units. Results are harness-mode evidence, not deployment-path supervision evidence."
@@ -255,31 +237,31 @@
       "evidence": {
         "hiddenStack": [
           {
-            "surfaceId": "surf_568114febff8438aa6d1aa4fbfec6f2c",
+            "surfaceId": "surf_d6ae8b721ba849bd9767cb032d92bd61",
             "runtimeDir": false,
-            "cageOrCaptureOrEncoder": 0,
+            "compositorOrCaptureOrEncoder": 0,
             "anySurfaceProcess": 0,
             "screenState": "stopped"
           },
           {
-            "surfaceId": "surf_1f5c7b296f6245a6b41410eafd6ca1e4",
+            "surfaceId": "surf_6b169dfbd02342cfb65d6bc17861715b",
             "runtimeDir": false,
-            "cageOrCaptureOrEncoder": 0,
+            "compositorOrCaptureOrEncoder": 0,
             "anySurfaceProcess": 0,
             "screenState": "stopped"
           },
           {
-            "surfaceId": "surf_309ac6a4f31e4f28b54eb076b013c939",
+            "surfaceId": "surf_46bb25f52495442ea993e32193298cb0",
             "runtimeDir": false,
-            "cageOrCaptureOrEncoder": 0,
+            "compositorOrCaptureOrEncoder": 0,
             "anySurfaceProcess": 0,
             "screenState": "stopped"
           }
         ],
         "runtimeDirs": [
-          "/tmp/omarchy-bot-test-1788625667611-ncjbnii1e6/r/surf_568114febff8438aa6d1aa4fbfec6f2c",
-          "/tmp/omarchy-bot-test-1788625667611-ncjbnii1e6/r/surf_1f5c7b296f6245a6b41410eafd6ca1e4",
-          "/tmp/omarchy-bot-test-1788625667611-ncjbnii1e6/r/surf_309ac6a4f31e4f28b54eb076b013c939"
+          "/tmp/omarchy-bot-test-1788746470910-t8cbxgk7f5/r/surf_d6ae8b721ba849bd9767cb032d92bd61",
+          "/tmp/omarchy-bot-test-1788746470910-t8cbxgk7f5/r/surf_6b169dfbd02342cfb65d6bc17861715b",
+          "/tmp/omarchy-bot-test-1788746470910-t8cbxgk7f5/r/surf_46bb25f52495442ea993e32193298cb0"
         ],
         "gitChildren": 0
       }
@@ -295,5 +277,5 @@
     "The user can switch Bots while using the host desktop and confirm selected pixels/input belong to the correct Bot",
     "Sibling Bot screenshots or service existence do not prove host usability"
   ],
-  "updatedAt": "2026-09-05T16:27:52.293Z"
+  "updatedAt": "2026-09-07T02:01:15.256Z"
 }

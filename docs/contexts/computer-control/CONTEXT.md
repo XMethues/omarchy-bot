@@ -4,7 +4,7 @@ The context for coordinating Bots and the user across Omarchy desktop surfaces.
 
 ## Language
 
-Definitions only. Rules and acceptance live in [Computer ADR 0008](adr/0008-run-cage-bot-desktops.md), [system ADR 0009](../../adr/0009-share-work-files-isolate-bot-screens.md), and [the current implementation specification](../../../.scratch/shared-workspace-desktop-boundary/spec.md). Related terms: [Bot](../workspace/CONTEXT.md), [Bot Client](../workspace/CONTEXT.md), [Agent](../agent-integration/CONTEXT.md), [Native Session](../agent-integration/CONTEXT.md), [Shared Workspace](../workspace/CONTEXT.md).
+Definitions only. Rules and acceptance live in [Computer ADR 0009](adr/0009-adopt-sway-bot-desktops.md), historical [Computer ADR 0008](adr/0008-run-cage-bot-desktops.md), [system ADR 0009](../../adr/0009-share-work-files-isolate-bot-screens.md), and [the current implementation specification](../../../.scratch/shared-workspace-desktop-boundary/spec.md). Related terms: [Bot](../workspace/CONTEXT.md), [Bot Client](../workspace/CONTEXT.md), [Agent](../agent-integration/CONTEXT.md), [Native Session](../agent-integration/CONTEXT.md), [Shared Workspace](../workspace/CONTEXT.md).
 
 **Host Session**:
 The user's original Omarchy graphical environment, including its desktop, top bar, shortcuts, and physical input. It is distinct from the graphical work surfaces provided to Bots.

@@ -2,6 +2,7 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import type { Subprocess } from "bun";
 import { chromium } from "@playwright/test";
 import path from "node:path";
+import { AVATAR_RENDERER_ID } from "../../packages/protocol/src/api.ts";
 
 const repoRoot = path.resolve(import.meta.dirname, "../..");
 const webRoot = path.join(repoRoot, "apps/web");
@@ -51,16 +52,20 @@ test("the Vite development runtime loads the sole pinned DiceBear renderer", asy
     const page = await browser.newPage();
 
     await page.goto(devUrl);
-    // Dynamic import is the contract under test: Vite must load the browser renderer module.
-    const moduleError = await page.evaluate(async (modulePath) => {
-      try {
-        await import(modulePath);
-        return null;
-      } catch (error) {
-        return String(error);
-      }
-    }, "/src/components/avatarRenderer.ts");
-    expect(moduleError).toBeNull();
+    // Vite may navigate once while optimizing newly discovered dependencies.
+    // The browser waiter survives that navigation; real import/decode failures still fail.
+    const rendered = await page.waitForFunction(async ({ modulePath, recipe }) => {
+      const renderer = await import(modulePath);
+      const uri = renderer.renderAvatarRecipe(recipe, "static");
+      const image = new Image();
+      image.src = uri;
+      await image.decode();
+      return uri;
+    }, {
+      modulePath: "/src/components/avatarRenderer.ts",
+      recipe: { rendererVersion: AVATAR_RENDERER_ID, style: "pixelbot", seed: "development-runtime", options: {} },
+    });
+    expect(await rendered.jsonValue()).toStartWith("data:image/svg+xml");
     await page.locator("#root > *").first().waitFor({ state: "attached", timeout: 5_000 });
   } finally {
     await browser.close();

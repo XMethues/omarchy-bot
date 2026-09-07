@@ -1,5 +1,5 @@
 import type { ComputerBroker } from "../modules/computer/broker.ts";
-import { ScreenProjectionOfferDto } from "@omarchy-bot/protocol";
+import { ScreenProjectionSessionRequestDto } from "@omarchy-bot/protocol";
 import {
   ScreenProjectionUnavailableError,
   type ScreenProjectionService,
@@ -11,7 +11,7 @@ function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), { status, headers: JSON_HEADERS });
 }
 
-/** Unauthenticated first-release signaling for one validated Bot/Surface pair. */
+/** Unauthenticated first-release routing for one validated Bot/Surface pair. */
 export async function handleProjectionRequest(
   req: Request,
   computer: ComputerBroker,
@@ -36,10 +36,10 @@ export async function handleProjectionRequest(
 
   if (req.method === "POST") {
     const body: unknown = await req.json().catch(() => undefined);
-    const offer = ScreenProjectionOfferDto.safeParse(body);
-    if (!offer.success) return json({ error: "a WebRTC SDP offer is required" }, 400);
+    const request = ScreenProjectionSessionRequestDto.safeParse(body);
+    if (!request.success) return json({ error: "a version 3 Screen Projection request is required" }, 400);
     try {
-      return json(await projections.answer(owner, offer.data), 201);
+      return json(await projections.createSession(owner), 201);
     } catch (error) {
       if (error instanceof ScreenProjectionUnavailableError) {
         return json({

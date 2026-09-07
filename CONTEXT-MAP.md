@@ -37,6 +37,6 @@ Glossaries define terms. Product rules and acceptance live in [the product bound
 
 ## Current and historical documentation
 
-Current authority is the product boundary, ADR 0009, ADR 0010, Computer ADR 0008, the three glossaries, and [the Shared Workspace / Bot Desktop implementation specification](.scratch/shared-workspace-desktop-boundary/spec.md). That specification records pending runtime work; documentation consolidation does not mark those items done.
+Current authority is the product boundary, system ADR 0009, system ADR 0010, Computer ADR 0009, the three glossaries, and [the Shared Workspace / Bot Desktop implementation specification](.scratch/shared-workspace-desktop-boundary/spec.md). Computer ADR 0008 is historical Cage evidence; production Bot Desktop Sessions use Sway.
 
 Older specifications, tickets, and research notes are historical unless they agree with the documents above. [The requirement map](.scratch/shared-workspace-desktop-boundary/requirement-map.md) lists each mixed or superseded document, where its still-valid requirements live, and which measurements remain evidence only. Do not implement Changes, a single shared input seat, nested Hyprland, or per-Bot browser/profile/login policy from those older sources. Four-stream capacity results are not current Host Session or normal-use-cost acceptance.

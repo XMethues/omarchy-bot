@@ -28,6 +28,8 @@ export interface HarnessOptions {
   botScreenAdapter?: BotScreenRuntimeAdapter;
   botScreenCapacity?: number;
   waitForAgentReady?: boolean;
+  /** Use the production computer worker while still injecting a test adapter. */
+  useProductionComputerWorker?: boolean;
 }
 
 export async function startDaemon(existingHome?: string, options: HarnessOptions = {}): Promise<Harness> {
@@ -52,7 +54,7 @@ export async function startDaemon(existingHome?: string, options: HarnessOptions
   process.env.OMARCHY_BOT_DELETION_TERMINAL_TIMEOUT_MS = String(
     options.botDeletionTerminalTimeoutMs ?? 30_000,
   );
-  process.env.OMARCHY_BOT_COMPUTER_WORKER_DIR = options.useProductionBotScreen
+  process.env.OMARCHY_BOT_COMPUTER_WORKER_DIR = options.useProductionBotScreen || options.useProductionComputerWorker
     ? path.resolve(import.meta.dir, "../../../workers/computer")
     : path.resolve(import.meta.dir, "../fake-workers/computer");
 

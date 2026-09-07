@@ -12,5 +12,19 @@ Item {
     id: omarchyBot
     running: true
     command: ["bash", root.launcherPath]
+    onExited: (exitCode, exitStatus) => {
+      if (exitCode !== 0) launchFailureNotification.running = true
+    }
+  }
+
+  Process {
+    id: launchFailureNotification
+    command: [
+      "notify-send",
+      "-u",
+      "critical",
+      "Omarchy Bot",
+      "Failed to start. See the Omarchy Bot plugin launch log."
+    ]
   }
 }

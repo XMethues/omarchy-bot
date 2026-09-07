@@ -1,5 +1,7 @@
 # 04: Bound H.264 lifecycle and recovery
 
+> **Historical.** Ticket 12 removed the expanded H.264 / ffmpeg / RTP / video-track path. Production Web Control is view-only RFB on a WebRTC data channel. This ticket records the earlier H.264 lifecycle gate and is not a current encoder contract.
+
 **What to build:** Make Expanded Web Control remain low-latency and recover honestly across mode changes, reconnects, backpressure, and media failures. Encoding should consume resources only while expanded, stale video must be discarded rather than queued, and a failed video path must leave an explicit read-only snapshot fallback instead of pretending control is live.
 
 **Blocked by:** 03 / Stream Expanded Web Control over H.264.

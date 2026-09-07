@@ -2,7 +2,7 @@
 
 Research date: 2026-09-04
 
-> **Current authority (2026-09-05):** this note is historical implementation research. Do not implement Changes, a Git working-tree panel, or daemon-cwd fallback from the #5 recommendation below. Composer dock and Computer Surface behavior remain in [the product boundary](../workspace-redesign.md#shared-workspace-and-plugin-boundary) and [the current implementation specification](../../.scratch/shared-workspace-desktop-boundary/spec.md). Accounting: [requirement map](../../.scratch/shared-workspace-desktop-boundary/requirement-map.md).
+> **Historical.** This note is implementation research from 2026-09-04. Production compositor is [Computer ADR 0009](../contexts/computer-control/adr/0009-adopt-sway-bot-desktops.md). Do not implement Changes, a Git working-tree panel, or daemon-cwd fallback from the #5 recommendation below. Composer dock and Computer Surface behavior remain in [the product boundary](../workspace-redesign.md#shared-workspace-and-plugin-boundary) and [the current implementation specification](../../.scratch/shared-workspace-desktop-boundary/spec.md). Accounting: [requirement map](../../.scratch/shared-workspace-desktop-boundary/requirement-map.md). The Cage-era details below are not rewritten.
 
 Scope: the three open issues currently listed for `XMethues/omarchy-bot`: [#2](https://github.com/XMethues/omarchy-bot/issues/2), [#3](https://github.com/XMethues/omarchy-bot/issues/3), and [#5](https://github.com/XMethues/omarchy-bot/issues/5).
 
@@ -11,7 +11,7 @@ Scope: the three open issues currently listed for `XMethues/omarchy-bot`: [#2](h
 | Issue | Current state | Recommendation |
 | --- | --- | --- |
 | [#2 Bot-to-bot in-app mailbox](https://github.com/XMethues/omarchy-bot/issues/2) | Not implemented. The current Thread and Agent-worker contracts cannot represent durable peer delivery or attribution. | Implement after a Workspace/Agent Integration ADR fixes the v1 conversation, delivery, retry, and deletion semantics. Use target-owned, user-visible Threads plus a durable delivery queue; do not turn this into A2A/RPC. |
-| [#3 Bot Screen transport/Desktop](https://github.com/XMethues/omarchy-bot/issues/3) | Its transport and compositor assumptions are superseded. Cage, PNG preview, H.264 Expanded Web Control, persistent neutral Bot Desktop, and removal of Alacritty are already implemented and verified. | Close as superseded/resolved. Do not implement its nested-Hyprland or data-channel-frame direction. Track richer Desktop chrome separately only if the newer neutral-Desktop decision is intentionally changed. |
+| [#3 Bot Screen transport/Desktop](https://github.com/XMethues/omarchy-bot/issues/3) | Its transport and compositor assumptions are superseded. Sway, PNG preview, view-only RFB Web Control over WebRTC data channels, persistent neutral Bot Desktop, and removal of Alacritty are the current implementation. Cage and H.264 video-track Web Control are historical. | Close as superseded/resolved. Do not implement its nested-Hyprland or data-channel-frame direction. Track richer Desktop chrome separately only if the newer neutral-Desktop decision is intentionally changed. |
 | [#5 Composer dock + Changes/Browser panel](https://github.com/XMethues/omarchy-bot/issues/5) | Composer dock and Computer Surface were later implemented; Changes is now a superseded product capability. | Do not implement Changes. Keep Composer and the Computer Surface. Removal of Changes is an implementation gap tracked by the current boundary specification, not by this research note. |
 
 Recommended order (historical 2026-09-04; step 4 is withdrawn):
@@ -182,23 +182,17 @@ Add one browser behavior case only for the new visible sender treatment and unre
 
 The issue says to keep nested Hyprland and WebRTC data-channel frames. That is no longer the accepted architecture.
 
-`docs/contexts/computer-control/adr/0008-run-cage-bot-desktops.md` now requires:
+`docs/contexts/computer-control/adr/0008-run-cage-bot-desktops.md` historically required Cage plus H.264 WebRTC media. That ADR is superseded by [ADR 0009](../contexts/computer-control/adr/0009-adopt-sway-bot-desktops.md). Ticket 12 then removed the expanded H.264 / ffmpeg / RTP / video-track path.
 
-- pure-headless Cage as the sole production compositor;
+Current production:
+
+- pure-headless Sway as the sole Bot Desktop Runtime;
 - one private Wayland socket/output and persistent Bot Desktop per Bot;
 - low-frequency lossless PNG for Computer Preview;
-- H.264 WebRTC media for Expanded Web Control;
+- view-only RFB Web Control on a WebRTC data channel (`screen.view.v3`, noVNC);
 - HTTP PNG only as a read-only fallback.
 
-ADR 0008 explicitly supersedes the compositor mechanism in `docs/contexts/computer-control/adr/0007-provision-nested-hyprland-per-bot.md` while retaining Bot ownership, private sockets, independent input/focus, measured capacity, cleanup, and the non-adversarial isolation boundary.
-
-The implementation matches ADR 0008:
-
-- `apps/daemon/src/modules/computer/cageBotScreenRuntime.ts` launches Cage with `WLR_BACKENDS=headless`, a private mode-0700 runtime/profile, explicit geometry, the Bot Desktop, capture helper, input helper, and Surface-bound computer worker.
-- `apps/daemon/native/bot-desktop/main.c` commits a persistent neutral fullscreen Wayland surface. No Alacritty process defines readiness or lifetime.
-- `apps/daemon/src/modules/computer/screenProjection.ts` keeps PNG preview at one-second intervals and uses the H.264 encoder for expanded mode.
-- `apps/daemon/src/modules/computer/h264Encoder.ts` implements Baseline-compatible H.264 access units and the 90 kHz RTP clock declared by `packages/protocol/src/api.ts` protocol version 2.
-- `README.md` lists Cage, `wlr-randr`, `grim`, and FFmpeg/libx264 as the production prerequisites and describes the PNG/H.264 split.
+ADR 0008 explicitly superseded the compositor mechanism in `docs/contexts/computer-control/adr/0007-provision-nested-hyprland-per-bot.md` while retaining Bot ownership, private sockets, independent input/focus, measured capacity, cleanup, and the non-adversarial isolation boundary. The Cage adapter and `h264Encoder.ts` files are gone.
 
 The local tracked effort records completed implementation and proof:
 
@@ -283,7 +277,7 @@ Add `apps/web/src/components/CapabilityPanel.tsx` as the one `LayoutPanel`. Use 
 Refactor `apps/web/src/components/ComputerPanel.tsx` so its current projection/controller content can render inside `CapabilityPanel` without nesting a second `LayoutPanel`. Preserve the existing `ComputerPanel` public behavior until all callers/tests move, then remove the obsolete wrapper in the same cutover. The implementation must retain:
 
 - `ScreenProjectionConnection` ownership and Surface-tagged cleanup;
-- PNG preview, H.264 expanded view, and HTTP snapshot fallback;
+- PNG preview, view-only RFB expanded view, and HTTP snapshot fallback;
 - Takeover/Return to Bot;
 - focus return and expanded dialog behavior;
 - the exact `ComputerViewDto` and projection URLs.
@@ -400,7 +394,7 @@ Workspace browser coverage should assert:
 
 # Cross-issue dependencies and risks
 
-- #5 Browser depends on the current #3 implementation, but that dependency is already complete. It must reuse the Cage/H.264 Computer Surface rather than code against #3's obsolete data-channel/Hyprland wording.
+- #5 Browser depends on the current Computer Surface, but that dependency is already complete. It must reuse the Sway/RFB Computer Surface rather than code against #3's obsolete nested-Hyprland or Cage/H.264 wording.
 - #5 Changes and #2 both touched daemon protocol/API wiring. Changes is no longer a current product requirement; do not implement it as a follow-on cut.
 - #2 is the only issue that changes the domain model and Agent-worker contract. It needs the strongest migration, restart, idempotency, and deletion proof.
 - #5's Git data is workspace state, not Agent provenance. Any future “changes made by this Bot” claim requires causal instrumentation at the tool/Turn layer and cannot be inferred retrospectively from a shared checkout.

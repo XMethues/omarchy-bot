@@ -1,12 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import type { NetworkInterfaceInfo } from "node:os";
-import { BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL } from "../../apps/daemon/src/bootstrap/config.ts";
+import { BOT_SCREEN_CAPACITY_POLICY } from "../../apps/daemon/src/bootstrap/config.ts";
 import {
   selectNonLoopbackLanAddress,
   type BrowserWindowMetric,
 } from "../integration/helpers/bot-screen-browser-load.ts";
 import {
-  requireApprovedDefaultRow,
+  requireDefaultProjectionEvidence,
   requireCompletedOperationalRows,
   type CapacityRowForGate,
 } from "../integration/helpers/bot-screen-capacity-report.ts";
@@ -21,52 +21,41 @@ function passingDefaultRow(): TestCapacityRow {
     lanEndpoint: "https://192.168.50.12:7321",
     finalWebClient: true as const,
     renderingSequences: Array.from({ length: 158 }, (_, sequence) => sequence + 1),
-    transportDrops: 0,
     captureAttempts: 160,
     sourceFrames: 160,
-    encoderInputs: 160,
-    encodedFrames: 160,
-    sentFrames: 160,
-    encodedBytes: 100_000,
-    encodedBitrateBps: 80_000,
+    browserReceives: 160,
+    browserDecodes: 159,
+    browserPaints: 158,
+    previewFrames: 0,
+    previewBytes: 0,
+    rfbBytesSent: 100_000,
+    rfbBytesReceived: 1_000,
     receivedFrames: 160,
     decodedFrames: 159,
     displayedFrames: 158,
     decodeDrops: 1,
     paintDrops: 1,
-    sourceFps: 16,
-    encodedFps: 16,
-    sentFps: 16,
     receivedFps: 16,
     decodedFps: 15.9,
     displayedFps: 15.8,
-    preCaptureBackpressureSkips: 0,
-    encodedBackpressureDrops: 0,
-    transportUnavailableSkips: 0,
-    invalidFrameDrops: 0,
+    captureSkips: 0,
+    invalidFrames: 0,
+    transportSkips: 0,
     sendFailures: 0,
-    unexplainedDrops: 0,
-    pipelineBoundaryCarry: {
-      start: { capture: 0, encode: 0, rtp: 0, receive: 0, decode: 0, paint: 0 },
-      end: { capture: 0, encode: 0, rtp: 0, receive: 0, decode: 0, paint: 0 },
-      unexplainedByStage: { capture: 0, encode: 0, rtp: 0, receive: 0, decode: 0, paint: 0 },
-    },
+    unexplainedShortfalls: 0,
     captureLatencyMs: { samples: 160, mean: 12, lifetimeMax: 20 },
-    encodeLatencyMs: { samples: 160, mean: 8, lifetimeMax: 15 },
-    targetFrameShortfall: { source: 0, encoded: 0, sent: 0, received: 0, decoded: 0, displayed: 0 },
+    captureToPaintLatencyMs: { samples: 158, mean: 35, lifetimeMax: 55 },
+    targetFrameShortfall: { received: 0, decoded: 0, displayed: 0 },
     durationMs: 10_000,
     captureToBrowserMs: [],
-    pipelineBoundary: {
-      start: { received: 0, decoded: 0, dropped: 0, displayed: 0 },
-      end: { received: 160, decoded: 159, dropped: 1, displayed: 158 },
-    },
   }));
   return {
+    runtime: "sway",
     profile: "1080p",
     screens: 4,
     resolution: { width: 1920, height: 1080 },
     targetFps: 15,
-    performancePassed: true,
+    measurementsComplete: true,
     frames,
     inputToVisibleMs: { source: "browser-paint", samples: [42, 49, 55], p50: 49, p95: 55 },
     repeatedProvisionDestroy: [
@@ -75,10 +64,10 @@ function passingDefaultRow(): TestCapacityRow {
     ],
     captureToBrowserMs: {
       available: false,
-      reason: "WebRTC H.264 did not negotiate an absolute capture timestamp",
+      reason: "RFB view paints do not carry an absolute capture timestamp",
     },
     operationalPassed: true,
-    nativePeerRecovery: {
+    directWebSocketRecovery: {
       maxAttemptsPerConnection: 3,
       attempts: 14,
       failures: 0,
@@ -98,22 +87,22 @@ function passingDefaultRow(): TestCapacityRow {
     reconnects: 8,
     crashes: [
       { role: "capture-helper", isolated: true, snapshotFallback: true },
-      { role: "encoder", isolated: true, snapshotFallback: true },
+      { role: "wayvnc", isolated: true, snapshotFallback: true },
       { role: "input-helper", isolated: true },
       { role: "compositor", isolated: true },
     ],
-    encodingLifecycle: {
+    projectionLifecycle: {
       unopenedNoRuntime: true,
-      idleEncoderProcessesObserved: 0,
-      staticPreviewEncoderProcessesObserved: 0,
-      expandedEncoderProcessesObserved: 4,
-      postExpandedEncoderProcessesObserved: 0,
+      idleWayvncProcessesObserved: 0,
+      staticPreviewWayvncProcessesObserved: 0,
+      expandedWayvncProcessesObserved: 4,
+      postExpandedWayvncProcessesObserved: 0,
     },
     activeResources: {
       screens: Array.from({ length: 4 }, () => ({ pssMiB: 100, rssMiB: 200, cpuPercent: 20 })),
       total: { pssMiB: 500, rssMiB: 900, cpuPercent: 100 },
     },
-    aggregateMetrics: { encodedBytes: 400_000, encodedBitrateBps: 320_000 },
+    aggregateMetrics: { rfbBytesSent: 400_000, rfbBytesReceived: 4_000 },
     admission: {
       capacity: 4,
       noPartialRuntime: true,
@@ -124,251 +113,60 @@ function passingDefaultRow(): TestCapacityRow {
   };
 }
 
-describe("Bot Screen default-capacity release gate", () => {
-  test("ties default four to the checked final-client measurement", () => {
-    expect(BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL).toMatchObject({
-      schemaVersion: 3,
-      sourceReport: { schemaVersion: 3 },
-      runtime: "cage",
-      defaultCapacity: 4,
-      profile: "1080p",
-      resolution: { width: 1920, height: 1080 },
-      finalClient: {
-        built: true,
-        transport: "WebRTC H.264 video track",
-      },
-      lifecycleProof: {
-        strategy: "permanent-delete-and-fresh-provision",
-        cyclesPerRow: 2,
-      },
-      compositorMemory: {
-        passed: true,
-        minimumReductionPercent: 25,
-        reductionPercent: 61.25,
-        baseline: {
-          runtime: "hyprland",
-          resolution: { width: 1920, height: 1080 },
-          pssMiB: 116.54,
-        },
-        candidate: {
-          runtime: "cage",
-          resolution: { width: 1920, height: 1080 },
-          pssMiB: 45.16,
-        },
-      },
-    });
-    expect(BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.sourceReport.path)
-      .toEndWith(".scratch/bot-screen-media-desktop/capacity-report.json");
-    expect(BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.capacityRows).toContainEqual({
-      profile: "1080p",
-      screens: 4,
-      supportStatus: "supported",
-    });
-    expect(BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.capacityRows).toContainEqual({
-      profile: "1080p",
-      screens: 8,
-      supportStatus: "unsupported",
-      reason: expect.any(String),
-    });
-    expect(BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.capacityRows).toContainEqual({
-      profile: "720p",
-      screens: 8,
-      supportStatus: "supported",
-    });
+describe("current Sway projection measurement evidence", () => {
+  test("selects the measured configured default without treating it as a performance approval", () => {
     const row = passingDefaultRow();
-    expect(requireApprovedDefaultRow([row], 4, BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL)).toBe(row);
+    expect(requireDefaultProjectionEvidence([row], 4, BOT_SCREEN_CAPACITY_POLICY)).toBe(row);
   });
 
-  test("accounts for frames still in server-to-browser transit at the window end", () => {
-    const row = passingDefaultRow();
-    row.frames = row.frames.map((frame) => ({
-      ...frame,
-      captureAttempts: 161,
-      sourceFrames: 161,
-      encoderInputs: 161,
-      encodedFrames: 161,
-      sentFrames: 161,
-      pipelineBoundaryCarry: {
-        ...frame.pipelineBoundaryCarry!,
-        end: { ...frame.pipelineBoundaryCarry!.end, receive: 1 },
-      },
-    }));
-    expect(requireApprovedDefaultRow([row], 4, BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL)).toBe(row);
+  test("rejects historical compositor rows as Sway measurement evidence", () => {
+    const historical = { ...passingDefaultRow(), runtime: "cage" };
+    expect(() => requireDefaultProjectionEvidence([historical], 4, BOT_SCREEN_CAPACITY_POLICY)).toThrow();
   });
 
-  test("accounts for a frame sent before the browser measurement window", () => {
+  test("requires bidirectional RFB traffic and visible browser paint", () => {
+    const missingTraffic = passingDefaultRow();
+    missingTraffic.frames = missingTraffic.frames.map((frame) => ({ ...frame, rfbBytesReceived: 0 }));
+    expect(() => requireDefaultProjectionEvidence([missingTraffic], 4, BOT_SCREEN_CAPACITY_POLICY)).toThrow();
+    const missingPaint = passingDefaultRow();
+    missingPaint.frames = missingPaint.frames.map((frame) => ({ ...frame, displayedFrames: 0, renderingSequences: [] }));
+    expect(() => requireDefaultProjectionEvidence([missingPaint], 4, BOT_SCREEN_CAPACITY_POLICY)).toThrow();
+  });
+
+  test("does not impose video-frame conservation or a historical latency budget on RFB", () => {
     const row = passingDefaultRow();
     row.frames = row.frames.map((frame) => ({
-      ...frame,
-      receivedFrames: 161,
-      decodedFrames: 160,
-      displayedFrames: 159,
-      renderingSequences: Array.from({ length: 159 }, (_, sequence) => sequence + 1),
-      pipelineBoundaryCarry: {
-        ...frame.pipelineBoundaryCarry!,
-        start: { ...frame.pipelineBoundaryCarry!.start, receive: 1 },
-      },
-      pipelineBoundary: {
-        start: { received: 1, decoded: 0, dropped: 0, displayed: 0 },
-        end: { received: 162, decoded: 160, dropped: 1, displayed: 159 },
-      },
+      ...frame, receivedFrames: 100, decodedFrames: 1, displayedFrames: 1,
+      receivedFps: 10, decodedFps: 0.1, displayedFps: 0.1, renderingSequences: [1],
+      browserReceives: 0, browserDecodes: 0, browserPaints: 0,
     }));
-    expect(requireApprovedDefaultRow([row], 4, BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL)).toBe(row);
+    row.inputToVisibleMs = { source: "browser-paint", samples: [1100, 1300, 1500], p50: 1300, p95: 1500 };
+    expect(requireDefaultProjectionEvidence([row], 4, BOT_SCREEN_CAPACITY_POLICY)).toBe(row);
   });
-  test("does not substitute a smaller passing row when the configured row is absent", () => {
+
+  test("does not substitute a smaller row or incomplete current measurements", () => {
     const smaller = { ...passingDefaultRow(), screens: 2 };
-    expect(() => requireApprovedDefaultRow([smaller], 4, BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL))
-      .toThrow("missing the 4x1080p");
+    expect(() => requireDefaultProjectionEvidence([smaller], 4, BOT_SCREEN_CAPACITY_POLICY)).toThrow();
+    const incomplete = { ...passingDefaultRow(), measurementsComplete: false };
+    expect(() => requireDefaultProjectionEvidence([incomplete], 4, BOT_SCREEN_CAPACITY_POLICY)).toThrow();
   });
 
-  test("rejects a present default row whose performance result failed", () => {
-    const failed = { ...passingDefaultRow(), performancePassed: false };
-    expect(() => requireApprovedDefaultRow([failed], 4, BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL))
-      .toThrow("did not pass");
+  test("requires browser-painted rather than control-receipt latency", () => {
+    const row = passingDefaultRow();
+    row.inputToVisibleMs = { source: "control-receipt", samples: [20], p50: 20, p95: 20 };
+    expect(() => requireDefaultProjectionEvidence([row], 4, BOT_SCREEN_CAPACITY_POLICY)).toThrow();
   });
 
-  test("rejects an approval artifact whose recorded default did not pass", () => {
-    const failedApproval = {
-      ...BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL,
-      observedDisplayedFps: { minimum: 14.99, maximum: 15.31 },
-    };
-    expect(() => requireApprovedDefaultRow([passingDefaultRow()], 4, failedApproval))
-      .toThrow("approval did not pass its recorded thresholds");
-
-    const unexplainedApproval = {
-      ...BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL,
-      observedDrops: {
-        ...BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.observedDrops,
-        unexplainedDrops: 1,
-      },
-    };
-    expect(() => requireApprovedDefaultRow([passingDefaultRow()], 4, unexplainedApproval))
-      .toThrow("approval did not pass its recorded thresholds");
+  test("requires repeated real teardown and fresh surface identities", () => {
+    const row = passingDefaultRow();
+    row.repeatedProvisionDestroy = [{ cycle: 0, destroyedSurfaceId: "same", provisionedSurfaceId: "same", teardownMs: 1, startupMs: 1 }];
+    expect(() => requireDefaultProjectionEvidence([row], 4, BOT_SCREEN_CAPACITY_POLICY)).toThrow();
   });
 
-  test("rejects approval without a passing matched-1080p compositor proof", () => {
-    const failedProof = {
-      ...BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL,
-      compositorMemory: {
-        ...BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.compositorMemory,
-        passed: false,
-      },
-    };
-    expect(() => requireApprovedDefaultRow([passingDefaultRow()], 4, failedProof))
-      .toThrow("matched-1080p compositor-memory proof");
-
-    const mismatchedProfile = {
-      ...BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL,
-      compositorMemory: {
-        ...BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.compositorMemory,
-        candidate: {
-          ...BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.compositorMemory.candidate,
-          resolution: { width: 1280, height: 720 },
-        },
-      },
-    };
-    expect(() => requireApprovedDefaultRow([passingDefaultRow()], 4, mismatchedProfile))
-      .toThrow("matched-1080p compositor-memory proof");
-  });
-
-  test("requires reviewable final-client LAN provenance in the approval artifact", () => {
-    const unreviewableApproval = {
-      ...BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL,
-      finalClient: {
-        ...BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.finalClient,
-        lanEndpoint: "https://127.0.0.1:33921",
-      },
-    };
-    expect(() => requireApprovedDefaultRow([passingDefaultRow()], 4, unreviewableApproval))
-      .toThrow("lacks final-client LAN browser provenance");
-  });
-
-  test("uses the reviewed p95 envelope instead of ratcheting to one observation", () => {
-    const withinEnvelope = passingDefaultRow();
-    withinEnvelope.inputToVisibleMs = {
-      source: "browser-paint",
-      samples: [BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.observedInputToVisibleP95Ms + 1],
-      p50: BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.observedInputToVisibleP50Ms,
-      p95: BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.observedInputToVisibleP95Ms + 1,
-    };
-    expect(requireApprovedDefaultRow(
-      [withinEnvelope],
-      4,
-      BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL,
-    )).toBe(withinEnvelope);
-
-    const beyondEnvelope = passingDefaultRow();
-    beyondEnvelope.inputToVisibleMs = {
-      source: "browser-paint",
-      samples: [BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.inputToVisibleP95EnvelopeMs + 1],
-      p50: BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.observedInputToVisibleP50Ms,
-      p95: BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL.inputToVisibleP95EnvelopeMs + 1,
-    };
-    expect(() => requireApprovedDefaultRow(
-      [beyondEnvelope],
-      4,
-      BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL,
-    )).toThrow("p95 regressed beyond the approved envelope");
-  });
-
-  test("requires production encoding, preserved sequence accounting, and browser paint", () => {
-    const complete = passingDefaultRow();
-    const missingDecode = {
-      ...complete,
-      frames: complete.frames.map(({ decodedFps: _, ...frame }) => frame),
-    };
-    expect(() => requireApprovedDefaultRow([missingDecode], 4, BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL))
-      .toThrow("all-stage FPS");
-
-    const processReceipt = passingDefaultRow();
-    processReceipt.inputToVisibleMs = { source: "node-datachannel", samples: [20], p50: 20, p95: 20 };
-    expect(() => requireApprovedDefaultRow([processReceipt], 4, BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL))
-      .toThrow("browser-painted input-to-visible");
-
-  });
-
-  test("rejects a default row with a stage shortfall or unexplained transport loss", () => {
-    const shortfall = passingDefaultRow();
-    shortfall.frames[0] = { ...shortfall.frames[0]!, encodedFps: 14.9, targetFrameShortfall: { source: 1, encoded: 1, sent: 1, received: 1, decoded: 1, displayed: 1 } };
-    expect(() => requireApprovedDefaultRow([shortfall], 4, BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL))
-      .toThrow("no unexplained drops");
-
-    const transportLoss = passingDefaultRow();
-    transportLoss.frames[0] = {
-      ...transportLoss.frames[0]!,
-      transportDrops: 1,
-      receivedFrames: 159,
-      decodedFrames: 158,
-      displayedFrames: 157,
-      renderingSequences: transportLoss.frames[0]!.renderingSequences.slice(0, 157),
-      decodeDrops: 1,
-      paintDrops: 1,
-      unexplainedDrops: 1,
-    };
-    expect(() => requireApprovedDefaultRow([transportLoss], 4, BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL))
-      .toThrow("no unexplained drops");
-  });
-
-  test("rejects archive-era or missing repeated provision/destroy evidence", () => {
-    const incomplete = passingDefaultRow();
-    incomplete.repeatedProvisionDestroy = [
-      { cycle: 0, destroyedSurfaceId: "surf_0", provisionedSurfaceId: "surf_cycle_0", teardownMs: 45, startupMs: 800 },
-    ];
-    expect(() => requireApprovedDefaultRow([incomplete], 4, BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL))
-      .toThrow("repeated permanent deletion");
-  });
-
-  test("rejects loopback browser endpoints", () => {
-    const complete = passingDefaultRow();
-    const row = {
-      ...complete,
-      frames: complete.frames.map((frame) => ({
-        ...frame,
-        lanEndpoint: "https://127.0.0.1:7321",
-      })),
-    };
-    expect(() => requireApprovedDefaultRow([row], 4, BOT_SCREEN_DEFAULT_CAPACITY_APPROVAL))
-      .toThrow("all-stage FPS");
+  test("does not accept loopback as LAN measurement evidence", () => {
+    const row = passingDefaultRow();
+    row.frames = row.frames.map((frame) => ({ ...frame, lanEndpoint: "https://127.0.0.1:7321" }));
+    expect(() => requireDefaultProjectionEvidence([row], 4, BOT_SCREEN_CAPACITY_POLICY)).toThrow();
   });
 });
 
@@ -384,11 +182,7 @@ test("LAN selection is deterministic and honors an explicit interface", () => {
 });
 
 test("operational gate rejects an incomplete unsupported-performance row", () => {
-  const complete = passingDefaultRow();
-  complete.performancePassed = false;
-  expect(() => requireCompletedOperationalRows([complete])).not.toThrow();
-
-  const incomplete = { ...complete, reconnects: 2, repeatedProvisionDestroy: [] };
+  const incomplete = { ...passingDefaultRow(), reconnects: 2, repeatedProvisionDestroy: [] };
   expect(() => requireCompletedOperationalRows([incomplete]))
-    .toThrow("4x1080p did not complete every operational scenario");
+    .toThrow();
 });

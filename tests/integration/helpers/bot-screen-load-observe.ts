@@ -3,7 +3,7 @@ import path from "node:path";
 import type { SurfaceId } from "../../../packages/domain/src/ids.ts";
 import type { Harness } from "./harness.ts";
 
-export const SCREEN_PROCESS_ROLES = ["compositor", "application", "input", "worker", "capture", "encoder"] as const;
+export const SCREEN_PROCESS_ROLES = ["compositor", "application", "input", "worker", "capture", "wayvnc"] as const;
 export type ScreenProcessRole = typeof SCREEN_PROCESS_ROLES[number];
 
 export interface ScreenOwner {
@@ -85,7 +85,7 @@ export interface SupervisionLabel {
   note: string;
 }
 
-const PLUGIN_ROLES = new Set<ScreenProcessRole>(["compositor", "input", "capture", "encoder"]);
+const PLUGIN_ROLES = new Set<ScreenProcessRole>(["compositor", "input", "capture", "wayvnc"]);
 const APPLICATION_ROLES = new Set<ScreenProcessRole>(["application", "worker"]);
 
 export async function command(argv: string[]): Promise<{ status: number; stdout: string; stderr: string }> {
@@ -307,9 +307,7 @@ export function matchingProcessPids(executableName: string): Set<number> {
       const cgroup = readFileSync(`/proc/${entry}/cgroup`, "utf8");
       const surfaceUnitChild = cgroup.includes("omarchy-bot-screen-");
       if (!directDaemonChild && !surfaceUnitChild) continue;
-      const matchesEncoder = executableName !== "ffmpeg"
-        || commandLine.some((argument) => argument.includes("repeat-headers=1:aud=1"));
-      if (path.basename(commandLine[0] ?? "") === executableName && matchesEncoder) {
+      if (path.basename(commandLine[0] ?? "") === executableName) {
         pids.add(Number(entry));
       }
     } catch {
@@ -319,8 +317,8 @@ export function matchingProcessPids(executableName: string): Set<number> {
   return pids;
 }
 
-export function activeEncoderCount(): number {
-  return matchingProcessPids("ffmpeg").size;
+export function activeWayvncCount(): number {
+  return matchingProcessPids("wayvnc").size;
 }
 
 export function surfaceScopedProcessCount(surfaceId: SurfaceId, executables?: readonly string[]): number {
@@ -363,8 +361,8 @@ export function daemonGitChildCount(): number {
 function classifyExecutable(executable: string): "pluginInfrastructure" | "agentApplication" | "unknown" {
   const name = executable.toLowerCase();
   if (
-    name === "cage"
-    || name === "ffmpeg"
+    name === "sway"
+    || name === "wayvnc"
     || name.includes("wayland-capture")
     || name.includes("wayland-input")
     || name.includes("wlr-randr")
@@ -597,8 +595,8 @@ export async function waitScreenReady(harness: Harness, owner: ScreenOwner): Pro
   return Number((performance.now() - startedAt).toFixed(2));
 }
 
-export function findPortableCageBundle(realHome: string): { cageBin: string; wlrRandrBin: string } | undefined {
-  const root = path.join(realHome, ".local/share/omarchy-bot/runtime/cage");
+export function findPortableSwayBundle(realHome: string): { swayBin: string; wlrRandrBin: string } | undefined {
+  const root = path.join(realHome, ".local/share/omarchy-bot/runtime/sway");
   if (!existsSync(root)) return undefined;
   const candidates: string[] = [];
   const visit = (directory: string): void => {
@@ -606,18 +604,18 @@ export function findPortableCageBundle(realHome: string): { cageBin: string; wlr
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
       const full = path.join(directory, entry.name);
       if (entry.isDirectory()) visit(full);
-      else if (entry.name === "cage") candidates.push(full);
+      else if (entry.name === "sway") candidates.push(full);
     }
   };
   visit(root);
-  const preferWrapper = (cageBin: string): number => {
-    const directory = path.dirname(cageBin);
+  const preferWrapper = (swayBin: string): number => {
+    const directory = path.dirname(swayBin);
     return path.basename(directory) === "bin" && !directory.endsWith(`${path.sep}usr${path.sep}bin`) ? 0 : 1;
   };
   candidates.sort((left, right) => preferWrapper(left) - preferWrapper(right));
-  for (const cageBin of candidates) {
-    const wlrRandrBin = path.join(path.dirname(cageBin), "wlr-randr");
-    if (existsSync(wlrRandrBin)) return { cageBin, wlrRandrBin };
+  for (const swayBin of candidates) {
+    const wlrRandrBin = path.join(path.dirname(swayBin), "wlr-randr");
+    if (existsSync(wlrRandrBin)) return { swayBin, wlrRandrBin };
   }
   return undefined;
 }

@@ -1,5 +1,7 @@
 # 03: Stream Expanded Web Control over H.264
 
+> **Historical.** Ticket 12 removed the expanded H.264 / ffmpeg / RTP / video-track path. Production Web Control is view-only RFB on a WebRTC data channel. This ticket records the earlier H.264 cutover and is not a current transport.
+
 **What to build:** Let a user open one real 1080p Bot Screen in Expanded Web Control and see it through an H.264 WebRTC video track while Computer Preview remains a lossless PNG projection and the existing control/input DataChannels, Computer Broker, Takeover, and HTTP snapshot behavior continue end to end.
 
 **Blocked by:** 01 / Establish long-lived Screen Capture stream.

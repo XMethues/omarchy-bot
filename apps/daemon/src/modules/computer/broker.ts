@@ -2,21 +2,16 @@ import { randomUUID } from "node:crypto";
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { Database } from "bun:sqlite";
+import type { AgentComputerToolOutput } from "@omarchy-bot/agent-contract";
 import { isInputAction, isSurfaceId, type ComputerAction, type SurfaceId } from "@omarchy-bot/domain";
 import type { EventLog } from "../events/eventLog.ts";
 import type {
-  BotScreenActionResult,
+  BotScreenBoundActionResult,
   BotScreenManager,
   BotScreenTransition,
 } from "./botScreenManager.ts";
 
 
-type AgentToolOutput = {
-  text?: string;
-  imageRef?: string;
-  imageFile?: { mediaType: "image/png" | "image/jpeg"; path: string };
-  windowList?: unknown;
-};
 
 type TakeoverPhase = "running" | "takeover-requested" | "held" | "completing" | "waiting" | "settled";
 type ComputerAuthority = "idle" | "agent" | "web" | "takeover";
@@ -43,7 +38,7 @@ interface PendingAgentTool {
   phase: TakeoverPhase;
   actionDone: Deferred<void>;
   activated: Deferred<void>;
-  completion: Deferred<AgentToolOutput>;
+  completion: Deferred<AgentComputerToolOutput>;
   actionError?: unknown;
   cancellation?: Error;
 }
@@ -319,7 +314,7 @@ export class ComputerBroker {
     input: ComputerSurfaceOwner,
     turnId: string,
     action: ComputerAction,
-  ): Promise<BotScreenActionResult> {
+  ): Promise<BotScreenBoundActionResult> {
     const owner = this.#requireOwner(input);
     const inputAuthority = isInputAction(action.name)
       ? { surfaceId: owner.surfaceId, botId: owner.botId, turnId }
@@ -329,8 +324,8 @@ export class ComputerBroker {
 
   async #recordActionResult(
     owner: ComputerSurfaceOwner,
-    result: BotScreenActionResult,
-  ): Promise<{ text?: string; imageRef?: string; windowList?: unknown }> {
+    result: BotScreenBoundActionResult,
+  ): Promise<AgentComputerToolOutput> {
     let imageRef: string | undefined;
     if (result.image !== undefined) {
       const id = randomUUID();
@@ -346,6 +341,7 @@ export class ComputerBroker {
     }
     this.#event(owner);
     return {
+      desktopSession: result.desktopSession,
       ...(result.text !== undefined ? { text: result.text } : {}),
       ...(imageRef !== undefined ? { imageRef } : {}),
       ...(result.windowList !== undefined ? { windowList: result.windowList } : {}),
@@ -356,7 +352,7 @@ export class ComputerBroker {
     input: ComputerSurfaceOwner,
     turnId: string,
     action: ComputerAction,
-  ): Promise<{ text?: string; imageRef?: string; windowList?: unknown }> {
+  ): Promise<AgentComputerToolOutput> {
     const owner = this.#requireOwner(input);
     return this.#recordActionResult(owner, await this.#invokeAction(owner, turnId, action));
   }
@@ -368,7 +364,7 @@ export class ComputerBroker {
     toolCallId: string,
     action: ComputerAction,
     signal: AbortSignal,
-  ): Promise<AgentToolOutput> {
+  ): Promise<AgentComputerToolOutput> {
     const owner = this.#requireOwner(input);
     return this.#serializeSurfaceOperation(owner.surfaceId, async () => {
       signal.throwIfAborted();
@@ -381,7 +377,7 @@ export class ComputerBroker {
         phase: "running",
         actionDone: deferred<void>(),
         activated: deferred<void>(),
-        completion: deferred<AgentToolOutput>(),
+        completion: deferred<AgentComputerToolOutput>(),
       };
       pending.activated.promise.catch(() => {});
       pending.completion.promise.catch(() => {});
@@ -398,7 +394,7 @@ export class ComputerBroker {
       signal.addEventListener("abort", cancel, { once: true });
 
       try {
-        let initial: BotScreenActionResult;
+        let initial: BotScreenBoundActionResult;
         try {
           await this.revokeWebControl(owner.surfaceId);
           signal.throwIfAborted();
@@ -469,8 +465,8 @@ export class ComputerBroker {
 
   async #withImageFile(
     owner: ComputerSurfaceOwner,
-    result: { text?: string; imageRef?: string; windowList?: unknown },
-  ): Promise<AgentToolOutput> {
+    result: AgentComputerToolOutput,
+  ): Promise<AgentComputerToolOutput> {
     if (result.imageRef === undefined) return result;
     const artifact = this.db
       .query(`SELECT media_type, path FROM artifacts WHERE id = ? AND surface_id = ?`)

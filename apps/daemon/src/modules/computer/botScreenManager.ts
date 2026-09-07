@@ -1,6 +1,6 @@
 import type { Database } from "bun:sqlite";
 import type { ComputerAction, SurfaceId } from "@omarchy-bot/domain";
-import type { ComputerInputAuthority } from "@omarchy-bot/agent-contract";
+import type { AgentComputerToolOutput, ComputerInputAuthority } from "@omarchy-bot/agent-contract";
 import type { ComputerSurfaceOwner } from "./broker.ts";
 
 export type BotScreenLifecycleState = "stopped" | "starting" | "ready" | "failed";
@@ -25,10 +25,22 @@ export interface BotScreenCaptureStream {
   close(): Promise<void>;
 }
 
+/** Opaque expanded-view lease. Bidirectional protocol bytes; no input authority. */
+export interface BotScreenExpandedView {
+  send(bytes: Uint8Array): Promise<void>;
+  receive(): Promise<Uint8Array>;
+  close(): Promise<void>;
+}
+
 export interface BotScreenActionResult {
   text?: string;
   image?: BotScreenCapture;
   windowList?: unknown;
+}
+
+/** Manager-authored identity captured inside the same serialized action as its result. */
+export interface BotScreenBoundActionResult extends BotScreenActionResult {
+  desktopSession: AgentComputerToolOutput["desktopSession"];
 }
 
 export type BotScreenInputContext = Readonly<{
@@ -103,9 +115,12 @@ export interface BotScreenProjectionSource {
   videoWidth: number;
   videoHeight: number;
   scale: number;
+  /** Present only when the runtime opts into RFB expanded viewing. */
+  expandedProjection?: "rfb";
   capture(): Promise<BotScreenCapture>;
   openCaptureStream(): Promise<BotScreenCaptureStream>;
-  setInputAuthority(controllerEpoch: number): Promise<void>;
+  acquireExpandedView(): Promise<BotScreenExpandedView>;
+  setInputAuthority(controllerEpoch: number): Promise<number>;
   input(event: BotScreenInputEvent): Promise<void>;
   releaseInput(controllerEpoch?: number): Promise<void>;
 }
@@ -117,10 +132,12 @@ export interface BotScreenProjectionSource {
  */
 export interface BotScreenRuntime {
   readonly readiness: BotScreenRuntimeReadiness;
+  readonly expandedProjection?: "rfb";
   capture(): Promise<BotScreenCapture>;
   openCaptureStream(): Promise<BotScreenCaptureStream>;
+  acquireExpandedView(): Promise<BotScreenExpandedView>;
   act(action: ComputerAction, inputAuthority?: ComputerInputAuthority): Promise<BotScreenActionResult>;
-  setInputAuthority(controllerEpoch: number): Promise<void>;
+  setInputAuthority(controllerEpoch: number): Promise<number>;
   input(event: BotScreenInputEvent): Promise<void>;
   releaseInput(controllerEpoch?: number): Promise<void>;
   /** Resolves only for an unexpected component exit; deliberate stops are ignored by the manager. */
@@ -324,6 +341,7 @@ export class BotScreenManager {
         videoWidth: Math.round(logicalWidth * scale),
         videoHeight: Math.round(logicalHeight * scale),
         scale,
+        ...(runtime.expandedProjection === undefined ? {} : { expandedProjection: runtime.expandedProjection }),
         capture: () =>
           this.#serialize(owner.surfaceId, async () => {
             currentEntry();
@@ -360,6 +378,43 @@ export class BotScreenManager {
             },
           };
         },
+        acquireExpandedView: async () => {
+          currentEntry();
+          const expandedView = await runtime.acquireExpandedView();
+          let closed = false;
+          try {
+            currentEntry();
+          } catch (error) {
+            await expandedView.close().catch(() => {});
+            throw error;
+          }
+          return {
+            send: async (bytes) => {
+              if (closed) throw new Error("Screen Projection expanded view is closed");
+              currentEntry();
+              await expandedView.send(bytes);
+              currentEntry();
+            },
+            receive: async () => {
+              if (closed) throw new Error("Screen Projection expanded view is closed");
+              try {
+                currentEntry();
+                const bytes = await expandedView.receive();
+                currentEntry();
+                return bytes;
+              } catch (error) {
+                closed = true;
+                await expandedView.close().catch(() => {});
+                throw error;
+              }
+            },
+            close: async () => {
+              if (closed) return;
+              closed = true;
+              await expandedView.close();
+            },
+          };
+        },
         setInputAuthority: (controllerEpoch) =>
           this.#serialize(owner.surfaceId, () =>
             this.#invoke(owner.surfaceId, currentEntry(), () => runtime.setInputAuthority(controllerEpoch))
@@ -381,7 +436,7 @@ export class BotScreenManager {
     owner: ComputerSurfaceOwner,
     action: ComputerAction,
     inputAuthority?: ComputerInputAuthority,
-  ): Promise<BotScreenActionResult> {
+  ): Promise<BotScreenBoundActionResult> {
     if (inputAuthority !== undefined && inputAuthority.surfaceId !== owner.surfaceId) {
       throw new Error("input authority does not belong to this Computer Surface");
     }
@@ -391,11 +446,15 @@ export class BotScreenManager {
       if (runtime === undefined || entry?.runtime !== runtime) {
         throw new Error(this.status(owner).failure ?? "Bot Screen is unavailable");
       }
+      const runtimeGeneration = this.#row(owner.surfaceId).runtime_generation;
       const result = await runtime.act(action, inputAuthority);
       if (this.#entries.get(owner.surfaceId) !== entry || entry.runtime !== runtime) {
         throw new Error(this.status(owner).failure ?? "Bot Screen is unavailable");
       }
-      return result;
+      return {
+        ...result,
+        desktopSession: { botId: owner.botId, surfaceId: owner.surfaceId, runtimeGeneration },
+      };
     });
   }
 

@@ -23,8 +23,10 @@ import { VStack } from "@astryxdesign/core/VStack";
 import type { BotViewDto, ComputerViewDto } from "@omarchy-bot/protocol";
 import {
   ScreenProjectionConnection,
+  type ScreenExpandedView,
   type ScreenProjectionState,
 } from "../lib/screenProjection.ts";
+import RFB from "@novnc/novnc";
 
 export interface ComputerSurfaceProps {
   bot: Pick<BotViewDto, "id" | "name">;
@@ -39,6 +41,10 @@ export interface ComputerSurfaceProps {
   onReturnToBot: () => Promise<boolean>;
 }
 
+
+function expandedViewport(dialog: HTMLDialogElement): Element | null {
+  return dialog.querySelector("[data-testid='computer-expanded-view']");
+}
 
 const STATE_LABELS: Record<ComputerViewDto["state"], string> = {
   starting: "Screen starting",
@@ -122,13 +128,17 @@ const localStyles = stylex.create({
     overflow: "hidden",
     padding: "var(--spacing-3)",
   },
-  webControlImage: {
+  webControlView: {
     display: "block",
-    maxWidth: "100%",
-    maxHeight: "100%",
-    objectFit: "contain",
+    width: "100%",
+    height: "100%",
+    minWidth: 0,
+    minHeight: 0,
     userSelect: "none",
     touchAction: "none",
+  },
+  webControlAction: {
+    color: "inherit",
   },
   webControlToolbar: {
     flexShrink: 0,
@@ -149,6 +159,7 @@ interface ComputerSurfaceContentProps extends Omit<
   screenRetrying: boolean;
   onProjectionRetry: () => void;
   onRetryScreen: () => void;
+  onFramePainted: () => void;
   onExpandPreview?: () => void;
   onTakeControl: () => void;
   onContinueTakeover: () => void;
@@ -170,6 +181,7 @@ function ComputerSurfaceContent({
   screenRetrying,
   onProjectionRetry,
   onRetryScreen,
+  onFramePainted,
   onExpandPreview,
 }: ComputerSurfaceContentProps): JSX.Element {
   const projectionUnavailable = projectionState === "snapshot" || projectionState === "unavailable";
@@ -221,6 +233,7 @@ function ComputerSurfaceContent({
               <img
                 src={frameUrl}
                 alt={`${bot.name} screen`}
+                onLoad={onFramePainted}
                 {...stylex.props(localStyles.image)}
                 data-testid="computer-preview"
               />
@@ -301,7 +314,7 @@ export function ComputerSurface({
   const [projectionState, setProjectionState] = useState<ScreenProjectionState>("closed");
   const [projectionError, setProjectionError] = useState<string>();
   const [frameProjection, setFrameProjection] = useState<{ surfaceId: string; url: string }>();
-  const [videoProjection, setVideoProjection] = useState<{ surfaceId: string; stream: MediaStream }>();
+  const [rfbView, setRfbView] = useState<ScreenExpandedView>();
   const [controlReady, setControlReady] = useState(false);
   const [projectionAttempt, setProjectionAttempt] = useState(0);
   const [screenRetrying, setScreenRetrying] = useState(false);
@@ -310,7 +323,7 @@ export function ComputerSurface({
   const selectedSurfaceRef = useRef(view.surfaceId);
   selectedSurfaceRef.current = view.surfaceId;
   const expandedRef = useRef<HTMLDialogElement | null>(null);
-  const expandedVideoRef = useRef<HTMLVideoElement | null>(null);
+  const expandedViewRef = useRef<HTMLDivElement | null>(null);
   const pressedPointersRef = useRef(new Map<number, number>());
   const browserPasteKeysRef = useRef(new Set<string>());
 
@@ -330,16 +343,7 @@ export function ComputerSurface({
     frameUrlRef.current = next;
     setFrameProjection(next);
   }, []);
-  const replaceVideo = useCallback((surfaceId: string, stream: MediaStream | undefined): void => {
-    if (stream !== undefined && selectedSurfaceRef.current !== surfaceId) return;
-    setVideoProjection((projection) =>
-      stream === undefined
-        ? projection?.surfaceId === surfaceId ? undefined : projection
-        : { surfaceId, stream }
-    );
-  }, []);
   const frameUrl = frameProjection?.surfaceId === view.surfaceId ? frameProjection.url : undefined;
-  const videoStream = videoProjection?.surfaceId === view.surfaceId ? videoProjection.stream : undefined;
   const clearBrowserHeldInput = useCallback((): void => {
     for (const pointerId of pressedPointersRef.current.keys()) {
       if (expandedRef.current?.hasPointerCapture(pointerId)) {
@@ -367,7 +371,7 @@ export function ComputerSurface({
       connectionRef.current?.close();
       connectionRef.current = undefined;
       replaceFrame(view.surfaceId, undefined);
-      replaceVideo(view.surfaceId, undefined);
+      setRfbView(undefined);
       setControlReady(false);
       setProjectionState("closed");
       return;
@@ -382,12 +386,19 @@ export function ComputerSurface({
           if (selectedSurfaceRef.current !== surfaceId) return;
           setProjectionState(state);
           if (state === "unavailable") setScreenRetrying(false);
+          if (state === "snapshot" || state === "unavailable") {
+            setPreviewExpanded(false);
+            setRfbView(undefined);
+            setControlReady(false);
+          }
         },
         onError: (error) => {
           if (selectedSurfaceRef.current === surfaceId) setProjectionError(error);
         },
         onFrame: (frame) => replaceFrame(surfaceId, frame),
-        onVideo: (stream) => replaceVideo(surfaceId, stream),
+        onExpandedView: (view) => {
+          if (selectedSurfaceRef.current === surfaceId) setRfbView(view);
+        },
         onControlRevoked: clearBrowserHeldInput,
         onControlStateChange: (active) => {
           if (selectedSurfaceRef.current === surfaceId) setControlReady(active);
@@ -406,7 +417,7 @@ export function ComputerSurface({
       if (connectionRef.current === connection) connectionRef.current = undefined;
       connection.close();
       replaceFrame(surfaceId, undefined);
-      replaceVideo(surfaceId, undefined);
+      setRfbView(undefined);
     };
   }, [
     bot.id,
@@ -415,7 +426,6 @@ export function ComputerSurface({
     projectionUrl,
     screenRetrying,
     replaceFrame,
-    replaceVideo,
     view.state === "unavailable",
     view.unavailableReason,
     view.surfaceId,
@@ -436,38 +446,40 @@ export function ComputerSurface({
   useEffect(() => {
     const dialog = expandedRef.current;
     if (dialog === null) return;
-    const shouldOpen = !isSmallScreen && previewExpanded && videoStream !== undefined;
+    const shouldOpen = !isSmallScreen && previewExpanded && rfbView !== undefined;
     if (shouldOpen && !dialog.open) dialog.showModal();
     else if (!shouldOpen && dialog.open) dialog.close();
-  }, [isSmallScreen, previewExpanded, videoStream]);
+  }, [isSmallScreen, previewExpanded, rfbView]);
 
   useEffect(() => {
-    const video = expandedVideoRef.current;
+    const host = expandedViewRef.current;
     const connection = connectionRef.current;
-    if (video === null || videoStream === undefined || connection === undefined || !previewExpanded) return;
-    video.srcObject = videoStream;
-    void video.play().catch(() => {});
-    let callback: number;
-    const painted: VideoFrameRequestCallback = (now, metadata) => {
-      const captureTime = "captureTime" in metadata && typeof metadata.captureTime === "number"
-        ? metadata.captureTime
-        : undefined;
-      connection.videoFramePainted(
-        video.videoWidth,
-        video.videoHeight,
-        captureTime === undefined ? { paintedAt: now } : { captureTime, paintedAt: now },
-      );
-      callback = video.requestVideoFrameCallback(painted);
+    if (host === null || rfbView === undefined || connection === undefined || !previewExpanded) return;
+    let disposed = false;
+    let client: RFB;
+    try {
+      client = new RFB(host, rfbView.url, { viewOnly: true, scaleViewport: true });
+    } catch {
+      connection.expandedFailed(rfbView);
+      return;
+    }
+    const connected = (): void => connection.expandedConnected(rfbView);
+    const failed = (): void => {
+      if (!disposed) connection.expandedFailed(rfbView);
     };
-    const decodeFailed = (): void => connection.videoDecodeFailed();
-    video.addEventListener("error", decodeFailed);
-    callback = video.requestVideoFrameCallback(painted);
+    client.addEventListener("connect", connected);
+    client.addEventListener("disconnect", failed);
+    client.addEventListener("securityfailure", failed);
+    client.viewOnly = true;
+    client.scaleViewport = true;
     return () => {
-      video.removeEventListener("error", decodeFailed);
-      video.cancelVideoFrameCallback(callback);
-      video.srcObject = null;
+      disposed = true;
+      client.removeEventListener("connect", connected);
+      client.removeEventListener("disconnect", failed);
+      client.removeEventListener("securityfailure", failed);
+      client.disconnect();
     };
-  }, [previewExpanded, videoStream]);
+  }, [previewExpanded, rfbView]);
 
   useEffect(() => {
     if (isSmallScreen || !previewExpanded) return;
@@ -519,24 +531,24 @@ export function ComputerSurface({
   }, [previewExpanded, requestClose]);
 
   const sendExpandedMotion = (event: ReactPointerEvent<HTMLDialogElement>): void => {
-    const video = event.currentTarget.querySelector("video");
+    const viewport = expandedViewport(event.currentTarget);
     const overControl = event.target instanceof Element && event.target.closest("button") !== null;
-    if (video === null || (overControl && !pressedPointersRef.current.has(event.pointerId))) return;
+    if (viewport === null || (overControl && !pressedPointersRef.current.has(event.pointerId))) return;
     connectionRef.current?.pointerMotion(
       event.clientX,
       event.clientY,
-      video,
+      viewport,
       pressedPointersRef.current.has(event.pointerId),
     );
   };
   const pressExpandedPointer = (event: ReactPointerEvent<HTMLDialogElement>): void => {
     if (event.target instanceof Element && event.target.closest("button") !== null) return;
-    const video = event.currentTarget.querySelector("video");
-    if (video === null || event.button < 0 || event.button > 2) return;
+    const viewport = expandedViewport(event.currentTarget);
+    if (viewport === null || event.button < 0 || event.button > 2) return;
     const sent = connectionRef.current?.pointerButton(
       event.clientX,
       event.clientY,
-      video,
+      viewport,
       event.button,
       "pressed",
     ) ?? false;
@@ -548,11 +560,11 @@ export function ComputerSurface({
   const releaseExpandedPointer = (event: ReactPointerEvent<HTMLDialogElement>): void => {
     const button = pressedPointersRef.current.get(event.pointerId);
     if (button === undefined) return;
-    const video = event.currentTarget.querySelector("video");
-    const sent = video !== null && connectionRef.current?.pointerButton(
+    const viewport = expandedViewport(event.currentTarget);
+    const sent = viewport !== null && connectionRef.current?.pointerButton(
       event.clientX,
       event.clientY,
-      video,
+      viewport,
       button,
       "released",
     ) === true;
@@ -564,10 +576,10 @@ export function ComputerSurface({
   };
   const scrollExpandedPointer = (event: ReactWheelEvent<HTMLDialogElement>): void => {
     if (event.target instanceof Element && event.target.closest("button") !== null) return;
-    const video = event.currentTarget.querySelector("video");
-    if (video === null) return;
+    const viewport = expandedViewport(event.currentTarget);
+    if (viewport === null) return;
     event.preventDefault();
-    connectionRef.current?.pointerScroll(event.clientX, event.clientY, video, event.deltaX, event.deltaY);
+    connectionRef.current?.pointerScroll(event.clientX, event.clientY, viewport, event.deltaX, event.deltaY);
   };
   const suppressExpandedMenu = (event: ReactMouseEvent<HTMLDialogElement>): void => {
     if (!(event.target instanceof Element) || event.target.closest("button") === null) event.preventDefault();
@@ -642,6 +654,7 @@ export function ComputerSurface({
         setProjectionAttempt((attempt) => attempt + 1);
       }}
       onRetryScreen={retryUnavailableScreen}
+      onFramePainted={() => connectionRef.current?.previewPainted()}
       {...(!isSmallScreen && frameUrl !== undefined && projectionState === "preview"
         ? {
             onExpandPreview:
@@ -652,7 +665,7 @@ export function ComputerSurface({
         : {})}
     />
   );
-  const expandedDialog = videoStream === undefined ? null : (
+  const expandedDialog = rfbView === undefined ? null : (
     <dialog
       ref={expandedRef}
       aria-label={`Web Control for ${bot.name}`}
@@ -675,21 +688,18 @@ export function ComputerSurface({
     >
       <div {...stylex.props(localStyles.webControlShell)}>
         <div {...stylex.props(localStyles.webControlViewport)}>
-          <video
-            ref={expandedVideoRef}
+          <div
+            ref={expandedViewRef}
             aria-label={`Web Control for ${bot.name}`}
-            autoPlay
-            playsInline
-            muted
-            {...stylex.props(localStyles.webControlImage)}
-            data-testid="computer-expanded-video"
+            {...stylex.props(localStyles.webControlView)}
+            data-testid="computer-expanded-view"
           />
         </div>
         <HStack gap={2} padding={3} vAlign="center" wrap="wrap" xstyle={localStyles.webControlToolbar}>
           <StackItem size="fill">
             <HStack gap={2} vAlign="center" wrap="wrap">
-              <Text>{bot.name}’s screen</Text>
-              <Text color="secondary">
+              <Text color="inherit">{bot.name}’s screen</Text>
+              <Text color="inherit">
                 {controlReady ? "Click, scroll, or type to control" : "Connecting controls…"}
               </Text>
             </HStack>
@@ -706,6 +716,7 @@ export function ComputerSurface({
           <IconButton
             label="Close Web Control"
             tooltip="Close Web Control"
+            xstyle={localStyles.webControlAction}
             icon={<Icon icon="close" size="md" color="inherit" />}
             variant="ghost"
             onClick={() => setPreviewExpanded(false)}

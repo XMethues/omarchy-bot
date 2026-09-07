@@ -9,9 +9,11 @@ import { TurnService } from "../modules/turns/turns.ts";
 import { MailboxService } from "../modules/mailbox/mailbox.ts";
 import { ComputerBroker } from "../modules/computer/broker.ts";
 import { BotScreenManager, type BotScreenRuntimeAdapter } from "../modules/computer/botScreenManager.ts";
-import { CageBotScreenRuntimeAdapter } from "../modules/computer/cageBotScreenRuntime.ts";
-import { PortableCageRuntimeSupply } from "../modules/computer/cageRuntimeSupply.ts";
+import { BOT_DESKTOP_ROLLOUT } from "../modules/computer/botDesktopRollout.ts";
+import { prepareSwayProductionCutover } from "../modules/computer/leftoverCage.ts";
 import { ScreenProjectionService } from "../modules/computer/screenProjection.ts";
+import { SwayBotScreenRuntimeAdapter } from "../modules/computer/swayBotScreenRuntime.ts";
+import { PortableSwayRuntimeSupply } from "../modules/computer/swayRuntimeSupply.ts";
 import { InputDiagnostics } from "../modules/computer/inputDiagnostics.ts";
 import { AvatarService } from "../modules/avatars/avatarService.ts";
 import { DictationService } from "../modules/dictation/dictationService.ts";
@@ -72,15 +74,24 @@ export async function main(options: MainOptions = {}): Promise<{
       computer: process.env.OMARCHY_BOT_COMPUTER_WORKER_DIR ?? path.resolve(agentsDir, "computer"),
     },
   );
-  const productionScreenAdapter = new CageBotScreenRuntimeAdapter({
+  if (options.botScreenAdapter === undefined) {
+    await prepareSwayProductionCutover(cfg.botScreenRuntimeDir);
+  }
+  const productionScreenAdapter = new SwayBotScreenRuntimeAdapter({
     runtimeRoot: cfg.botScreenRuntimeDir,
     profileRoot: cfg.botScreenProfileDir,
     computerWorkers: supervisor,
-    runtimeSupply: new PortableCageRuntimeSupply({ rootDir: cfg.botScreenRuntimeSupplyDir }),
+    runtimeSupply: new PortableSwayRuntimeSupply({ rootDir: cfg.botScreenSwayRuntimeSupplyDir }),
     ...(applicationUnitRuntimeDir === undefined ? {} : { hostRuntimeDir: applicationUnitRuntimeDir }),
-    ...(process.env.OMARCHY_BOT_CAGE_BIN === undefined
+    ...(process.env.OMARCHY_BOT_SWAY_BIN === undefined
       ? {}
-      : { cageBin: process.env.OMARCHY_BOT_CAGE_BIN }),
+      : { swayBin: process.env.OMARCHY_BOT_SWAY_BIN }),
+    ...(process.env.OMARCHY_BOT_SWAYMSG_BIN === undefined
+      ? {}
+      : { swaymsgBin: process.env.OMARCHY_BOT_SWAYMSG_BIN }),
+    ...(process.env.OMARCHY_BOT_WAYVNC_BIN === undefined
+      ? {}
+      : { wayvncBin: process.env.OMARCHY_BOT_WAYVNC_BIN }),
     ...(process.env.OMARCHY_BOT_WLR_RANDR_BIN === undefined
       ? {}
       : { wlrRandrBin: process.env.OMARCHY_BOT_WLR_RANDR_BIN }),
@@ -96,7 +107,6 @@ export async function main(options: MainOptions = {}): Promise<{
     ...(process.env.OMARCHY_BOT_DESKTOP_BIN === undefined
       ? {}
       : { botDesktopBin: process.env.OMARCHY_BOT_DESKTOP_BIN }),
-    ...(cfg.botScreenFfmpegBin === undefined ? {} : { ffmpegBin: cfg.botScreenFfmpegBin }),
   });
   const screens = new BotScreenManager(
     db,
@@ -133,10 +143,6 @@ export async function main(options: MainOptions = {}): Promise<{
     (owner) => computer.canAcceptWebControl(owner),
     (owner) => computer.webControlClaimed(owner),
     (owner) => computer.webControlReleased(owner),
-    cfg.botScreenFrameRate,
-    cfg.botScreenWebRtcPort,
-    applicationUnitRuntimeDir,
-    cfg.botScreenFfmpegBin,
   );
   const botDeletions = new BotDeletionService(
     db,
@@ -178,14 +184,24 @@ export async function main(options: MainOptions = {}): Promise<{
   };
   const http = startHttp(svc);
 
+  const writeStatus = (): void => {
+    writeStatusAtomic(cfg.statusPath, {
+      ts: new Date().toISOString(),
+      agents: agents.list().map((a) => ({ id: a.id, status: a.status })),
+      computer: computer.states(),
+      botDesktopRollout: BOT_DESKTOP_ROLLOUT,
+    });
+  };
+  try {
+    writeStatus();
+  } catch {
+    /* status file is best-effort */
+  }
+
   // Periodic status file for the future bar widget (decoupled pattern from research.md §3).
   const statusTimer = setInterval(() => {
     try {
-      writeStatusAtomic(cfg.statusPath, {
-        ts: new Date().toISOString(),
-        agents: agents.list().map((a) => ({ id: a.id, status: a.status })),
-        computer: computer.states(),
-      });
+      writeStatus();
     } catch {
       /* status file is best-effort */
     }

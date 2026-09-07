@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type { AgentComputerToolContext } from "../../packages/agent-contract/src/index.ts";
+import type { AgentComputerToolContext, AgentComputerToolOutput } from "../../packages/agent-contract/src/index.ts";
 import { isSurfaceId } from "../../packages/domain/src/ids.ts";
 import { createComputerTool } from "../../workers/pi/src/computer-tool.ts";
 
@@ -16,8 +16,50 @@ const binding = {
   workerSessionId: "worker-session-1",
   surfaceId,
 };
+const desktopSession = { botId: binding.botId, surfaceId, runtimeGeneration: 1 };
+const desktopContextText = `Bot Desktop Session: ${JSON.stringify(desktopSession)}`;
 
 describe("Pi SDK Omarchy computer tool", () => {
+  test("explains the desktop session map before any computer action", () => {
+    const tool = createComputerTool(() => binding, {
+      request: async () => ({ desktopSession, text: "unused" }),
+    });
+    const instructions = [tool.description, tool.promptSnippet, ...(tool.promptGuidelines ?? [])].join("\n");
+
+    expect(instructions).toContain("Host Session");
+    expect(instructions).toContain("Native Session");
+    expect(instructions).toContain("Bot Desktop Session");
+    expect(instructions).toContain("WAYLAND_DISPLAY");
+    expect(instructions).toContain("Hyprland");
+    expect(instructions).toMatch(/gray|blank/);
+    expect(instructions).not.toMatch(/\bCage\b/);
+  });
+
+  test("exposes current desktop identity in model content, not just tool details", async () => {
+    let runtimeGeneration = 1;
+    const tool = createComputerTool(() => binding, {
+      request: async () => ({
+        desktopSession: { ...desktopSession, runtimeGeneration },
+        windowList: [],
+      }),
+    });
+    for (const generation of [1, 2]) {
+      runtimeGeneration = generation;
+      const result = await tool.execute(
+        `observe-generation-${generation}`,
+        { action: "observe" },
+        undefined,
+        undefined,
+        undefined as never,
+      );
+      const content = result.content.filter((item) => item.type === "text").map((item) => item.text).join("\n");
+      expect(content).toContain(binding.botId);
+      expect(content).toContain(surfaceId);
+      expect(content).toContain(`"runtimeGeneration":${generation}`);
+      expect(content).toContain("Windows: []");
+    }
+  });
+
   test("passes the SDK tool-call id with the immutable daemon turn binding", async () => {
     const calls: Array<{ context: AgentComputerToolContext; action: unknown }> = [];
     const tool = createComputerTool(
@@ -25,7 +67,7 @@ describe("Pi SDK Omarchy computer tool", () => {
       {
         request: async (context, action) => {
           calls.push({ context, action });
-          return { text: "owned screen observed" };
+          return { desktopSession, text: "owned screen observed" };
         },
       },
     );
@@ -44,16 +86,12 @@ describe("Pi SDK Omarchy computer tool", () => {
       context: { ...binding, toolCallId: "sdk-tool-call-7" },
       action: { name: "observe", args: {} },
     }]);
-    expect(result.content).toEqual([{ type: "text", text: "owned screen observed" }]);
+    expect(result.content).toEqual([{ type: "text", text: `${desktopContextText}\nowned screen observed` }]);
   });
 
   test("keeps the native tool execution pending until Takeover returns a fresh observation", async () => {
     const requested = Promise.withResolvers<void>();
-    const returned = Promise.withResolvers<{
-      text: string;
-      imageRef: string;
-      windowList: Array<{ title: string; focused: boolean }>;
-    }>();
+    const returned = Promise.withResolvers<AgentComputerToolOutput>();
     let completionCount = 0;
     const tool = createComputerTool(
       () => binding,
@@ -79,6 +117,7 @@ describe("Pi SDK Omarchy computer tool", () => {
     expect(completionCount).toBe(0);
 
     returned.resolve({
+      desktopSession,
       text: "fresh desktop observation",
       imageRef: "fresh-snapshot",
       windowList: [{ title: "Verification", focused: true }],
@@ -88,12 +127,14 @@ describe("Pi SDK Omarchy computer tool", () => {
     expect(result.content).toEqual([{
       type: "text",
       text: [
+        desktopContextText,
         "fresh desktop observation",
         "Bot Screen snapshot artifact: fresh-snapshot",
         'Windows: [{\"title\":\"Verification\",\"focused\":true}]',
       ].join("\n"),
     }]);
     expect(result.details).toEqual({
+      desktopSession,
       text: "fresh desktop observation",
       imageRef: "fresh-snapshot",
       windowList: [{ title: "Verification", focused: true }],
@@ -109,6 +150,7 @@ describe("Pi SDK Omarchy computer tool", () => {
         () => binding,
         {
           request: async () => ({
+            desktopSession,
             imageRef: "artifact-7",
             imageFile: { mediaType: "image/png", path: imagePath },
           }),
@@ -124,10 +166,10 @@ describe("Pi SDK Omarchy computer tool", () => {
       );
 
       expect(result.content).toEqual([
-        { type: "text", text: "Bot Screen snapshot artifact: artifact-7" },
+        { type: "text", text: `${desktopContextText}\nBot Screen snapshot artifact: artifact-7` },
         { type: "image", data: "AQID", mimeType: "image/png" },
       ]);
-      expect(result.details).toEqual({ imageRef: "artifact-7" });
+      expect(result.details).toEqual({ desktopSession, imageRef: "artifact-7" });
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -141,7 +183,7 @@ describe("Pi SDK Omarchy computer tool", () => {
       {
         request: async () => {
           dispatches += 1;
-          return {};
+          return { desktopSession };
         },
       },
     );

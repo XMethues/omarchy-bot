@@ -9,6 +9,7 @@ import type {
   BotScreenRuntimeAdapter,
 } from "../../apps/daemon/src/modules/computer/botScreenManager.ts";
 import { api, makeBot, sendToBot, startDaemon, waitThreadIdle, type Harness } from "./helpers/harness.ts";
+import { createComputerTool } from "../../workers/pi/src/computer-tool.ts";
 
 interface RecordedAction {
   surfaceId: SurfaceId;
@@ -110,6 +111,9 @@ class AgentToolRuntimeAdapter implements BotScreenRuntimeAdapter {
         }),
         close: async () => {},
       }),
+      acquireExpandedView: async () => {
+        throw new Error("test Bot Screen does not provide an expanded-view stream");
+      },
       act: async (action) => {
         const count = (this.inFlight.get(provision.surfaceId) ?? 0) + 1;
         this.inFlight.set(provision.surfaceId, count);
@@ -139,7 +143,7 @@ class AgentToolRuntimeAdapter implements BotScreenRuntimeAdapter {
             : {}),
         };
       },
-      setInputAuthority: async () => {},
+      setInputAuthority: async (epoch) => epoch,
       input: async () => {},
       releaseInput: async () => {
         this.releases.push(provision.surfaceId);
@@ -188,6 +192,40 @@ describe("Bot-bound Pi computer tool", () => {
   afterEach(async () => {
     await h?.stop();
     h = undefined;
+  });
+
+  test("Pi receives the actual desktop generation after a desktop restart without changing conversation binding", async () => {
+    const adapter = new AgentToolRuntimeAdapter();
+    h = await startDaemon(undefined, { botScreenAdapter: adapter });
+    const botId = await makeBot(h, "Desktop identity Bot");
+    const surfaceId = await botSurface(h, botId);
+    const otherBotId = await makeBot(h, "Unobserved Bot");
+    const otherSurfaceId = await botSurface(h, otherBotId);
+    const owner = { botId, surfaceId };
+    const binding = { ...owner, turnId: "identity-turn", workerSessionId: "same-conversation" };
+    const broker = h.svc.computer;
+    const tool = createComputerTool(() => binding, {
+      request: (context, action, signal) =>
+        broker.agentToolAct(owner, context.turnId, context.toolCallId, action, signal ?? new AbortController().signal),
+    });
+
+    expect(h.svc.screens.status(owner)).toEqual({ state: "stopped" });
+    for (const runtimeGeneration of [1, 2]) {
+      const result = await tool.execute(
+        `identity-${runtimeGeneration}`,
+        { action: "observe" },
+        undefined,
+        undefined,
+        undefined as never,
+      );
+      expect(result.details.desktopSession).toEqual({ ...owner, runtimeGeneration });
+      const text = result.content.filter((item) => item.type === "text").map((item) => item.text).join("\n");
+      expect(text).toContain(JSON.stringify({ ...owner, runtimeGeneration }));
+      expect(text).not.toContain(otherSurfaceId);
+      expect(result.content.some((item) => item.type === "image")).toBeTrue();
+      if (runtimeGeneration === 1) await h.svc.screens.destroy(surfaceId);
+    }
+    expect(h.svc.screens.status({ botId: otherBotId, surfaceId: otherSurfaceId })).toEqual({ state: "stopped" });
   });
 
   test("a public Agent turn observes and inputs only through its owning Bot Screen", async () => {

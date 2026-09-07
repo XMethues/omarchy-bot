@@ -1,0 +1,736 @@
+{
+  "schemaVersion": 1,
+  "kind": "sway-two-bot-conformance",
+  "generatedAt": "2026-09-07T16:49:44.024Z",
+  "status": "complete",
+  "cutover": "go",
+  "command": "OMARCHY_BOT_REAL_SWAY=1 bun test tests/integration/bot-screen-sway-conformance.test.ts",
+  "checks": [
+    {
+      "id": "two-real-sway-sessions",
+      "passed": true,
+      "evidence": "both Screens ready in 104.82ms, 102.82ms"
+    },
+    {
+      "id": "distinct-apps-and-private-state",
+      "passed": true,
+      "evidence": "distinct pixels=true; private markers=true; A windows=Bot Desktop|BOT-A-TERM|BOT-A; B windows=Bot Desktop|BOT-B-TERM|BOT-B; markers=/tmp/omarchy-bot-sway-home-a8JIo2/screens/surf_912035d2bc2c4e728c386d53a7c60fa4/config|/tmp/omarchy-bot-sway-home-a8JIo2/r/surf_912035d2bc2c4e728c386d53a7c60fa4/1|wayland-1 || /tmp/omarchy-bot-sway-home-a8JIo2/screens/surf_11e761d566e140658e3463f5c1407a56/config|/tmp/omarchy-bot-sway-home-a8JIo2/r/surf_11e761d566e140658e3463f5c1407a56/1|wayland-1"
+    },
+    {
+      "id": "agent-without-viewer",
+      "passed": true,
+      "evidence": "observe/list/focus/click/scroll/chord passed; sibling focus and title preserved; exact browser and terminal Unicode=你好, world"
+    },
+    {
+      "id": "preview-no-wayvnc",
+      "passed": true,
+      "evidence": "preview sequence=1 bytes=34966; wayvnc processes=0"
+    },
+    {
+      "id": "rfb-view-only-and-broker",
+      "passed": true,
+      "evidence": "RFB negotiated=true bytes=3686464; RFB mutation rejected=true; Broker mutated=true; titles=BOT-A click:1 -> BOT-A click:1 -> BOT-A click:2"
+    },
+    {
+      "id": "multiple-viewers",
+      "passed": true,
+      "evidence": "second viewer negotiated=true; wayvnc processes=1; first viewer preserved=true"
+    },
+    {
+      "id": "bot-switching",
+      "passed": true,
+      "evidence": "Bot B RFB negotiated=true; Bot A and Bot B screenshots stayed distinct"
+    },
+    {
+      "id": "component-failure-fallback",
+      "passed": true,
+      "evidence": "projection failure=rfb-bridge-failed; snapshotFallback=true; desktop=ready; wayvncPid=1041838"
+    },
+    {
+      "id": "real-browser-projection",
+      "passed": true,
+      "evidence": "actual noVNC painted Bot A and Broker-driven marker change; first paint 353.13ms, input-to-paint 94.19ms"
+    },
+    {
+      "id": "background-and-unsaved",
+      "passed": true,
+      "evidence": "same window/generation and exact unsaved field retained; counter 18 -> 20"
+    },
+    {
+      "id": "agent-open-url",
+      "passed": true,
+      "evidence": "open_url displayed the requested local page in Bot A without adding a Bot B window"
+    },
+    {
+      "id": "delete-reprovision-cleanup",
+      "passed": true,
+      "evidence": "deleted A; sibling ready=true; replacement ready; runtime gone=true"
+    },
+    {
+      "id": "complete-cleanup",
+      "passed": true,
+      "evidence": "no leftover surface-scoped processes"
+    },
+    {
+      "id": "host-session-isolation",
+      "passed": true,
+      "evidence": "host compositor PID 1470 and WAYLAND_DISPLAY/SWAYSOCK unchanged"
+    }
+  ],
+  "limitations": [
+    "Daemon and test harness share one process; daemon cost is not a split.",
+    "Host /proc/net/dev is whole-host interface counters, not WayVNC-unix attribution.",
+    "RFB frame/drop accounting is message-byte presence on the view channel, not an H.264 encoder pipeline.",
+    "Historical Cage/Xvnc numeric rows were not compared.",
+    "Human-only: Original Omarchy top bar remains clickable and visually available during Bot desktop start, work, switching, failure, and cleanup",
+    "Human-only: Existing Omarchy keyboard shortcuts continue to fire in the Host Session through the same lifecycle",
+    "Human-only: Ordinary host focus and physical pointer/keyboard input stay independent of Bot-generated input",
+    "Human-only: The user can switch Bots while using the host desktop and confirm selected pixels/input belong to the correct Bot",
+    "Human-only: Sibling Bot screenshots or service existence do not prove host usability"
+  ],
+  "resourceScenarios": {
+    "zeroGraphicalUse": {
+      "ran": true,
+      "notes": [
+        "Bots not yet created; daemon/harness only."
+      ],
+      "attribution": {
+        "swayInfrastructure": {
+          "pssMiB": 0,
+          "swapPssMiB": 0,
+          "rssMiB": 0,
+          "cpuPercent": 0,
+          "processes": 0
+        },
+        "wayvncProjection": {
+          "pssMiB": 0,
+          "swapPssMiB": 0,
+          "rssMiB": 0,
+          "cpuPercent": 0,
+          "processes": 0
+        },
+        "applicationAgent": {
+          "pssMiB": 0,
+          "swapPssMiB": 0,
+          "rssMiB": 0,
+          "cpuPercent": 0,
+          "processes": 0
+        },
+        "daemon": {
+          "pssMiB": 95.67,
+          "swapPssMiB": 0,
+          "rssMiB": 125.45,
+          "cpuPercent": 2.66,
+          "processes": 1
+        },
+        "harnessNote": "daemon and test harness share this process; daemon bucket is the combined measurement",
+        "unknown": {
+          "pssMiB": 0,
+          "swapPssMiB": 0,
+          "rssMiB": 0,
+          "cpuPercent": 0,
+          "processes": 0
+        },
+        "wholeScenario": {
+          "pssMiB": 95.67,
+          "swapPssMiB": 0,
+          "rssMiB": 125.45,
+          "cpuPercent": 2.66,
+          "processes": 1
+        }
+      },
+      "network": {
+        "rxBytes": 2542645,
+        "txBytes": 3847843
+      }
+    },
+    "retainedUnviewedDesktops": {
+      "ran": true,
+      "notes": [
+        "Two Sway sessions ready, no Computer Preview or expanded viewer."
+      ],
+      "attribution": {
+        "swayInfrastructure": {
+          "pssMiB": 29.98,
+          "swapPssMiB": 0,
+          "rssMiB": 84.69,
+          "cpuPercent": 0,
+          "processes": 6
+        },
+        "wayvncProjection": {
+          "pssMiB": 0,
+          "swapPssMiB": 0,
+          "rssMiB": 0,
+          "cpuPercent": 0,
+          "processes": 0
+        },
+        "applicationAgent": {
+          "pssMiB": 14.46,
+          "swapPssMiB": 0,
+          "rssMiB": 46.12,
+          "cpuPercent": 0,
+          "processes": 2
+        },
+        "daemon": {
+          "pssMiB": 96.08,
+          "swapPssMiB": 0,
+          "rssMiB": 131.38,
+          "cpuPercent": 3.33,
+          "processes": 1
+        },
+        "harnessNote": "daemon and test harness share this process; daemon bucket is the combined measurement",
+        "unknown": {
+          "pssMiB": 0,
+          "swapPssMiB": 0,
+          "rssMiB": 0,
+          "cpuPercent": 0,
+          "processes": 0
+        },
+        "wholeScenario": {
+          "pssMiB": 140.52,
+          "swapPssMiB": 0,
+          "rssMiB": 262.19,
+          "cpuPercent": 3.33,
+          "processes": 9
+        }
+      },
+      "network": {
+        "rxBytes": 6035859,
+        "txBytes": 6027785
+      },
+      "latency": {
+        "coldRequestToReadyMs": {
+          "samples": [
+            104.82,
+            102.82
+          ],
+          "min": 102.82,
+          "p50": 102.82,
+          "p95": 104.82,
+          "max": 104.82
+        }
+      }
+    },
+    "previewOnly": {
+      "ran": true,
+      "notes": [
+        "Compact preview PNG delivered on the control WebSocket; WayVNC stayed down."
+      ],
+      "attribution": {
+        "swayInfrastructure": {
+          "pssMiB": 36.18,
+          "swapPssMiB": 0,
+          "rssMiB": 111.1,
+          "cpuPercent": 0,
+          "processes": 6
+        },
+        "wayvncProjection": {
+          "pssMiB": 0,
+          "swapPssMiB": 0,
+          "rssMiB": 0,
+          "cpuPercent": 0,
+          "processes": 0
+        },
+        "applicationAgent": {
+          "pssMiB": 330.7,
+          "swapPssMiB": 0,
+          "rssMiB": 1439.12,
+          "cpuPercent": 5,
+          "processes": 18
+        },
+        "daemon": {
+          "pssMiB": 101.16,
+          "swapPssMiB": 0,
+          "rssMiB": 137.26,
+          "cpuPercent": 64.96,
+          "processes": 1
+        },
+        "harnessNote": "daemon and test harness share this process; daemon bucket is the combined measurement",
+        "unknown": {
+          "pssMiB": 248.96,
+          "swapPssMiB": 0,
+          "rssMiB": 1299.51,
+          "cpuPercent": 0,
+          "processes": 8
+        },
+        "wholeScenario": {
+          "pssMiB": 717,
+          "swapPssMiB": 0,
+          "rssMiB": 2986.99,
+          "cpuPercent": 69.96,
+          "processes": 33
+        }
+      },
+      "network": {
+        "rxBytes": 64328,
+        "txBytes": 9622
+      },
+      "latency": {
+        "firstPreviewMs": {
+          "samples": [
+            30.39
+          ],
+          "min": 30.39,
+          "p50": 30.39,
+          "p95": 30.39,
+          "max": 30.39
+        }
+      }
+    },
+    "oneExpandedProjection": {
+      "ran": true,
+      "notes": [
+        "Bot A negotiated bidirectional RFB, Bot B retained unviewed."
+      ],
+      "attribution": {
+        "swayInfrastructure": {
+          "pssMiB": 43.68,
+          "swapPssMiB": 0,
+          "rssMiB": 122.6,
+          "cpuPercent": 0,
+          "processes": 6
+        },
+        "wayvncProjection": {
+          "pssMiB": 25.18,
+          "swapPssMiB": 0,
+          "rssMiB": 49.53,
+          "cpuPercent": 0,
+          "processes": 1
+        },
+        "applicationAgent": {
+          "pssMiB": 332.89,
+          "swapPssMiB": 0,
+          "rssMiB": 1447.17,
+          "cpuPercent": 1.34,
+          "processes": 18
+        },
+        "daemon": {
+          "pssMiB": 113.19,
+          "swapPssMiB": 0,
+          "rssMiB": 149.38,
+          "cpuPercent": 9.33,
+          "processes": 1
+        },
+        "harnessNote": "daemon and test harness share this process; daemon bucket is the combined measurement",
+        "unknown": {
+          "pssMiB": 255.83,
+          "swapPssMiB": 0,
+          "rssMiB": 1312.8,
+          "cpuPercent": 2.67,
+          "processes": 8
+        },
+        "wholeScenario": {
+          "pssMiB": 770.77,
+          "swapPssMiB": 0,
+          "rssMiB": 3081.48,
+          "cpuPercent": 13.34,
+          "processes": 34
+        }
+      },
+      "network": {
+        "rxBytes": 3286152,
+        "txBytes": 50121
+      },
+      "latency": {
+        "firstExpandedMs": {
+          "samples": [
+            102.99
+          ],
+          "min": 102.99,
+          "p50": 102.99,
+          "p95": 102.99,
+          "max": 102.99
+        }
+      }
+    },
+    "backgroundWork": {
+      "ran": true,
+      "notes": [
+        "Bot B received Agent input while both desktops stayed alive."
+      ],
+      "attribution": {
+        "swayInfrastructure": {
+          "pssMiB": 43.71,
+          "swapPssMiB": 0,
+          "rssMiB": 119.11,
+          "cpuPercent": 0,
+          "processes": 6
+        },
+        "wayvncProjection": {
+          "pssMiB": 0,
+          "swapPssMiB": 0,
+          "rssMiB": 0,
+          "cpuPercent": 0,
+          "processes": 0
+        },
+        "applicationAgent": {
+          "pssMiB": 333.67,
+          "swapPssMiB": 0,
+          "rssMiB": 1449.41,
+          "cpuPercent": 3.34,
+          "processes": 18
+        },
+        "daemon": {
+          "pssMiB": 113.79,
+          "swapPssMiB": 0,
+          "rssMiB": 150.14,
+          "cpuPercent": 9.99,
+          "processes": 1
+        },
+        "harnessNote": "daemon and test harness share this process; daemon bucket is the combined measurement",
+        "unknown": {
+          "pssMiB": 264.25,
+          "swapPssMiB": 0,
+          "rssMiB": 1321.4,
+          "cpuPercent": 4,
+          "processes": 8
+        },
+        "wholeScenario": {
+          "pssMiB": 755.42,
+          "swapPssMiB": 0,
+          "rssMiB": 3040.06,
+          "cpuPercent": 17.33,
+          "processes": 33
+        }
+      },
+      "network": {
+        "rxBytes": 4886778,
+        "txBytes": 60983
+      }
+    },
+    "repeatedSwitching": {
+      "ran": true,
+      "notes": [
+        "Four preview attach/detach cycles across the two Bots."
+      ],
+      "attribution": {
+        "swayInfrastructure": {
+          "pssMiB": 43.71,
+          "swapPssMiB": 0,
+          "rssMiB": 119.11,
+          "cpuPercent": 8.11,
+          "processes": 6
+        },
+        "wayvncProjection": {
+          "pssMiB": 0,
+          "swapPssMiB": 0,
+          "rssMiB": 0,
+          "cpuPercent": 0,
+          "processes": 0
+        },
+        "applicationAgent": {
+          "pssMiB": 333.67,
+          "swapPssMiB": 0,
+          "rssMiB": 1449.41,
+          "cpuPercent": 0,
+          "processes": 18
+        },
+        "daemon": {
+          "pssMiB": 123.57,
+          "swapPssMiB": 0,
+          "rssMiB": 159.93,
+          "cpuPercent": 105.39,
+          "processes": 1
+        },
+        "harnessNote": "daemon and test harness share this process; daemon bucket is the combined measurement",
+        "unknown": {
+          "pssMiB": 263.46,
+          "swapPssMiB": 0,
+          "rssMiB": 1320.6,
+          "cpuPercent": 0,
+          "processes": 8
+        },
+        "wholeScenario": {
+          "pssMiB": 764.41,
+          "swapPssMiB": 0,
+          "rssMiB": 3049.05,
+          "cpuPercent": 113.5,
+          "processes": 33
+        }
+      },
+      "network": {
+        "rxBytes": 192607,
+        "txBytes": 184977
+      },
+      "latency": {
+        "reconnectMs": {
+          "samples": [
+            30.21,
+            30.23,
+            30.19,
+            30.2
+          ],
+          "min": 30.19,
+          "p50": 30.2,
+          "p95": 30.23,
+          "max": 30.23
+        }
+      }
+    },
+    "severalRetainedOneSelected": {
+      "ran": true,
+      "notes": [
+        "Two retained Sway sessions; measurements taken while one had been expanded earlier."
+      ],
+      "attribution": {
+        "swayInfrastructure": {
+          "pssMiB": 43.71,
+          "swapPssMiB": 0,
+          "rssMiB": 119.11,
+          "cpuPercent": 0,
+          "processes": 6
+        },
+        "wayvncProjection": {
+          "pssMiB": 0,
+          "swapPssMiB": 0,
+          "rssMiB": 0,
+          "cpuPercent": 0,
+          "processes": 0
+        },
+        "applicationAgent": {
+          "pssMiB": 333.67,
+          "swapPssMiB": 0,
+          "rssMiB": 1449.41,
+          "cpuPercent": 3.34,
+          "processes": 18
+        },
+        "daemon": {
+          "pssMiB": 113.79,
+          "swapPssMiB": 0,
+          "rssMiB": 150.14,
+          "cpuPercent": 9.99,
+          "processes": 1
+        },
+        "harnessNote": "daemon and test harness share this process; daemon bucket is the combined measurement",
+        "unknown": {
+          "pssMiB": 264.25,
+          "swapPssMiB": 0,
+          "rssMiB": 1321.4,
+          "cpuPercent": 4,
+          "processes": 8
+        },
+        "wholeScenario": {
+          "pssMiB": 755.42,
+          "swapPssMiB": 0,
+          "rssMiB": 3040.06,
+          "cpuPercent": 17.33,
+          "processes": 33
+        }
+      },
+      "network": {
+        "rxBytes": 4886778,
+        "txBytes": 60983
+      },
+      "latency": {
+        "inputToVisibleMs": {
+          "samples": [
+            103.59,
+            204.92
+          ],
+          "min": 103.59,
+          "p50": 103.59,
+          "p95": 204.92,
+          "max": 204.92
+        }
+      }
+    },
+    "cleanup": {
+      "ran": true,
+      "notes": [
+        "Delete/reprovision and final stop."
+      ],
+      "latency": {
+        "cleanupMs": {
+          "samples": [
+            176.78,
+            3146.81
+          ],
+          "min": 176.78,
+          "p50": 176.78,
+          "p95": 3146.81,
+          "max": 3146.81
+        }
+      }
+    }
+  },
+  "citedFakeProofs": [
+    {
+      "item": "Takeover, stale generation/epoch/sequence rejection, held-input release",
+      "files": [
+        "tests/integration/screen-projection.test.ts",
+        "tests/integration/bot-screen-lifecycle.test.ts"
+      ],
+      "notes": "Fake RFB / scripted Sway. Not re-run as fake-only ticket-09 proof."
+    },
+    {
+      "item": "Bot A→B switch, shared WayVNC refcount, RFB-failed snapshot fallback, sibling isolation",
+      "files": [
+        "tests/integration/bot-screen-sway-projection.test.ts"
+      ],
+      "notes": "Scripted Sway + echo WayVNC. Ticket 09 re-proves the same seams on real Sway/WayVNC."
+    },
+    {
+      "item": "Daemon restart reattach, invalid-tree reprovision, capacity reject, deletion vs Shared Workspace",
+      "files": [
+        "tests/integration/bot-screen-lifecycle.test.ts",
+        "tests/integration/bot-screen-sway-runtime.test.ts"
+      ],
+      "notes": "Scripted Sway binaries and persisted fake pids. Real deletion/reprovision is in this harness."
+    },
+    {
+      "item": "Native window list/focus, observe, input authority, Unicode paste path",
+      "files": [
+        "tests/integration/bot-screen-sway-control.test.ts"
+      ],
+      "notes": "Fake i3-ipc tree. Live browser/terminal visibility is this harness."
+    }
+  ],
+  "humanOnlyHostChecks": [
+    "Original Omarchy top bar remains clickable and visually available during Bot desktop start, work, switching, failure, and cleanup",
+    "Existing Omarchy keyboard shortcuts continue to fire in the Host Session through the same lifecycle",
+    "Ordinary host focus and physical pointer/keyboard input stay independent of Bot-generated input",
+    "The user can switch Bots while using the host desktop and confirm selected pixels/input belong to the correct Bot",
+    "Sibling Bot screenshots or service existence do not prove host usability"
+  ],
+  "environment": {
+    "kernel": "Linux 7.1.9-arch1-2 x64",
+    "gpu": [
+      "01:00.0 VGA compatible controller [0300]: NVIDIA Corporation TU102 [GeForce RTX 2080 Ti] [10de:1e04] (rev a1)",
+      "0c:00.0 VGA compatible controller [0300]: Advanced Micro Devices, Inc. [AMD/ATI] Raphael [1002:164e] (rev c2)"
+    ],
+    "hostname": "omarchy",
+    "hostHyprlandRunning": true,
+    "hostCompositorPid": 1470,
+    "hostWAYLAND_DISPLAY": "wayland-1",
+    "hostSWAYSOCK": null,
+    "grim": "/usr/bin/grim",
+    "browser": "/usr/bin/brave",
+    "terminal": "/usr/bin/alacritty",
+    "compare": "/usr/bin/compare"
+  },
+  "artifacts": {
+    "SWAY_RUNTIME_RELEASE": "sway-1.12-wayvnc-0.10.1-wlroots-0.20.2-x86_64",
+    "supplyRoot": "/tmp/omarchy-bot-sway-runtime-supply",
+    "swayBin": "/tmp/omarchy-bot-sway-runtime-supply/sway-1.12-wayvnc-0.10.1-wlroots-0.20.2-x86_64/bin/sway",
+    "swaymsgBin": "/tmp/omarchy-bot-sway-runtime-supply/sway-1.12-wayvnc-0.10.1-wlroots-0.20.2-x86_64/bin/swaymsg",
+    "wayvncBin": "/tmp/omarchy-bot-sway-runtime-supply/sway-1.12-wayvnc-0.10.1-wlroots-0.20.2-x86_64/bin/wayvnc",
+    "wlrRandrBin": "/tmp/omarchy-bot-sway-runtime-supply/sway-1.12-wayvnc-0.10.1-wlroots-0.20.2-x86_64/bin/wlr-randr",
+    "swayWrapperSha256": "a1a7bb925b5c59df106855ff1621569dc7ae9bfa7681010e256ff88cbaf8036f",
+    "wayvncWrapperSha256": "7ccedc635a23fbb917cea4713bd51ac00e8a1d1cc6c1be8daf055e6643c81a9a",
+    "swayVersion": "sway version 1.12"
+  },
+  "realBrowser": {
+    "firstPaintMs": 353.1345230000006,
+    "inputToPaintMs": 94.19462100000055,
+    "transport": "WebSocket + noVNC",
+    "measuredBy": "specific canvas pixel colors"
+  },
+  "hostIsolation": {
+    "before": {
+      "observedAt": "2026-09-07T16:49:44.064Z",
+      "compositorPid": 1470,
+      "compositorCmd": "Hyprland --watchdog-fd 4",
+      "compositorStartTime": "3349",
+      "waylandDisplay": "wayland-1",
+      "swaySock": null,
+      "xdgRuntimeDir": "/run/user/1000",
+      "hyprlandInstance": "efb50993780079460b0cbed1363e2166a2de1d9f_1788680123_1667743931",
+      "hostClientTitles": [
+        "rustdesk:RustDesk",
+        "cursor:Cursor Agents",
+        "rustdesk:100.87.157.144@colin-office - Remote Desktop - RustDesk",
+        "com.mitchellh.ghostty:omarchy: ~",
+        "org.localsend.localsend_app:LocalSend",
+        "brave-browser:中国农业银行-活期账户交易明细文件 - shensi0529@gmail.com - Gmail - Brave",
+        "org.gnome.Nautilus:Downloads",
+        "grok-bot:Grok Bot"
+      ],
+      "hostClientCount": 8
+    },
+    "after": {
+      "observedAt": "2026-09-07T16:50:00.033Z",
+      "compositorPid": 1470,
+      "compositorCmd": "Hyprland --watchdog-fd 4",
+      "compositorStartTime": "3349",
+      "waylandDisplay": "wayland-1",
+      "swaySock": null,
+      "xdgRuntimeDir": "/run/user/1000",
+      "hyprlandInstance": "efb50993780079460b0cbed1363e2166a2de1d9f_1788680123_1667743931",
+      "hostClientTitles": [
+        "rustdesk:RustDesk",
+        "cursor:Cursor Agents",
+        "rustdesk:100.87.157.144@colin-office - Remote Desktop - RustDesk",
+        "com.mitchellh.ghostty:omarchy: ~",
+        "org.localsend.localsend_app:LocalSend",
+        "brave-browser:中国农业银行-活期账户交易明细文件 - shensi0529@gmail.com - Gmail - Brave",
+        "org.gnome.Nautilus:Downloads",
+        "grok-bot:Grok Bot"
+      ],
+      "hostClientCount": 8
+    },
+    "unchanged": true,
+    "deltas": []
+  },
+  "latencies": {
+    "coldRequestToReadyMs": {
+      "samples": [
+        104.82,
+        102.82
+      ],
+      "min": 102.82,
+      "p50": 102.82,
+      "p95": 104.82,
+      "max": 104.82
+    },
+    "firstPreviewMs": {
+      "samples": [
+        30.39
+      ],
+      "min": 30.39,
+      "p50": 30.39,
+      "p95": 30.39,
+      "max": 30.39
+    },
+    "rfbHandshakeMs": {
+      "samples": [
+        102.99
+      ],
+      "min": 102.99,
+      "p50": 102.99,
+      "p95": 102.99,
+      "max": 102.99
+    },
+    "reconnectMs": {
+      "samples": [
+        30.21,
+        30.23,
+        30.19,
+        30.2
+      ],
+      "min": 30.19,
+      "p50": 30.2,
+      "p95": 30.23,
+      "max": 30.23
+    },
+    "inputToVisibleMs": {
+      "samples": [
+        103.59,
+        204.92
+      ],
+      "min": 103.59,
+      "p50": 103.59,
+      "p95": 204.92,
+      "max": 204.92
+    },
+    "cleanupMs": {
+      "samples": [
+        176.78,
+        3146.81
+      ],
+      "min": 176.78,
+      "p50": 176.78,
+      "p95": 3146.81,
+      "max": 3146.81
+    }
+  }
+}

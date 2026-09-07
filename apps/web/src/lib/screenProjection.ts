@@ -1,34 +1,30 @@
 import {
-  SCREEN_CONTROL_CHANNEL,
-  SCREEN_H264_CLOCK_RATE,
-  SCREEN_H264_PROFILE,
-  SCREEN_INPUT_CHANNEL,
-  SCREEN_PREVIEW_CHANNEL,
   SCREEN_PROJECTION_PROTOCOL_VERSION,
   ScreenInputAuthorityMessageDto,
   ScreenKeyCodeDto,
-  ScreenProjectionAnswerDto,
   ScreenProjectionFailureMessageDto,
   ScreenProjectionPreviewFrameHeaderDto,
+  ScreenProjectionSessionDto,
+  ScreenProjectionViewStateMessageDto,
+  type ScreenInputAuthorityMessageDto as InputAuthority,
   type ScreenProjectionBrowserMetricsDto,
   type ScreenProjectionFailureReasonDto,
-  type ScreenProjectionPreviewFrameHeaderDto as PreviewFrameHeader,
-  type ScreenInputAuthorityMessageDto as InputAuthority,
   type ScreenProjectionModeDto,
+  type ScreenProjectionPreviewFrameHeaderDto as PreviewFrameHeader,
 } from "@omarchy-bot/protocol";
 
 const MAX_FRAME_BYTES = 8 * 1024 * 1024;
-
-const FAILURE_MESSAGES: Record<ScreenProjectionFailureReasonDto, string> = {
-  "unsupported-h264": "This browser does not support H.264 Web Control.",
-  "missing-first-frame": "No current frame arrived from the Bot Screen.",
-  "capture-failed": "The Bot Screen capture helper stopped producing frames.",
-  "encoder-failed": "The Bot Screen video encoder failed.",
-  "transport-failed": "The screen connection was lost.",
-  "decode-failed": "The browser could not decode the Bot Screen video.",
-};
 const CONNECTION_TIMEOUT_MS = 10_000;
 const FIRST_FRAME_TIMEOUT_MS = 5_000;
+
+const FAILURE_MESSAGES: Record<ScreenProjectionFailureReasonDto, string> = {
+  "missing-first-frame": "No current frame arrived from the Bot Screen.",
+  "capture-failed": "The Bot Screen capture helper stopped producing frames.",
+  "transport-failed": "The screen connection was lost.",
+  "rfb-start-failed": "The Bot Screen view could not start.",
+  "rfb-bridge-failed": "The Bot Screen view connection failed.",
+  "view-client-failed": "The browser could not display the Bot Screen view.",
+};
 
 export type ScreenProjectionMode = Exclude<ScreenProjectionModeDto, "idle">;
 export type ScreenProjectionState =
@@ -46,22 +42,25 @@ export interface ScreenProjectionFailure {
   snapshotAvailable: boolean;
 }
 
+export interface ScreenExpandedView {
+  protocol: "rfb";
+  viewOnly: true;
+  url: string;
+}
+
 export interface ScreenProjectionCallbacks {
   onState(state: ScreenProjectionState): void;
   onFrame(frame: Blob | undefined): void;
-  onVideo(stream: MediaStream | undefined): void;
   onError(error: string): void;
   onFailure?(failure: ScreenProjectionFailure): void;
   onReconnectRequested?(): void;
   onControlStateChange?(active: boolean): void;
   onControlRevoked?(): void;
+  onExpandedView?(view: ScreenExpandedView | undefined): void;
 }
-
 
 interface PendingFrame {
   header: PreviewFrameHeader;
-  chunks: ArrayBuffer[];
-  receivedBytes: number;
 }
 
 interface PointerContentRect {
@@ -70,8 +69,8 @@ interface PointerContentRect {
   width: number;
   height: number;
 }
-type PointerButton = "left" | "middle" | "right";
 
+type PointerButton = "left" | "middle" | "right";
 
 interface ProjectionGeometry {
   geometryGeneration: number;
@@ -82,17 +81,15 @@ interface ProjectionGeometry {
   scale: number;
 }
 
-
-/** Browser-side deep module for SDP exchange, frame reassembly, and stale peer teardown. */
+/** Browser-side projection session over one control WebSocket plus view-only noVNC. */
 export class ScreenProjectionConnection {
-  readonly #peer = new RTCPeerConnection({ iceServers: [] });
-  readonly #preview: RTCDataChannel;
-  readonly #control: RTCDataChannel;
-  readonly #input: RTCDataChannel;
   readonly #abort = new AbortController();
-  #sessionId?: string;
-  #runtimeGeneration?: number;
+  readonly #heldPointerButtons = new Set<PointerButton>();
+  #control: WebSocket | undefined;
+  #sessionId: string | undefined;
+  #runtimeGeneration: number | undefined;
   #desiredMode: ScreenProjectionMode = "preview";
+  #acknowledgedMode: ScreenProjectionModeDto = "idle";
   #pending: PendingFrame | undefined;
   #closed = false;
   #connectionTimer: number | undefined;
@@ -100,14 +97,15 @@ export class ScreenProjectionConnection {
   #receivedPreview = false;
   #inputAuthority: InputAuthority | undefined;
   #offeredInputAuthority: InputAuthority | undefined;
-  #videoStream: MediaStream | undefined;
-  #videoReady = false;
-  readonly #h264Available: boolean;
+  #rfbReady = false;
+  #expandedView: ScreenExpandedView | undefined;
+  #rfbUrl: string | undefined;
+  #snapshotUrl: string | undefined;
   #inputSequence = 0;
   #releasingEpoch: number | undefined;
   #resumeAfterRelease = false;
   #geometry: ProjectionGeometry | undefined;
-  readonly #heldPointerButtons = new Set<PointerButton>();
+  #lastPreviewCapturedAt: string | undefined;
   #browserMetrics: ScreenProjectionBrowserMetricsDto = {
     browserReceives: 0,
     browserDecodes: 0,
@@ -125,137 +123,58 @@ export class ScreenProjectionConnection {
     private readonly endpoint: string,
     private readonly owner: ScreenProjectionOwner,
     private readonly callbacks: ScreenProjectionCallbacks,
-  ) {
-    this.#preview = this.#peer.createDataChannel(SCREEN_PREVIEW_CHANNEL, { ordered: true });
-    this.#preview.binaryType = "arraybuffer";
-    this.#control = this.#peer.createDataChannel(SCREEN_CONTROL_CHANNEL, { ordered: true });
-    this.#input = this.#peer.createDataChannel(SCREEN_INPUT_CHANNEL, { ordered: true });
-    this.#preview.addEventListener("message", (event) => this.#receive(event.data));
-    this.#input.addEventListener("message", (event) => this.#receiveInputAuthority(event.data));
-    this.#control.addEventListener("message", (event) => this.#receiveProjectionFailure(event.data));
-    this.#control.addEventListener("open", () => this.#activate());
-    const transceiver = this.#peer.addTransceiver("video", { direction: "recvonly" });
-    const h264Codecs = RTCRtpReceiver.getCapabilities("video")?.codecs.filter((codec) =>
-      codec.mimeType.toLowerCase() === "video/h264"
-      && new RegExp(`profile-level-id=${SCREEN_H264_PROFILE}(?:;|$)`, "i").test(codec.sdpFmtpLine ?? "")
-      && /(?:^|;)packetization-mode=1(?:;|$)/i.test(codec.sdpFmtpLine ?? "")
-    ) ?? [];
-    this.#h264Available = h264Codecs.length > 0;
-    if (this.#h264Available) transceiver.setCodecPreferences(h264Codecs);
-    this.#peer.addEventListener("track", (event) => {
-      if (this.#closed || event.track.kind !== "video") return;
-      this.#videoStream = event.streams[0] ?? new MediaStream([event.track]);
-      this.#videoReady = false;
-      event.track.addEventListener("ended", () => {
-        if (!this.#closed) this.#requestReconnect();
-      }, { once: true });
-      this.callbacks.onVideo(this.#videoStream);
-    });
-    this.#peer.addEventListener("connectionstatechange", () => {
-      if (this.#closed) return;
-      if (this.#peer.connectionState === "disconnected") {
-        this.#requestReconnect();
-      } else if (this.#peer.connectionState === "connected") {
-        this.#reconnectRequested = false;
-        this.#activate();
-      } else if (this.#peer.connectionState === "failed") {
-        this.#fail("transport-failed", "Couldn’t connect to the Bot Screen.");
-      }
-    });
+  ) {}
+
+  get expandedView(): ScreenExpandedView | undefined {
+    return this.#expandedView;
   }
 
   async connect(): Promise<void> {
     this.callbacks.onState("connecting");
     this.#armConnectionDeadline("Couldn’t connect to the Bot Screen.");
-    if (!this.#h264Available) {
-      this.#fail("unsupported-h264", "This browser does not support H.264 Web Control.");
-      return;
-    }
-    let failureReason: ScreenProjectionFailureReasonDto = "transport-failed";
     try {
-      const offer = await this.#peer.createOffer();
-      await this.#peer.setLocalDescription(offer);
-      if (this.#peer.iceGatheringState !== "complete") {
-        await new Promise<void>((resolve) => {
-          const gathered = (): void => {
-            if (this.#peer.iceGatheringState !== "complete") return;
-            this.#peer.removeEventListener("icegatheringstatechange", gathered);
-            resolve();
-          };
-          this.#peer.addEventListener("icegatheringstatechange", gathered);
-        });
-      }
-      if (this.#closed) return;
-      const localDescription = this.#peer.localDescription;
-      if (localDescription === null) throw new Error("Couldn’t create the screen connection.");
-      const response = await fetch(this.endpoint, {
+      const endpoint = this.#projectionEndpoint();
+      const response = await fetch(endpoint, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          version: SCREEN_PROJECTION_PROTOCOL_VERSION,
-          type: "offer",
-          sdp: localDescription.sdp,
-          capabilities: {
-            previewImage: {
-              transport: "data-channel",
-              channel: SCREEN_PREVIEW_CHANNEL,
-              mediaType: "image/png",
-            },
-            expandedVideo: {
-              transport: "webrtc-video-track",
-              codec: "video/H264",
-              profileLevelId: SCREEN_H264_PROFILE,
-              clockRate: SCREEN_H264_CLOCK_RATE,
-            },
-            control: { transport: "data-channel", channel: SCREEN_CONTROL_CHANNEL },
-            input: { transport: "data-channel", channel: SCREEN_INPUT_CHANNEL },
-            snapshotFallback: { transport: "http", mediaType: "image/png" },
-          },
-        }),
+        body: JSON.stringify({ version: SCREEN_PROJECTION_PROTOCOL_VERSION }),
         signal: this.#abort.signal,
       });
-      const rawAnswer: unknown = await response.json().catch(() => undefined);
+      const rawSession: unknown = await response.json().catch(() => undefined);
       if (this.#closed) return;
       if (!response.ok) {
         const message =
-          rawAnswer !== null
-          && typeof rawAnswer === "object"
-          && "error" in rawAnswer
-          && typeof rawAnswer.error === "string"
-            ? rawAnswer.error
+          rawSession !== null
+          && typeof rawSession === "object"
+          && "error" in rawSession
+          && typeof rawSession.error === "string"
+            ? rawSession.error
             : "Couldn’t start the Bot Screen.";
-        if (
-          rawAnswer !== null
-          && typeof rawAnswer === "object"
-          && "failure" in rawAnswer
-          && rawAnswer.failure === "unsupported-h264"
-        ) failureReason = "unsupported-h264";
         throw new Error(message);
       }
-      const answer = ScreenProjectionAnswerDto.safeParse(rawAnswer);
-      if (!answer.success) throw new Error("The Bot Screen returned an invalid connection response.");
-      if (answer.data.surfaceId !== this.owner.surfaceId) {
+      const session = ScreenProjectionSessionDto.safeParse(rawSession);
+      if (!session.success) throw new Error("The Bot Screen returned an invalid connection response.");
+      if (session.data.surfaceId !== this.owner.surfaceId) {
         throw new Error("The Bot Screen connection did not match this screen.");
       }
-      this.#sessionId = answer.data.sessionId;
-      this.#runtimeGeneration = answer.data.runtimeGeneration;
+
+      this.#sessionId = session.data.sessionId;
+      this.#runtimeGeneration = session.data.runtimeGeneration;
       this.#geometry = {
-        geometryGeneration: answer.data.geometryGeneration,
-        logicalWidth: answer.data.logicalWidth,
-        logicalHeight: answer.data.logicalHeight,
-        videoWidth: answer.data.videoWidth,
-        videoHeight: answer.data.videoHeight,
-        scale: answer.data.scale,
+        geometryGeneration: session.data.geometryGeneration,
+        logicalWidth: session.data.logicalWidth,
+        logicalHeight: session.data.logicalHeight,
+        videoWidth: session.data.videoWidth,
+        videoHeight: session.data.videoHeight,
+        scale: session.data.scale,
       };
-      await this.#peer.setRemoteDescription({ type: answer.data.type, sdp: answer.data.sdp });
-      for (const candidate of answer.data.candidates) {
-        await this.#peer.addIceCandidate({ candidate: candidate.candidate, sdpMid: candidate.sdpMid });
-      }
-      this.#activate();
+      this.#rfbUrl = this.#resolveSessionSocketUrl(session.data.rfbUrl, "RFB");
+      this.#snapshotUrl = this.#resolveSnapshotUrl(session.data.snapshotUrl);
+      this.#openControlSocket(this.#resolveSessionSocketUrl(session.data.controlUrl, "control"));
     } catch (error) {
       if (this.#closed || (error instanceof DOMException && error.name === "AbortError")) return;
       this.#fail(
-        failureReason,
+        "transport-failed",
         error instanceof Error ? error.message : "Couldn’t connect to the Bot Screen.",
       );
     }
@@ -268,39 +187,23 @@ export class ScreenProjectionConnection {
       this.#offeredInputAuthority = undefined;
       this.#releasingEpoch = undefined;
       this.#resumeAfterRelease = false;
-      this.#videoReady = false;
+      this.#rfbReady = false;
+      this.#clearExpandedView();
       this.#clearHeldInput();
+      clearTimeout(this.#firstFrameTimer);
+      this.#firstFrameTimer = undefined;
     }
     this.#desiredMode = mode;
     this.#activate();
   }
 
-  /** Makes input interactive only after a correctly sized H.264 frame was browser-painted. */
-  videoFramePainted(
-    videoWidth: number,
-    videoHeight: number,
-    metadata?: { captureTime?: number; paintedAt?: number },
-  ): boolean {
-    const geometry = this.#geometry;
-    if (
-      this.#closed
-      || this.#desiredMode !== "expanded"
-      || this.#videoStream === undefined
-      || geometry === undefined
-    ) return false;
-    if (videoWidth !== geometry.videoWidth || videoHeight !== geometry.videoHeight) {
-      this.#fail("decode-failed", "The Bot Screen video did not match its current geometry.");
-      return false;
-    }
-    this.#videoReady = true;
-    clearTimeout(this.#firstFrameTimer);
-    this.#firstFrameTimer = undefined;
-    this.callbacks.onState("expanded");
-    this.#publishInputAuthority();
+  previewPainted(): void {
+    if (this.#closed || this.#desiredMode !== "preview" || this.#lastPreviewCapturedAt === undefined) return;
+    this.#browserMetrics.browserDecodes += 1;
     this.#browserMetrics.browserPaints += 1;
-    const paintedAt = metadata?.paintedAt ?? performance.now();
-    if (metadata?.captureTime !== undefined && metadata.captureTime <= paintedAt) {
-      const latency = paintedAt - metadata.captureTime;
+    const capturedAt = Date.parse(this.#lastPreviewCapturedAt);
+    if (Number.isFinite(capturedAt)) {
+      const latency = Math.max(0, Date.now() - capturedAt);
       this.#browserMetrics.captureToPaintLatencySamples += 1;
       this.#browserMetrics.captureToPaintLatencyTotalMs += latency;
       this.#browserMetrics.captureToPaintLatencyMaxMs = Math.max(
@@ -308,14 +211,27 @@ export class ScreenProjectionConnection {
         latency,
       );
     }
-    void this.#sampleBrowserMetrics();
-    return true;
+    this.#lastPreviewCapturedAt = undefined;
+    this.#sendBrowserMetrics();
   }
 
-  videoDecodeFailed(): void {
-    if (!this.#closed && this.#desiredMode === "expanded") {
-      this.#fail("decode-failed", "The browser could not decode the Bot Screen video.");
-    }
+  expandedConnected(view: ScreenExpandedView): void {
+    if (
+      this.#closed
+      || this.#desiredMode !== "expanded"
+      || this.#acknowledgedMode !== "expanded"
+      || this.#expandedView?.url !== view.url
+    ) return;
+    this.#rfbReady = true;
+    clearTimeout(this.#firstFrameTimer);
+    this.#firstFrameTimer = undefined;
+    this.callbacks.onState("expanded");
+    this.#publishInputAuthority();
+  }
+
+  expandedFailed(view: ScreenExpandedView, message = "The Bot Screen view connection failed."): void {
+    if (this.#closed || this.#desiredMode !== "expanded" || this.#expandedView?.url !== view.url) return;
+    this.#fail("view-client-failed", message);
   }
 
   pointerMotion(clientX: number, clientY: number, renderedVideo: Element, clampToContent = false): void {
@@ -383,6 +299,7 @@ export class ScreenProjectionConnection {
     if (this.#sendInput({ type: "release-control", reason })) {
       this.#releasingEpoch = authority.controllerEpoch;
       this.#inputAuthority = undefined;
+      this.callbacks.onControlStateChange?.(false);
       this.#clearHeldInput();
     }
   }
@@ -392,16 +309,9 @@ export class ScreenProjectionConnection {
     this.releaseControl(reason);
     clearTimeout(this.#firstFrameTimer);
     this.#firstFrameTimer = undefined;
-    this.#videoReady = false;
-    if (this.#control.readyState === "open" && this.#runtimeGeneration !== undefined) {
-      this.#control.send(JSON.stringify({
-        version: SCREEN_PROJECTION_PROTOCOL_VERSION,
-        type: "view",
-        surfaceId: this.owner.surfaceId,
-        runtimeGeneration: this.#runtimeGeneration,
-        mode: "idle",
-      }));
-    }
+    this.#rfbReady = false;
+    this.#clearExpandedView();
+    this.#sendViewMode("idle");
   }
 
   resumeControl(): void {
@@ -420,6 +330,7 @@ export class ScreenProjectionConnection {
     this.#connectionTimer = undefined;
     this.#firstFrameTimer = undefined;
     this.releaseControl("teardown");
+    this.#sendViewMode("idle");
     this.#closed = true;
     this.#abort.abort();
     this.#pending = undefined;
@@ -428,28 +339,17 @@ export class ScreenProjectionConnection {
     this.#offeredInputAuthority = undefined;
     this.#clearHeldInput();
     this.#geometry = undefined;
-    this.#videoStream = undefined;
-    this.#videoReady = false;
+    this.#rfbReady = false;
+    this.#clearExpandedView();
     this.#releasingEpoch = undefined;
     this.#resumeAfterRelease = false;
+    const socket = this.#control;
+    this.#control = undefined;
+    socket?.close();
     this.callbacks.onFrame(undefined);
-    this.callbacks.onVideo(undefined);
     this.callbacks.onState("closed");
-    if (this.#control.readyState === "open" && this.#runtimeGeneration !== undefined) {
-      this.#control.send(JSON.stringify({
-        version: SCREEN_PROJECTION_PROTOCOL_VERSION,
-        type: "view",
-        surfaceId: this.owner.surfaceId,
-        runtimeGeneration: this.#runtimeGeneration,
-        mode: "idle",
-      }));
-    }
-    this.#preview.close();
-    this.#control.close();
-    this.#input.close();
-    this.#peer.close();
     if (this.#sessionId !== undefined) {
-      void fetch(this.endpoint, {
+      void fetch(this.#projectionEndpoint(), {
         method: "DELETE",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ sessionId: this.#sessionId }),
@@ -458,60 +358,153 @@ export class ScreenProjectionConnection {
     }
   }
 
+  #openControlSocket(url: string): void {
+    const socket = new WebSocket(url);
+    socket.binaryType = "arraybuffer";
+    this.#control = socket;
+    socket.addEventListener("open", () => {
+      if (this.#closed || this.#control !== socket) return;
+      this.#reconnectRequested = false;
+      this.#activate();
+    });
+    socket.addEventListener("message", (event) => {
+      if (!this.#closed && this.#control === socket) this.#receiveControl(event.data);
+    });
+    socket.addEventListener("error", () => {
+      if (!this.#closed && this.#control === socket) {
+        this.#fail("transport-failed", "Couldn’t connect to the Bot Screen.");
+      }
+    });
+    socket.addEventListener("close", () => {
+      if (!this.#closed && this.#control === socket) this.#requestReconnect();
+    });
+  }
+
   #activate(): void {
     if (
       this.#closed
-      || this.#control.readyState !== "open"
+      || this.#control?.readyState !== WebSocket.OPEN
       || this.#sessionId === undefined
       || this.#releasingEpoch !== undefined
       || this.#runtimeGeneration === undefined
     ) return;
-    clearTimeout(this.#connectionTimer);
-    this.#connectionTimer = undefined;
-    this.#control.send(JSON.stringify({
-      version: SCREEN_PROJECTION_PROTOCOL_VERSION,
-      type: "view",
-      surfaceId: this.owner.surfaceId,
-      runtimeGeneration: this.#runtimeGeneration,
-      mode: this.#desiredMode,
-    }));
-    if (this.#desiredMode === "preview") {
-      this.callbacks.onState("preview");
-      if (this.#receivedPreview) return;
-    } else if (this.#videoReady) {
-      this.callbacks.onState("expanded");
-      return;
-    } else {
+    this.#sendViewMode(this.#desiredMode);
+    if (this.#acknowledgedMode !== this.#desiredMode) {
       this.callbacks.onState("connecting");
-    }
-    if (this.#firstFrameTimer === undefined) {
-      this.#firstFrameTimer = window.setTimeout(
-        () => this.#fail(
-          "missing-first-frame",
-          this.#desiredMode === "expanded"
-            ? "No H.264 video arrived from the Bot Screen."
-            : "No image arrived from the Bot Screen.",
-        ),
-        FIRST_FRAME_TIMEOUT_MS,
-      );
     }
   }
 
-  #receiveProjectionFailure(raw: unknown): void {
-    if (this.#closed || typeof raw !== "string") return;
+  #sendViewMode(mode: ScreenProjectionModeDto): void {
+    if (
+      this.#control?.readyState !== WebSocket.OPEN
+      || this.#sessionId === undefined
+      || this.#runtimeGeneration === undefined
+    ) return;
+    this.#control.send(JSON.stringify({
+      version: SCREEN_PROJECTION_PROTOCOL_VERSION,
+      type: "view",
+      sessionId: this.#sessionId,
+      surfaceId: this.owner.surfaceId,
+      runtimeGeneration: this.#runtimeGeneration,
+      mode,
+    }));
+  }
+
+  #receiveControl(raw: unknown): void {
+    if (this.#closed) return;
+    if (typeof raw === "string") {
+      this.#receiveControlJson(raw);
+      return;
+    }
+    if (raw instanceof Blob) {
+      const socket = this.#control;
+      void raw.arrayBuffer().then((buffer) => {
+        if (!this.#closed && this.#control === socket) this.#receivePreviewBytes(buffer);
+      });
+      return;
+    }
+    if (raw instanceof ArrayBuffer) {
+      this.#receivePreviewBytes(raw);
+      return;
+    }
+    if (ArrayBuffer.isView(raw)) {
+      const bytes = new Uint8Array(raw.buffer, raw.byteOffset, raw.byteLength).slice();
+      this.#receivePreviewBytes(bytes.buffer);
+    }
+  }
+
+  #receiveControlJson(raw: string): void {
     let parsed: unknown;
     try {
       parsed = JSON.parse(raw);
     } catch {
+      this.#pending = undefined;
       return;
     }
+
+    const viewState = ScreenProjectionViewStateMessageDto.safeParse(parsed);
+    if (viewState.success) {
+      if (this.#matchesSession(viewState.data)) this.#receiveViewState(viewState.data.mode);
+      return;
+    }
+
+    const authority = ScreenInputAuthorityMessageDto.safeParse(parsed);
+    if (authority.success) {
+      if (this.#matchesSession(authority.data)) this.#receiveInputAuthority(authority.data);
+      return;
+    }
+
     const failure = ScreenProjectionFailureMessageDto.safeParse(parsed);
+    if (failure.success) {
+      if (this.#matchesSession(failure.data)) {
+        this.#fail(failure.data.reason, FAILURE_MESSAGES[failure.data.reason]);
+      }
+      return;
+    }
+
+    const header = ScreenProjectionPreviewFrameHeaderDto.safeParse(parsed);
     if (
-      !failure.success
-      || failure.data.surfaceId !== this.owner.surfaceId
-      || failure.data.runtimeGeneration !== this.#runtimeGeneration
-    ) return;
-    this.#fail(failure.data.reason, FAILURE_MESSAGES[failure.data.reason]);
+      header.success
+      && this.#desiredMode === "preview"
+      && this.#matchesSession(header.data)
+      && this.#matchesGeometry(header.data)
+      && header.data.byteLength <= MAX_FRAME_BYTES
+    ) {
+      this.#pending = { header: header.data };
+      return;
+    }
+    this.#pending = undefined;
+  }
+
+  #receiveViewState(mode: ScreenProjectionModeDto): void {
+    this.#acknowledgedMode = mode;
+    clearTimeout(this.#connectionTimer);
+    this.#connectionTimer = undefined;
+    if (mode !== this.#desiredMode) return;
+
+    if (mode === "preview") {
+      this.#clearExpandedView();
+      this.callbacks.onState("preview");
+      if (!this.#receivedPreview) this.#armFirstFrameDeadline("No image arrived from the Bot Screen.");
+      return;
+    }
+    if (mode === "expanded") {
+      if (this.#rfbUrl === undefined) {
+        this.#fail("view-client-failed", "The Bot Screen returned an invalid RFB connection.");
+        return;
+      }
+      if (this.#expandedView?.url !== this.#rfbUrl) {
+        this.#expandedView = { protocol: "rfb", viewOnly: true, url: this.#rfbUrl };
+        this.callbacks.onExpandedView?.(this.#expandedView);
+      }
+      if (this.#rfbReady) {
+        this.callbacks.onState("expanded");
+        this.#publishInputAuthority();
+      } else {
+        this.callbacks.onState("connecting");
+        this.#armFirstFrameDeadline("No RFB view arrived from the Bot Screen.");
+      }
+    }
   }
 
   #requestReconnect(): void {
@@ -522,10 +515,10 @@ export class ScreenProjectionConnection {
     this.#firstFrameTimer = undefined;
     this.#pending = undefined;
     this.#receivedPreview = false;
-    this.#videoReady = false;
+    this.#rfbReady = false;
     this.#offeredInputAuthority = undefined;
+    this.#clearExpandedView();
     this.callbacks.onFrame(undefined);
-    this.callbacks.onVideo(undefined);
     this.callbacks.onState("reconnecting");
     if (this.callbacks.onReconnectRequested !== undefined) {
       queueMicrotask(() => {
@@ -536,26 +529,13 @@ export class ScreenProjectionConnection {
     }
   }
 
-  #receiveInputAuthority(raw: unknown): void {
-    if (this.#closed || typeof raw !== "string") return;
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(raw);
-    } catch {
-      return;
-    }
-    const authority = ScreenInputAuthorityMessageDto.safeParse(parsed);
-    if (
-      !authority.success
-      || authority.data.surfaceId !== this.owner.surfaceId
-      || authority.data.runtimeGeneration !== this.#runtimeGeneration
-      || !this.#matchesGeometry(authority.data)
-    ) return;
-    if (!authority.data.active) {
+  #receiveInputAuthority(authority: InputAuthority): void {
+    if (!this.#matchesGeometry(authority)) return;
+    if (!authority.active) {
       if (
-        this.#inputAuthority?.controllerEpoch === authority.data.controllerEpoch
-        || this.#offeredInputAuthority?.controllerEpoch === authority.data.controllerEpoch
-        || this.#releasingEpoch === authority.data.controllerEpoch
+        this.#inputAuthority?.controllerEpoch === authority.controllerEpoch
+        || this.#offeredInputAuthority?.controllerEpoch === authority.controllerEpoch
+        || this.#releasingEpoch === authority.controllerEpoch
       ) {
         if (this.#inputAuthority !== undefined) this.callbacks.onControlStateChange?.(false);
         this.#inputAuthority = undefined;
@@ -569,13 +549,18 @@ export class ScreenProjectionConnection {
       }
       return;
     }
-    this.#offeredInputAuthority = authority.data;
+    this.#offeredInputAuthority = authority;
     this.#publishInputAuthority();
   }
 
   #publishInputAuthority(): void {
     const authority = this.#offeredInputAuthority;
-    if (authority === undefined || this.#desiredMode !== "expanded" || !this.#videoReady) return;
+    if (
+      authority === undefined
+      || this.#desiredMode !== "expanded"
+      || this.#acknowledgedMode !== "expanded"
+      || !this.#rfbReady
+    ) return;
     if (this.#inputAuthority?.controllerEpoch === authority.controllerEpoch) return;
     if (this.#inputAuthority !== undefined) this.#clearHeldInput();
     this.callbacks.onControlStateChange?.(true);
@@ -642,10 +627,12 @@ export class ScreenProjectionConnection {
     if (
       authority === undefined
       || this.#desiredMode !== "expanded"
-      || this.#input.readyState !== "open"
+      || this.#control?.readyState !== WebSocket.OPEN
+      || this.#sessionId === undefined
     ) return false;
-    this.#input.send(JSON.stringify({
+    this.#control.send(JSON.stringify({
       version: SCREEN_PROJECTION_PROTOCOL_VERSION,
+      sessionId: this.#sessionId,
       surfaceId: this.owner.surfaceId,
       runtimeGeneration: authority.runtimeGeneration,
       geometryGeneration: authority.geometryGeneration,
@@ -655,50 +642,29 @@ export class ScreenProjectionConnection {
     }));
     return true;
   }
+
   #clearHeldInput(): void {
     this.#heldPointerButtons.clear();
     this.callbacks.onControlRevoked?.();
   }
 
-  #receive(raw: unknown): void {
-    if (this.#closed || this.#desiredMode !== "preview") return;
-    if (typeof raw === "string") {
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(raw);
-      } catch {
-        this.#pending = undefined;
-        return;
-      }
-      const header = ScreenProjectionPreviewFrameHeaderDto.safeParse(parsed);
-      if (
-        !header.success
-        || header.data.byteLength > MAX_FRAME_BYTES
-        || header.data.surfaceId !== this.owner.surfaceId
-        || header.data.runtimeGeneration !== this.#runtimeGeneration
-        || !this.#matchesGeometry(header.data)
-      ) {
-        this.#pending = undefined;
-        return;
-      }
-      this.#pending = { header: header.data, chunks: [], receivedBytes: 0 };
-      return;
-    }
-    if (!(raw instanceof ArrayBuffer) || this.#pending === undefined) return;
+  #clearExpandedView(): void {
+    if (this.#expandedView === undefined) return;
+    this.#expandedView = undefined;
+    this.callbacks.onExpandedView?.(undefined);
+  }
+
+  #receivePreviewBytes(raw: ArrayBuffer): void {
     const pending = this.#pending;
-    pending.chunks.push(raw);
-    pending.receivedBytes += raw.byteLength;
-    if (pending.receivedBytes > pending.header.byteLength || pending.chunks.length > pending.header.chunkCount) {
-      this.#pending = undefined;
-      return;
-    }
-    if (pending.chunks.length !== pending.header.chunkCount) return;
     this.#pending = undefined;
-    if (pending.receivedBytes !== pending.header.byteLength) return;
+    if (this.#desiredMode !== "preview" || pending === undefined) return;
+    if (raw.byteLength !== pending.header.byteLength) return;
     this.#receivedPreview = true;
+    this.#browserMetrics.browserReceives += 1;
+    this.#lastPreviewCapturedAt = pending.header.capturedAt;
     clearTimeout(this.#firstFrameTimer);
     this.#firstFrameTimer = undefined;
-    this.callbacks.onFrame(new Blob(pending.chunks, { type: pending.header.mediaType }));
+    this.callbacks.onFrame(new Blob([raw], { type: pending.header.mediaType }));
   }
 
   #armConnectionDeadline(message: string): void {
@@ -709,70 +675,35 @@ export class ScreenProjectionConnection {
     );
   }
 
-  async #sampleBrowserMetrics(): Promise<void> {
-    const getStats = this.#peer.getStats;
-    if (typeof getStats === "function") {
-      try {
-        const report = await getStats.call(this.#peer);
-        report.forEach((entry) => {
-          const metric = entry as RTCStats & {
-            kind?: string;
-            mediaType?: string;
-            framesReceived?: number;
-            framesDecoded?: number;
-            framesDropped?: number;
-          };
-          if (
-            metric.type !== "inbound-rtp"
-            || (metric.kind ?? metric.mediaType) !== "video"
-          ) return;
-          this.#browserMetrics.browserReceives = Math.max(
-            this.#browserMetrics.browserReceives,
-            metric.framesReceived ?? 0,
-          );
-          this.#browserMetrics.browserDecodes = Math.max(
-            this.#browserMetrics.browserDecodes,
-            metric.framesDecoded ?? 0,
-          );
-          this.#browserMetrics.decodeDrops = Math.max(
-            this.#browserMetrics.decodeDrops,
-            metric.framesDropped ?? 0,
-          );
-        });
-      } catch {
-        // Browser stats are diagnostic only and never interrupt Screen Projection.
-      }
-    }
-    this.#browserMetrics.browserReceives = Math.max(
-      this.#browserMetrics.browserReceives,
-      this.#browserMetrics.browserPaints,
+  #armFirstFrameDeadline(message: string): void {
+    if (this.#firstFrameTimer !== undefined) return;
+    this.#firstFrameTimer = window.setTimeout(
+      () => this.#fail("missing-first-frame", message),
+      FIRST_FRAME_TIMEOUT_MS,
     );
-    this.#browserMetrics.browserDecodes = Math.max(
-      this.#browserMetrics.browserDecodes,
-      this.#browserMetrics.browserPaints,
-    );
-    this.#browserMetrics.paintDrops = Math.max(
-      this.#browserMetrics.paintDrops,
-      this.#browserMetrics.browserDecodes - this.#browserMetrics.browserPaints,
-    );
+  }
+
+  #sendBrowserMetrics(): void {
     const now = performance.now();
     if (
-      now - this.#lastMetricsSentAt < 1_000
-      || this.#control.readyState !== "open"
+      (this.#lastMetricsSentAt !== 0 && now - this.#lastMetricsSentAt < 1_000)
+      || this.#control?.readyState !== WebSocket.OPEN
       || this.#control.bufferedAmount > 0
       || this.#runtimeGeneration === undefined
+      || this.#sessionId === undefined
     ) return;
     try {
       this.#control.send(JSON.stringify({
         version: SCREEN_PROJECTION_PROTOCOL_VERSION,
         type: "browser-metrics",
+        sessionId: this.#sessionId,
         surfaceId: this.owner.surfaceId,
         runtimeGeneration: this.#runtimeGeneration,
         metrics: this.#browserMetrics,
       }));
       this.#lastMetricsSentAt = now;
     } catch {
-      // A closing metrics channel must not delay control or change Surface state.
+      // A closing metrics socket must not delay control or change Surface state.
     }
   }
 
@@ -787,11 +718,9 @@ export class ScreenProjectionConnection {
     reason: ScreenProjectionFailureReasonDto,
     message: string,
   ): Promise<void> {
-    const snapshot = new URL(this.endpoint, window.location.href);
-    snapshot.pathname = snapshot.pathname.replace(/\/projection$/, "/snapshot");
     let snapshotAvailable = false;
     try {
-      const response = await fetch(snapshot);
+      const response = await fetch(this.#snapshotUrl ?? this.#defaultSnapshotUrl());
       if (!response.ok || response.headers.get("content-type") !== "image/png") throw new Error();
       this.callbacks.onFrame(await response.blob());
       snapshotAvailable = true;
@@ -805,6 +734,52 @@ export class ScreenProjectionConnection {
       snapshotAvailable,
     });
     this.callbacks.onState(snapshotAvailable ? "snapshot" : "unavailable");
+  }
+
+  #projectionEndpoint(): string {
+    const endpoint = new URL(this.endpoint, window.location.href);
+    endpoint.searchParams.set("botId", this.owner.botId);
+    endpoint.searchParams.set("surfaceId", this.owner.surfaceId);
+    return endpoint.href;
+  }
+
+  #resolveSessionSocketUrl(raw: string, label: string): string {
+    if (this.#sessionId === undefined) throw new Error(`The Bot Screen returned an invalid ${label} connection.`);
+    const endpoint = new URL(this.endpoint, window.location.href);
+    const resolved = new URL(raw, endpoint);
+    if (
+      (resolved.protocol !== "http:" && resolved.protocol !== "https:")
+      || resolved.origin !== endpoint.origin
+      || resolved.searchParams.get("botId") !== this.owner.botId
+      || resolved.searchParams.get("surfaceId") !== this.owner.surfaceId
+      || resolved.searchParams.get("sessionId") !== this.#sessionId
+    ) throw new Error(`The Bot Screen returned an invalid ${label} connection.`);
+    resolved.protocol = resolved.protocol === "https:" ? "wss:" : "ws:";
+    return resolved.href;
+  }
+
+  #resolveSnapshotUrl(raw: string): string {
+    const endpoint = new URL(this.endpoint, window.location.href);
+    const resolved = new URL(raw, endpoint);
+    if (
+      (resolved.protocol !== "http:" && resolved.protocol !== "https:")
+      || resolved.origin !== endpoint.origin
+      || resolved.searchParams.get("botId") !== this.owner.botId
+      || resolved.searchParams.get("surfaceId") !== this.owner.surfaceId
+    ) throw new Error("The Bot Screen returned an invalid snapshot connection.");
+    return resolved.href;
+  }
+
+  #defaultSnapshotUrl(): string {
+    const snapshot = new URL(this.#projectionEndpoint());
+    snapshot.pathname = snapshot.pathname.replace(/\/projection$/, "/snapshot");
+    return snapshot.href;
+  }
+
+  #matchesSession(value: { sessionId: string; surfaceId: string; runtimeGeneration: number }): boolean {
+    return value.sessionId === this.#sessionId
+      && value.surfaceId === this.owner.surfaceId
+      && value.runtimeGeneration === this.#runtimeGeneration;
   }
 
   #matchesGeometry(value: ProjectionGeometry): boolean {

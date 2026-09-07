@@ -3,6 +3,7 @@ import { BotScreenInputRejectedError } from "./botScreenManager.ts";
 import type {
   BotScreenCapture,
   BotScreenCaptureStream,
+  BotScreenExpandedView,
   BotScreenInputEvent,
   BotScreenProvision,
   BotScreenRuntime,
@@ -16,6 +17,9 @@ const FAKE_SCREEN_PNG = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAYAAAD0In+KAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAADklEQVQImWMQMgn7D8IAC5MDN627upEAAAAASUVORK5CYII=",
   "base64",
 );
+const FAKE_RFB_BANNER = new Uint8Array([
+  0x52, 0x46, 0x42, 0x20, 0x30, 0x30, 0x33, 0x2e, 0x30, 0x30, 0x38, 0x0a,
+]);
 
 
 interface FakeBotScreenRuntimeOptions {
@@ -41,6 +45,8 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
   readonly applicationExits: Array<{ surfaceId: string; runtimeGeneration: number }> = [];
   captureStreamsOpened = 0;
   captureStreamsClosed = 0;
+  expandedViewsAcquired = 0;
+  expandedViewsReleased = 0;
   captureRequestsInFlight = 0;
   maximumCaptureRequestsInFlight = 0;
   #unreconciled = new Set<string>();
@@ -55,6 +61,7 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
   #releaseWaiters: Array<{ count: number; resolve: () => void }> = [];
   #captureStreamCloseWaiters: Array<{ count: number; resolve: () => void }> = [];
   #captureStreamFailures = new Set<string>();
+  #captureFailures = new Set<string>();
   #releaseFailures = new Set<string>();
   #blockActions = false;
   #actionsStarted = 0;
@@ -171,6 +178,10 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     this.#captureStreamFailures.add(surfaceId);
   }
 
+  failNextCapture(surfaceId: string): void {
+    this.#captureFailures.add(surfaceId);
+  }
+
   failNextRelease(surfaceId: string): void {
     this.#releaseFailures.add(surfaceId);
   }
@@ -264,7 +275,9 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
     const outcome = Promise.withResolvers<BotScreenRuntimeOutcome>();
     let record!: FakeRuntimeRecord;
     const captureStreams = new Set<BotScreenCaptureStream>();
+    const expandedViews = new Set<BotScreenExpandedView>();
     const runtime: BotScreenRuntime = {
+      expandedProjection: "rfb",
       readiness: {
         compositor: "ready",
         waylandSocket: "private",
@@ -282,6 +295,9 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
       },
       capture: async (): Promise<BotScreenCapture> => {
         if (stopped) throw new Error("fake Bot Screen is stopped");
+        if (this.#captureFailures.delete(provision.surfaceId)) {
+          throw new Error("fake Bot Screen capture failed");
+        }
         return { mediaType: "image/png", bytes: FAKE_SCREEN_PNG };
       },
       openCaptureStream: async (): Promise<BotScreenCaptureStream> => {
@@ -326,6 +342,40 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
         captureStreams.add(stream);
         return stream;
       },
+      acquireExpandedView: async (): Promise<BotScreenExpandedView> => {
+        if (stopped) throw new Error("fake Bot Screen is stopped");
+        this.expandedViewsAcquired += 1;
+        const inbound: Uint8Array[] = [FAKE_RFB_BANNER];
+        const waiters: Array<{ resolve: (bytes: Uint8Array) => void; reject: (error: Error) => void }> = [];
+        let closed = false;
+        const view: BotScreenExpandedView = {
+          send: async (bytes) => {
+            if (closed || stopped) throw new Error("fake Bot Screen expanded view is closed");
+            const copy = bytes.slice();
+            const waiter = waiters.shift();
+            if (waiter !== undefined) waiter.resolve(copy);
+            else inbound.push(copy);
+          },
+          receive: async () => {
+            if (closed || stopped) throw new Error("fake Bot Screen expanded view is closed");
+            const queued = inbound.shift();
+            if (queued !== undefined) return queued;
+            const waiter = Promise.withResolvers<Uint8Array>();
+            waiters.push(waiter);
+            return waiter.promise;
+          },
+          close: async () => {
+            if (closed) return;
+            closed = true;
+            expandedViews.delete(view);
+            this.expandedViewsReleased += 1;
+            const error = new Error("fake Bot Screen expanded view is closed");
+            for (const waiter of waiters.splice(0)) waiter.reject(error);
+          },
+        };
+        expandedViews.add(view);
+        return view;
+      },
       act: async (action) => {
         if (stopped) throw new Error("fake Bot Screen is stopped");
         actionCount += 1;
@@ -346,13 +396,14 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
             : {}),
         };
       },
-      setInputAuthority: async (epoch): Promise<void> => {
+      setInputAuthority: async (epoch): Promise<number> => {
         if (!Number.isSafeInteger(epoch) || epoch <= highestControllerEpoch) {
           throw new BotScreenInputRejectedError("fake Bot Screen rejected stale input authority");
         }
         controllerEpoch = epoch;
         highestControllerEpoch = epoch;
         lastInputSequence = 0;
+        return epoch;
       },
       input: async (event): Promise<void> => {
         this.#inputAttempts += 1;
@@ -427,6 +478,7 @@ export class FakeBotScreenRuntimeAdapter implements BotScreenRuntimeAdapter {
         stopped = true;
         this.stops.push({ surfaceId: provision.surfaceId, runtimeGeneration: provision.generation });
         await Promise.allSettled([...captureStreams].map((stream) => stream.close()));
+        await Promise.allSettled([...expandedViews].map((view) => view.close()));
         if (this.#runtimes.get(provision.surfaceId) === record) this.#runtimes.delete(provision.surfaceId);
       },
     };

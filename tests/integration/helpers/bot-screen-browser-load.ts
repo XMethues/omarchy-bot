@@ -21,12 +21,6 @@ interface InstrumentFrame {
   captureToBrowserMs?: number;
 }
 
-interface VideoStats {
-  framesReceived: number;
-  framesDecoded: number;
-  framesDropped: number;
-  packetsLost: number;
-}
 
 interface InstrumentState {
   received: InstrumentFrame[];
@@ -42,7 +36,6 @@ interface InstrumentState {
     visibleAtMs?: number;
   };
   armInput(): void;
-  sampleVideoStats(): Promise<VideoStats>;
 }
 
 declare global {
@@ -54,14 +47,9 @@ declare global {
 export interface BrowserWindowMetric extends BrowserFrameMetric {
   durationMs: number;
   renderingSequences: number[];
-  transportDrops: number;
   decodeDrops: number;
   paintDrops: number;
   captureToBrowserMs: number[];
-  pipelineBoundary: {
-    start: { received: number; decoded: number; dropped: number; displayed: number };
-    end: { received: number; decoded: number; dropped: number; displayed: number };
-  };
 }
 
 export function selectNonLoopbackLanAddress(
@@ -112,11 +100,9 @@ function installBrowserInstrumentation(): void {
   const awaitingBlob: InstrumentFrame[] = [];
   const frameByUrl = new Map<string, InstrumentFrame>();
   const processedUrls = new Set<string>();
-  const observedVideos = new WeakSet<HTMLVideoElement>();
-  const peerConnections = new Set<RTCPeerConnection>();
-  let videoSequence = 0;
-  let pendingHeader: { sequence: number; chunkCount: number; capturedAt?: string } | undefined;
-  let chunks = 0;
+  const observedViews = new WeakSet<HTMLElement>();
+  let viewSequence = 0;
+  let pendingHeader: { sequence: number; byteLength: number; capturedAt?: string } | undefined;
 
   const instrument: InstrumentState = {
     received,
@@ -133,36 +119,6 @@ function installBrowserInstrumentation(): void {
         baselineSignature: baseline.signature,
       };
     },
-    async sampleVideoStats() {
-      const totals: VideoStats = {
-        framesReceived: 0,
-        framesDecoded: 0,
-        framesDropped: 0,
-        packetsLost: 0,
-      };
-      for (const peer of peerConnections) {
-        const report = await peer.getStats();
-        report.forEach((entry) => {
-          const metric = entry as RTCStats & {
-            kind?: string;
-            mediaType?: string;
-            framesReceived?: number;
-            framesDecoded?: number;
-            framesDropped?: number;
-            packetsLost?: number;
-          };
-          if (
-            metric.type !== "inbound-rtp"
-            || (metric.kind ?? metric.mediaType) !== "video"
-          ) return;
-          totals.framesReceived += metric.framesReceived ?? 0;
-          totals.framesDecoded += metric.framesDecoded ?? 0;
-          totals.framesDropped += metric.framesDropped ?? 0;
-          totals.packetsLost += Math.max(0, metric.packetsLost ?? 0);
-        });
-      }
-      return totals;
-    },
   };
   Object.defineProperty(window, "__botScreenLoad", { value: instrument });
 
@@ -174,100 +130,97 @@ function installBrowserInstrumentation(): void {
     return url;
   };
 
-  const nativeCreateDataChannel = RTCPeerConnection.prototype.createDataChannel;
-  RTCPeerConnection.prototype.createDataChannel = function(label, options): RTCDataChannel {
-    peerConnections.add(this);
-    const channel = nativeCreateDataChannel.call(this, label, options);
-    if (label === "screen.preview.v2") {
-      channel.addEventListener("message", (event: MessageEvent<unknown>) => {
-        if (typeof event.data === "string") {
-          try {
-            const header = JSON.parse(event.data) as { type?: string; sequence?: number; chunkCount?: number; capturedAt?: string };
-            pendingHeader = header.type === "preview-frame"
-              && typeof header.sequence === "number"
-              && typeof header.chunkCount === "number"
-              ? { sequence: header.sequence, chunkCount: header.chunkCount, ...(header.capturedAt === undefined ? {} : { capturedAt: header.capturedAt }) }
-              : undefined;
-            chunks = 0;
-          } catch {
-            pendingHeader = undefined;
+  const NativeWebSocket = window.WebSocket;
+  window.WebSocket = new Proxy(NativeWebSocket, {
+    construct(Target, args: ConstructorParameters<typeof WebSocket>) {
+      const socket = new Target(...args);
+      const url = new URL(typeof args[0] === "string" ? args[0] : args[0].href, location.href);
+      if (url.pathname.endsWith("/api/computer/projection/control")) {
+        socket.addEventListener("message", (event: MessageEvent<unknown>) => {
+          if (typeof event.data === "string") {
+            try {
+              const message = JSON.parse(event.data) as {
+                type?: string;
+                active?: boolean;
+                controllerEpoch?: number;
+                sequence?: number;
+                byteLength?: number;
+                capturedAt?: string;
+              };
+              if (
+                message.type === "input-authority"
+                && typeof message.active === "boolean"
+                && typeof message.controllerEpoch === "number"
+              ) {
+                instrument.inputAuthorityActive = message.active;
+                instrument.inputAuthorityMessages.push({
+                  active: message.active,
+                  controllerEpoch: message.controllerEpoch,
+                  receivedAtMs: performance.now(),
+                });
+              }
+              pendingHeader = message.type === "preview-frame"
+                && typeof message.sequence === "number"
+                && typeof message.byteLength === "number"
+                ? {
+                    sequence: message.sequence,
+                    byteLength: message.byteLength,
+                    ...(message.capturedAt === undefined ? {} : { capturedAt: message.capturedAt }),
+                  }
+                : pendingHeader;
+            } catch {
+              // Production client owns validation; instrumentation records valid messages only.
+            }
+            return;
           }
-          return;
-        }
-        if (pendingHeader === undefined || !(event.data instanceof ArrayBuffer)) return;
-        chunks += 1;
-        if (chunks !== pendingHeader.chunkCount) return;
-        const capturedAtEpochMs = pendingHeader.capturedAt === undefined ? null : Date.parse(pendingHeader.capturedAt);
-        const frame: InstrumentFrame = {
-          sequence: pendingHeader.sequence,
-          signature: 0,
-          capturedAtEpochMs: Number.isFinite(capturedAtEpochMs) ? capturedAtEpochMs : null,
-          receivedAtMs: performance.now(),
-        };
-        received.push(frame);
-        awaitingBlob.push(frame);
-        pendingHeader = undefined;
-        chunks = 0;
-      });
-    }
-    if (label === "screen.input.v2") {
-      channel.addEventListener("message", (event: MessageEvent<unknown>) => {
-        if (typeof event.data !== "string") return;
-        try {
-          const message = JSON.parse(event.data) as {
-            type?: string;
-            active?: boolean;
-            controllerEpoch?: number;
-          };
-          if (
-            message.type !== "input-authority"
-            || typeof message.active !== "boolean"
-            || typeof message.controllerEpoch !== "number"
-          ) return;
-          instrument.inputAuthorityActive = message.active;
-          instrument.inputAuthorityMessages.push({
-            active: message.active,
-            controllerEpoch: message.controllerEpoch,
+          if (pendingHeader === undefined || !(event.data instanceof ArrayBuffer)) return;
+          if (event.data.byteLength !== pendingHeader.byteLength) {
+            pendingHeader = undefined;
+            return;
+          }
+          const capturedAtEpochMs = pendingHeader.capturedAt === undefined ? null : Date.parse(pendingHeader.capturedAt);
+          const frame: InstrumentFrame = {
+            sequence: pendingHeader.sequence,
+            signature: 0,
+            capturedAtEpochMs: Number.isFinite(capturedAtEpochMs) ? capturedAtEpochMs : null,
             receivedAtMs: performance.now(),
-          });
-        } catch {
-          // Production client owns validation; instrumentation records only valid authority messages.
-        }
-      });
-      const nativeSend = channel.send.bind(channel);
-      channel.send = (data: string | Blob | ArrayBuffer | ArrayBufferView<ArrayBuffer>): void => {
-        const pendingInput = instrument.pendingInput;
-        if (typeof data === "string") {
-          try {
-            const event = JSON.parse(data) as { type?: string; state?: string; reason?: string };
-            instrument.sentInputMessages.push({
-              type: event.type ?? null,
-              ...(event.state === undefined ? {} : { state: event.state }),
-              ...(event.reason === undefined ? {} : { reason: event.reason }),
-              sentAtMs: performance.now(),
-            });
-            if (
-              event.type === "key"
-              && event.state === "pressed"
-              && pendingInput !== undefined
-              && pendingInput.sentAtMs === undefined
-            ) pendingInput.sentAtMs = performance.now();
-          } catch {
-            // Production client owns validation; instrumentation timestamps parseable sends.
+          };
+          received.push(frame);
+          awaitingBlob.push(frame);
+          pendingHeader = undefined;
+        });
+        const nativeSend = socket.send.bind(socket);
+        socket.send = (data: string | ArrayBufferLike | Blob | ArrayBufferView): void => {
+          const pendingInput = instrument.pendingInput;
+          if (typeof data === "string") {
+            try {
+              const message = JSON.parse(data) as { type?: string; state?: string; reason?: string };
+              instrument.sentInputMessages.push({
+                type: message.type ?? null,
+                ...(message.state === undefined ? {} : { state: message.state }),
+                ...(message.reason === undefined ? {} : { reason: message.reason }),
+                sentAtMs: performance.now(),
+              });
+              if (
+                message.type === "key"
+                && message.state === "pressed"
+                && pendingInput !== undefined
+                && pendingInput.sentAtMs === undefined
+              ) pendingInput.sentAtMs = performance.now();
+            } catch {
+              // Production client owns validation; instrumentation timestamps parseable sends.
+            }
           }
           nativeSend(data);
-        } else if (data instanceof Blob) nativeSend(data);
-        else if (data instanceof ArrayBuffer) nativeSend(data);
-        else nativeSend(data);
-      };
-    }
-    return channel;
-  };
+        };
+      }
+      return socket;
+    },
+  });
 
   const observeImage = async (image: HTMLImageElement): Promise<void> => {
     const url = image.src;
-    const frame = frameByUrl.get(url)
-      ?? received.findLast((candidate) => candidate.decodedAtMs === undefined);
+    const frame = frameByUrl.get(url) ?? received.findLast((candidate) => candidate.decodedAtMs === undefined);
     if (frame === undefined || processedUrls.has(url)) return;
     try {
       await image.decode();
@@ -291,9 +244,7 @@ function installBrowserInstrumentation(): void {
       }
       frame.signature = signature >>> 0;
       frame.displayedAtMs = performance.now();
-      if (frame.capturedAtEpochMs !== null) {
-        frame.captureToBrowserMs = Date.now() - frame.capturedAtEpochMs;
-      }
+      if (frame.capturedAtEpochMs !== null) frame.captureToBrowserMs = Date.now() - frame.capturedAtEpochMs;
       displayed.push(frame);
       const input = instrument.pendingInput;
       if (
@@ -303,61 +254,64 @@ function installBrowserInstrumentation(): void {
         && frame.signature !== input.baselineSignature
       ) input.visibleAtMs = frame.displayedAtMs;
     } catch {
-      // A newer frame may revoke this Blob URL before decode/paint; that frame is
-      // intentionally not counted as browser-visible.
+      // A newer frame may revoke this Blob URL before decode/paint.
     }
   };
 
-  const observeVideo = (video: HTMLVideoElement): void => {
-    if (observedVideos.has(video)) return;
-    observedVideos.add(video);
-    const canvas = document.createElement("canvas");
-    canvas.width = 320;
-    canvas.height = 180;
-    const context = canvas.getContext("2d", { willReadFrequently: true });
+  const observeExpandedView = (host: HTMLElement): void => {
+    if (observedViews.has(host)) return;
+    observedViews.add(host);
+    const scratch = document.createElement("canvas");
+    scratch.width = 320;
+    scratch.height = 180;
+    const context = scratch.getContext("2d", { willReadFrequently: true });
     if (context === null) return;
-    const paint = (_now: DOMHighResTimeStamp, metadata: VideoFrameCallbackMetadata): void => {
-      if (!video.isConnected || video.srcObject === null) return;
-      const decodedAtMs = performance.now();
-      const frame: InstrumentFrame = {
-        sequence: ++videoSequence,
-        signature: 0,
-        capturedAtEpochMs: null,
-        receivedAtMs: decodedAtMs,
-        decodedAtMs,
-      };
-      received.push(frame);
-      decoded.push(frame);
-      context.drawImage(video, 0, 0, canvas.width, canvas.height);
-      const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
-      let signature = 2166136261;
-      for (let index = 0; index < pixels.length; index += 16) {
-        signature ^= pixels[index]!;
-        signature = Math.imul(signature, 16777619);
+    let lastSignature: number | undefined;
+    const paint = (): void => {
+      if (!host.isConnected) return;
+      const source = host.querySelector("canvas");
+      if (source !== null) {
+        const decodedAtMs = performance.now();
+        context.drawImage(source, 0, 0, scratch.width, scratch.height);
+        const pixels = context.getImageData(0, 0, scratch.width, scratch.height).data;
+        let signature = 2166136261;
+        for (let index = 0; index < pixels.length; index += 16) {
+          signature ^= pixels[index]!;
+          signature = Math.imul(signature, 16777619);
+        }
+        signature >>>= 0;
+        if (signature !== lastSignature) {
+          lastSignature = signature;
+          const displayedAtMs = performance.now();
+          const frame: InstrumentFrame = {
+            sequence: ++viewSequence,
+            signature,
+            capturedAtEpochMs: null,
+            receivedAtMs: decodedAtMs,
+            decodedAtMs,
+            displayedAtMs,
+          };
+          received.push(frame);
+          decoded.push(frame);
+          displayed.push(frame);
+          const input = instrument.pendingInput;
+          if (
+            input?.sentAtMs !== undefined
+            && input.visibleAtMs === undefined
+            && frame.sequence > input.baselineSequence
+            && frame.signature !== input.baselineSignature
+          ) input.visibleAtMs = displayedAtMs;
+        }
       }
-      frame.signature = signature >>> 0;
-      frame.displayedAtMs = performance.now();
-      const captureTime = "captureTime" in metadata ? metadata.captureTime : undefined;
-      if (typeof captureTime === "number" && Number.isFinite(captureTime)) {
-        frame.captureToBrowserMs = frame.displayedAtMs - captureTime;
-      }
-      displayed.push(frame);
-      const input = instrument.pendingInput;
-      if (
-        input?.sentAtMs !== undefined
-        && input.visibleAtMs === undefined
-        && frame.sequence > input.baselineSequence
-        && frame.signature !== input.baselineSignature
-      ) input.visibleAtMs = frame.displayedAtMs;
-      video.requestVideoFrameCallback(paint);
+      requestAnimationFrame(paint);
     };
-    video.requestVideoFrameCallback(paint);
+    requestAnimationFrame(paint);
   };
 
   const scan = (): void => {
-    const video = document.querySelector<HTMLVideoElement>('video[data-testid="computer-expanded-video"]');
+    const view = document.querySelector<HTMLElement>('[data-testid="computer-expanded-view"]');
     const preview = document.querySelector<HTMLImageElement>('img[data-testid="computer-preview"]');
-    if (video !== null) observeVideo(video);
+    if (view !== null) observeExpandedView(view);
     else if (preview !== null) void observeImage(preview);
   };
   addEventListener("DOMContentLoaded", () => {
@@ -381,7 +335,6 @@ type ProjectionFailureLookup = (
 
 export class BrowserSurfaceSession {
   #windowStartedAtMs?: number;
-  #windowStartedVideoStats?: VideoStats;
 
   private constructor(
     readonly owner: BrowserOwner,
@@ -490,18 +443,14 @@ export class BrowserSurfaceSession {
   }
 
   async expand(): Promise<void> {
-    const previewPaints = await this.page.evaluate(() => window.__botScreenLoad.displayed.length);
     await this.page.getByTestId("computer-preview-expand").click();
     await this.page.getByTestId("expanded-web-control").waitFor({ state: "visible", timeout: 10_000 });
     await this.page.waitForFunction(
-      ({ width, height, after }) => {
-        const video = document.querySelector<HTMLVideoElement>('video[data-testid="computer-expanded-video"]');
-        return video?.videoWidth === width
-          && video.videoHeight === height
-          && window.__botScreenLoad.displayed.length > after
-          && window.__botScreenLoad.inputAuthorityActive;
+      () => {
+        const view = document.querySelector('[data-testid="computer-expanded-view"]');
+        return view !== null && window.__botScreenLoad.inputAuthorityActive;
       },
-      { width: this.videoWidth, height: this.videoHeight, after: previewPaints },
+      undefined,
       { timeout: 10_000 },
     );
   }
@@ -593,12 +542,7 @@ export class BrowserSurfaceSession {
   }
 
   async startWindow(): Promise<void> {
-    const started = await this.page.evaluate(async () => ({
-      startedAtMs: performance.now(),
-      videoStats: await window.__botScreenLoad.sampleVideoStats(),
-    }));
-    this.#windowStartedAtMs = started.startedAtMs;
-    this.#windowStartedVideoStats = started.videoStats;
+    this.#windowStartedAtMs = await this.page.evaluate(() => performance.now());
   }
 
   async movePointer(step: number): Promise<void> {
@@ -612,23 +556,20 @@ export class BrowserSurfaceSession {
     if (step % 4 === 0) await this.page.mouse.wheel(0, step % 8 === 0 ? 240 : -240);
   }
 
-  async finishWindow(videoWindow?: { durationMs: number }): Promise<BrowserWindowMetric> {
+  async finishWindow(window?: { durationMs: number }): Promise<BrowserWindowMetric> {
     const startedAtMs = this.#windowStartedAtMs;
     if (startedAtMs === undefined) throw new Error("browser measurement window was not started");
-    const startVideoStats = this.#windowStartedVideoStats;
-    if (startVideoStats === undefined) throw new Error("browser video stats window was not started");
-    if (videoWindow !== undefined) {
+    if (window !== undefined) {
       await this.page.evaluate(() => new Promise<void>((resolve) =>
         requestAnimationFrame(() => setTimeout(resolve, 0))
       ));
     }
     const surfaceId: string = this.owner.surfaceId;
     const lanEndpoint = this.lanEndpoint;
-    return this.page.evaluate(async ({ start, startVideoStats, surfaceId, lanEndpoint, videoWindow }) => {
-      const state = window.__botScreenLoad;
+    return this.page.evaluate(({ start, surfaceId, lanEndpoint, window }) => {
+      const state = globalThis.window.__botScreenLoad;
       const endedAtMs = performance.now();
-      const endVideoStats = await state.sampleVideoStats();
-      const durationMs = videoWindow?.durationMs ?? endedAtMs - start;
+      const durationMs = window?.durationMs ?? endedAtMs - start;
       const received = state.received.filter((frame) =>
         frame.receivedAtMs >= start && frame.receivedAtMs <= endedAtMs
       );
@@ -638,13 +579,8 @@ export class BrowserSurfaceSession {
       const displayed = state.displayed.filter((frame) =>
         (frame.displayedAtMs ?? -1) >= start && (frame.displayedAtMs ?? Infinity) <= endedAtMs
       );
-      const video = videoWindow !== undefined;
-      const receivedFrames = video
-        ? endVideoStats.framesReceived - startVideoStats.framesReceived
-        : received.length;
-      const decodedFrames = video
-        ? endVideoStats.framesDecoded - startVideoStats.framesDecoded
-        : decoded.length;
+      const receivedFrames = received.length;
+      const decodedFrames = decoded.length;
       const displayedFrames = displayed.length;
       const renderingSequences = [...new Set(displayed.map((frame) => frame.sequence))]
         .sort((left, right) => left - right);
@@ -655,27 +591,6 @@ export class BrowserSurfaceSession {
         finalWebClient: true as const,
         durationMs: Number(durationMs.toFixed(2)),
         renderingSequences,
-        pipelineBoundary: {
-          start: {
-            received: startVideoStats.framesReceived,
-            decoded: startVideoStats.framesDecoded,
-            dropped: startVideoStats.framesDropped,
-            displayed: state.displayed.filter((frame) => (frame.displayedAtMs ?? Infinity) < start).length,
-          },
-          end: {
-            received: endVideoStats.framesReceived,
-            decoded: endVideoStats.framesDecoded,
-            dropped: endVideoStats.framesDropped,
-            displayed: state.displayed.length,
-          },
-        },
-        transportDrops: 0,
-        browserFramesDropped: video
-          ? endVideoStats.framesDropped - startVideoStats.framesDropped
-          : 0,
-        packetsLost: video
-          ? endVideoStats.packetsLost - startVideoStats.packetsLost
-          : 0,
         receivedFrames,
         decodedFrames,
         displayedFrames,
@@ -688,7 +603,7 @@ export class BrowserSurfaceSession {
           frame.captureToBrowserMs === undefined ? [] : [Number(frame.captureToBrowserMs.toFixed(2))]
         ),
       };
-    }, { start: startedAtMs, startVideoStats, surfaceId, lanEndpoint, videoWindow });
+    }, { start: startedAtMs, surfaceId, lanEndpoint, window });
   }
 
   async close(): Promise<void> {
@@ -696,17 +611,97 @@ export class BrowserSurfaceSession {
   }
 }
 
+interface ProjectionProxyData {
+  target: string;
+  upstream: WebSocket | undefined;
+  pending: Array<string | Uint8Array>;
+  pendingBytes: number;
+  closed: boolean;
+}
+
+/** The browser harness must relay WebSocket upgrades as well as HTTP assets. */
+export function startProjectionProxy(
+  upstreamBaseUrl: string,
+  hostname: string,
+  tls?: { key: import("bun").BunFile; cert: import("bun").BunFile },
+): Server<ProjectionProxyData> {
+  const upstream = new URL(upstreamBaseUrl);
+  const maxBufferedBytes = 8 * 1024 * 1024;
+  const byteLength = (data: string | Uint8Array | ArrayBuffer): number =>
+    typeof data === "string" ? Buffer.byteLength(data) : data.byteLength;
+  return Bun.serve<ProjectionProxyData>({
+    hostname,
+    port: 0,
+    ...(tls === undefined ? {} : { tls }),
+    fetch(request, server) {
+      const incoming = new URL(request.url);
+      const target = new URL(`${incoming.pathname}${incoming.search}`, upstream);
+      if (request.headers.get("upgrade")?.toLowerCase() === "websocket") {
+        target.protocol = target.protocol === "https:" ? "wss:" : "ws:";
+        if (server.upgrade(request, { data: { target: target.href, upstream: undefined, pending: [], pendingBytes: 0, closed: false } })) return;
+        return new Response("WebSocket upgrade required", { status: 426 });
+      }
+      return fetch(new Request(target, request));
+    },
+    websocket: {
+      open(client) {
+        const data = client.data;
+        const remote = new WebSocket(data.target);
+        data.upstream = remote;
+        remote.binaryType = "arraybuffer";
+        remote.addEventListener("open", () => {
+          if (data.closed) { remote.close(); return; }
+          for (const message of data.pending) remote.send(message);
+          data.pending = [];
+          data.pendingBytes = 0;
+        });
+        remote.addEventListener("message", (event) => {
+          if (data.closed) return;
+          const message = typeof event.data === "string" ? event.data : new Uint8Array(event.data as ArrayBuffer);
+          if (client.getBufferedAmount() + byteLength(message) > maxBufferedBytes || client.send(message) === 0) {
+            client.close(1013, "proxy backpressure");
+            remote.close();
+          }
+        });
+        remote.addEventListener("error", () => client.close(1011, "upstream connection failed"));
+        remote.addEventListener("close", (event) => {
+          if (!data.closed) client.close(event.code === 1000 ? 1000 : 1011, "upstream closed");
+        });
+      },
+      message(client, raw) {
+        const data = client.data;
+        const remote = data.upstream;
+        if (data.closed) return;
+        const size = byteLength(raw);
+        if (size + data.pendingBytes + (remote?.bufferedAmount ?? 0) > maxBufferedBytes) {
+          client.close(1013, "proxy backpressure");
+          remote?.close();
+          return;
+        }
+        if (remote?.readyState === WebSocket.OPEN) remote.send(raw);
+        else { data.pending.push(typeof raw === "string" ? raw : raw.slice()); data.pendingBytes += size; }
+      },
+      close(client) {
+        client.data.closed = true;
+        client.data.pending = [];
+        client.data.pendingBytes = 0;
+        client.data.upstream?.close();
+      },
+    },
+  });
+}
+
 export class FinalWebBrowserHarness {
   readonly lanEndpoint: string;
   readonly lanInterface: string;
   readonly browserName: string;
   readonly #browser: Browser;
-  readonly #proxy: Server<undefined>;
+  readonly #proxy: Server<ProjectionProxyData>;
   readonly #tlsRoot: string;
 
   private constructor(
     browser: Browser,
-    proxy: Server<undefined>,
+    proxy: Server<ProjectionProxyData>,
     lanEndpoint: string,
     lanInterface: string,
     browserName: string,
@@ -726,7 +721,6 @@ export class FinalWebBrowserHarness {
     failureLookup?: ProjectionFailureLookup,
   ): Promise<FinalWebBrowserHarness> {
     const selected = selectNonLoopbackLanAddress(os.networkInterfaces(), process.env.OMARCHY_BOT_LOAD_LAN_INTERFACE);
-    const upstream = new URL(upstreamBaseUrl);
     const tlsRoot = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-screen-load-tls-"));
     const keyPath = path.join(tlsRoot, "key.pem");
     const certificatePath = path.join(tlsRoot, "certificate.pem");
@@ -757,18 +751,8 @@ export class FinalWebBrowserHarness {
       rmSync(tlsRoot, { recursive: true, force: true });
       throw new Error("could not create the browser load harness LAN certificate");
     }
-    const proxy = Bun.serve({
-      hostname: selected.address,
-      port: 0,
-      tls: {
-        key: Bun.file(keyPath),
-        cert: Bun.file(certificatePath),
-      },
-      fetch(request) {
-        const incoming = new URL(request.url);
-        const target = new URL(`${incoming.pathname}${incoming.search}`, upstream);
-        return fetch(new Request(target, request));
-      },
+    const proxy = startProjectionProxy(upstreamBaseUrl, selected.address, {
+      key: Bun.file(keyPath), cert: Bun.file(certificatePath),
     });
     const executablePath = process.env.OMARCHY_BOT_LOAD_BROWSER_BIN
       ?? Bun.which("brave")
@@ -811,7 +795,7 @@ export class FinalWebBrowserHarness {
 
   async close(): Promise<void> {
     await this.#browser.close();
-    this.#proxy.stop(true);
+    await this.#proxy.stop(true);
     rmSync(this.#tlsRoot, { recursive: true, force: true });
   }
 }

@@ -31,6 +31,15 @@ export interface SidebarProps {
   onOpenSettings: () => void;
 }
 
+const sidebarStyles = stylex.create({
+  row: {
+    transitionDuration: {
+      default: null,
+      "@media (prefers-reduced-motion: reduce)": "0s",
+    },
+  },
+});
+
 const activityTime = (bot: BotViewDto): string => bot.lastActivityAt ?? bot.createdAt;
 
 export function orderSidebarBots(bots: BotViewDto[]): BotViewDto[] {
@@ -86,7 +95,7 @@ export function Sidebar({
       ]}
     >
       <Item
-        xstyle={avatarStatusScope}
+        xstyle={[avatarStatusScope, sidebarStyles.row]}
         startContent={
           <HStack height={48} vAlign="center">
             <AvatarView
@@ -110,7 +119,7 @@ export function Sidebar({
         }
         labelLines={1}
         description={
-          <Text aria-hidden="true" type="supporting" color="secondary" maxLines={1}>
+          <Text aria-hidden="true" type="supporting" color={bot.id === selectedBotId ? "primary" : "secondary"} maxLines={1}>
             {bot.previewText ?? "No output yet"}
           </Text>
         }

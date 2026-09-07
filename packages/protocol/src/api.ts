@@ -372,57 +372,18 @@ export const ComputerViewDto = z.object({
 });
 export type ComputerViewDto = z.infer<typeof ComputerViewDto>;
 
-export const SCREEN_PROJECTION_PROTOCOL_VERSION = 2 as const;
-export const SCREEN_PREVIEW_CHANNEL = "screen.preview.v2" as const;
-export const SCREEN_CONTROL_CHANNEL = "screen.control.v2" as const;
-export const SCREEN_INPUT_CHANNEL = "screen.input.v2" as const;
-export const SCREEN_H264_CLOCK_RATE = 90_000 as const;
-export const SCREEN_H264_PROFILE = "42e01f" as const;
-export const SCREEN_H264_FMTP =
-  `level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=${SCREEN_H264_PROFILE}` as const;
+export const SCREEN_PROJECTION_PROTOCOL_VERSION = 3 as const;
 
 export const ScreenProjectionModeDto = z.enum(["idle", "preview", "expanded"]);
 export type ScreenProjectionModeDto = z.infer<typeof ScreenProjectionModeDto>;
 
-export const ScreenProjectionCapabilitiesDto = z.object({
-  previewImage: z.object({
-    transport: z.literal("data-channel"),
-    channel: z.literal(SCREEN_PREVIEW_CHANNEL),
-    mediaType: z.literal("image/png"),
-  }),
-  expandedVideo: z.object({
-    transport: z.literal("webrtc-video-track"),
-    codec: z.literal("video/H264"),
-    profileLevelId: z.literal(SCREEN_H264_PROFILE),
-    clockRate: z.literal(SCREEN_H264_CLOCK_RATE),
-  }),
-  control: z.object({
-    transport: z.literal("data-channel"),
-    channel: z.literal(SCREEN_CONTROL_CHANNEL),
-  }),
-  input: z.object({
-    transport: z.literal("data-channel"),
-    channel: z.literal(SCREEN_INPUT_CHANNEL),
-  }),
-  snapshotFallback: z.object({
-    transport: z.literal("http"),
-    mediaType: z.literal("image/png"),
-  }),
-});
-export type ScreenProjectionCapabilitiesDto = z.infer<typeof ScreenProjectionCapabilitiesDto>;
-
-export const ScreenProjectionOfferDto = z.object({
+export const ScreenProjectionSessionRequestDto = z.object({
   version: z.literal(SCREEN_PROJECTION_PROTOCOL_VERSION),
-  type: z.literal("offer"),
-  sdp: z.string().min(1),
-  capabilities: ScreenProjectionCapabilitiesDto,
-});
-export type ScreenProjectionOfferDto = z.infer<typeof ScreenProjectionOfferDto>;
+}).strict();
+export type ScreenProjectionSessionRequestDto = z.infer<typeof ScreenProjectionSessionRequestDto>;
 
-export const ScreenProjectionAnswerDto = z.object({
+export const ScreenProjectionSessionDto = z.object({
   version: z.literal(SCREEN_PROJECTION_PROTOCOL_VERSION),
-  type: z.literal("answer"),
-  sdp: z.string().min(1),
   sessionId: z.string().min(1),
   surfaceId: SurfaceIdDto,
   runtimeGeneration: z.number().int().positive(),
@@ -433,31 +394,42 @@ export const ScreenProjectionAnswerDto = z.object({
   videoHeight: z.number().int().positive(),
   scale: z.number().positive(),
   state: z.literal("connecting"),
-  capabilities: ScreenProjectionCapabilitiesDto,
+  controlUrl: z.string().startsWith("/"),
+  rfbUrl: z.string().startsWith("/"),
+  snapshotUrl: z.string().startsWith("/"),
   security: z.object({
     authentication: z.literal("none"),
     httpsRequired: z.literal(false),
-  }),
-  candidates: z.array(z.object({ candidate: z.string(), sdpMid: z.string() })),
-});
-export type ScreenProjectionAnswerDto = z.infer<typeof ScreenProjectionAnswerDto>;
+  }).strict(),
+}).strict();
+export type ScreenProjectionSessionDto = z.infer<typeof ScreenProjectionSessionDto>;
 
-export const ScreenProjectionControlMessageDto = z.object({
+const ScreenProjectionEnvelopeDto = z.object({
   version: z.literal(SCREEN_PROJECTION_PROTOCOL_VERSION),
-  type: z.literal("view"),
+  sessionId: z.string().min(1),
   surfaceId: SurfaceIdDto,
   runtimeGeneration: z.number().int().positive(),
-  mode: ScreenProjectionModeDto,
 });
+
+export const ScreenProjectionControlMessageDto = ScreenProjectionEnvelopeDto.extend({
+  type: z.literal("view"),
+  mode: ScreenProjectionModeDto,
+}).strict();
 export type ScreenProjectionControlMessageDto = z.infer<typeof ScreenProjectionControlMessageDto>;
 
+export const ScreenProjectionViewStateMessageDto = ScreenProjectionEnvelopeDto.extend({
+  type: z.literal("view-state"),
+  mode: ScreenProjectionModeDto,
+}).strict();
+export type ScreenProjectionViewStateMessageDto = z.infer<typeof ScreenProjectionViewStateMessageDto>;
+
 export const ScreenProjectionFailureReasonDto = z.enum([
-  "unsupported-h264",
   "missing-first-frame",
   "capture-failed",
-  "encoder-failed",
   "transport-failed",
-  "decode-failed",
+  "rfb-start-failed",
+  "rfb-bridge-failed",
+  "view-client-failed",
 ]);
 export type ScreenProjectionFailureReasonDto = z.infer<typeof ScreenProjectionFailureReasonDto>;
 
@@ -470,16 +442,13 @@ export const ScreenProjectionBrowserMetricsDto = z.object({
   captureToPaintLatencySamples: z.number().int().nonnegative(),
   captureToPaintLatencyTotalMs: z.number().finite().nonnegative(),
   captureToPaintLatencyMaxMs: z.number().finite().nonnegative(),
-});
+}).strict();
 export type ScreenProjectionBrowserMetricsDto = z.infer<typeof ScreenProjectionBrowserMetricsDto>;
 
-export const ScreenProjectionBrowserMetricsMessageDto = z.object({
-  version: z.literal(SCREEN_PROJECTION_PROTOCOL_VERSION),
+export const ScreenProjectionBrowserMetricsMessageDto = ScreenProjectionEnvelopeDto.extend({
   type: z.literal("browser-metrics"),
-  surfaceId: SurfaceIdDto,
-  runtimeGeneration: z.number().int().positive(),
   metrics: ScreenProjectionBrowserMetricsDto,
-});
+}).strict();
 export type ScreenProjectionBrowserMetricsMessageDto = z.infer<typeof ScreenProjectionBrowserMetricsMessageDto>;
 
 export const ScreenProjectionClientControlMessageDto = z.discriminatedUnion("type", [
@@ -488,20 +457,14 @@ export const ScreenProjectionClientControlMessageDto = z.discriminatedUnion("typ
 ]);
 export type ScreenProjectionClientControlMessageDto = z.infer<typeof ScreenProjectionClientControlMessageDto>;
 
-export const ScreenProjectionFailureMessageDto = z.object({
-  version: z.literal(SCREEN_PROJECTION_PROTOCOL_VERSION),
+export const ScreenProjectionFailureMessageDto = ScreenProjectionEnvelopeDto.extend({
   type: z.literal("projection-failure"),
-  surfaceId: SurfaceIdDto,
-  runtimeGeneration: z.number().int().positive(),
   reason: ScreenProjectionFailureReasonDto,
   snapshotFallback: z.literal(true),
-});
+}).strict();
 export type ScreenProjectionFailureMessageDto = z.infer<typeof ScreenProjectionFailureMessageDto>;
 
-const ScreenInputEnvelopeDto = z.object({
-  version: z.literal(SCREEN_PROJECTION_PROTOCOL_VERSION),
-  surfaceId: SurfaceIdDto,
-  runtimeGeneration: z.number().int().positive(),
+const ScreenInputEnvelopeDto = ScreenProjectionEnvelopeDto.extend({
   geometryGeneration: z.number().int().positive(),
   controllerEpoch: z.number().int().positive(),
   sequence: z.number().int().positive(),
@@ -535,19 +498,19 @@ export const ScreenInputMessageDto = z.discriminatedUnion("type", [
   ScreenInputEnvelopeDto.extend({
     type: z.literal("pointer-motion"),
     ...ScreenPointerPositionDto,
-  }),
+  }).strict(),
   ScreenInputEnvelopeDto.extend({
     type: z.literal("pointer-button"),
     ...ScreenPointerPositionDto,
     button: z.enum(["left", "middle", "right"]),
     state: z.enum(["pressed", "released"]),
-  }),
+  }).strict(),
   ScreenInputEnvelopeDto.extend({
     type: z.literal("pointer-scroll"),
     ...ScreenPointerPositionDto,
     deltaX: z.number().finite(),
     deltaY: z.number().finite(),
-  }),
+  }).strict(),
   ScreenInputEnvelopeDto.extend({
     type: z.literal("key"),
     code: ScreenKeyCodeDto,
@@ -557,25 +520,22 @@ export const ScreenInputMessageDto = z.discriminatedUnion("type", [
       alt: z.boolean(),
       shift: z.boolean(),
       meta: z.boolean(),
-    }),
-  }),
+    }).strict(),
+  }).strict(),
   ScreenInputEnvelopeDto.extend({
     type: z.literal("paste"),
     text: z.string().min(1).max(65_536),
-  }),
+  }).strict(),
   ScreenInputEnvelopeDto.extend({
     type: z.literal("release-control"),
     reason: z.enum(["blur", "visibility-loss", "navigation", "teardown"]),
-  }),
+  }).strict(),
 ]);
 export type ScreenInputMessageDto = z.infer<typeof ScreenInputMessageDto>;
 
-export const ScreenInputAuthorityMessageDto = z.object({
-  version: z.literal(SCREEN_PROJECTION_PROTOCOL_VERSION),
+export const ScreenInputAuthorityMessageDto = ScreenProjectionEnvelopeDto.extend({
   type: z.literal("input-authority"),
   active: z.boolean(),
-  surfaceId: SurfaceIdDto,
-  runtimeGeneration: z.number().int().positive(),
   geometryGeneration: z.number().int().positive(),
   controllerEpoch: z.number().int().positive(),
   logicalWidth: z.number().int().positive(),
@@ -583,14 +543,11 @@ export const ScreenInputAuthorityMessageDto = z.object({
   videoWidth: z.number().int().positive(),
   videoHeight: z.number().int().positive(),
   scale: z.number().positive(),
-});
+}).strict();
 export type ScreenInputAuthorityMessageDto = z.infer<typeof ScreenInputAuthorityMessageDto>;
 
-export const ScreenProjectionPreviewFrameHeaderDto = z.object({
-  version: z.literal(SCREEN_PROJECTION_PROTOCOL_VERSION),
+export const ScreenProjectionPreviewFrameHeaderDto = ScreenProjectionEnvelopeDto.extend({
   type: z.literal("preview-frame"),
-  surfaceId: SurfaceIdDto,
-  runtimeGeneration: z.number().int().positive(),
   geometryGeneration: z.number().int().positive(),
   logicalWidth: z.number().int().positive(),
   logicalHeight: z.number().int().positive(),
@@ -601,9 +558,9 @@ export const ScreenProjectionPreviewFrameHeaderDto = z.object({
   mediaType: z.literal("image/png"),
   capturedAt: z.string().optional(),
   byteLength: z.number().int().positive(),
-  chunkCount: z.number().int().positive(),
-});
+}).strict();
 export type ScreenProjectionPreviewFrameHeaderDto = z.infer<typeof ScreenProjectionPreviewFrameHeaderDto>;
+
 
 // ----- command bodies -----
 

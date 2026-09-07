@@ -1,47 +1,32 @@
 import { randomUUID } from "node:crypto";
-import rtc, { type DataChannel, type PeerConnection, type RtpPacketizationConfig, type Track } from "node-datachannel";
-import sharp from "sharp";
 import type { SurfaceId } from "@omarchy-bot/domain";
 import {
-  SCREEN_CONTROL_CHANNEL,
-  SCREEN_H264_CLOCK_RATE,
-  SCREEN_H264_FMTP,
-  SCREEN_H264_PROFILE,
-  SCREEN_INPUT_CHANNEL,
-  SCREEN_PREVIEW_CHANNEL,
   SCREEN_PROJECTION_PROTOCOL_VERSION,
   ScreenInputMessageDto,
   type ScreenInputAuthorityMessageDto,
   ScreenProjectionClientControlMessageDto,
   type ScreenProjectionFailureMessageDto,
   type ScreenProjectionFailureReasonDto,
-  type ScreenProjectionAnswerDto,
   type ScreenProjectionBrowserMetricsDto,
   type ScreenProjectionModeDto,
-  type ScreenProjectionOfferDto,
+  type ScreenProjectionSessionDto,
+  type ScreenProjectionViewStateMessageDto,
 } from "@omarchy-bot/protocol";
-import { ApplicationUnits } from "../../supervision/applicationUnits.ts";
 import type { ComputerSurfaceOwner } from "./broker.ts";
 import type {
   BotScreenManager,
   BotScreenInputEvent,
-  BotScreenCaptureStream,
+  BotScreenExpandedView,
   BotScreenProjectionSource,
 } from "./botScreenManager.ts";
 import { InputDiagnostics, type InputDiagnosticCategory } from "./inputDiagnostics.ts";
-import {
-  h264Timestamp,
-  parseH264ReceiveOffer,
-  startH264Encoder,
-  type H264OfferCodec,
-  type H264EncoderProcess,
-} from "./h264Encoder.ts";
 
 const PREVIEW_INTERVAL_MS = 1_000;
 const MAX_BUFFERED_BYTES = 8 * 1024 * 1024;
 const MAX_FRAME_BYTES = MAX_BUFFERED_BYTES;
-const CHUNK_BYTES = 48 * 1024;
-const SIGNALING_TIMEOUT_MS = 5_000;
+const MAX_INPUT_QUEUE = 256;
+const SOCKET_ATTACH_TIMEOUT_MS = 10_000;
+const RFB_BACKPRESSURE_TIMEOUT_MS = 5_000;
 const CAPTURE_TIMEOUT_MS = 2_000;
 const FAILURE_DELIVERY_GRACE_MS = 100;
 
@@ -65,15 +50,14 @@ export interface ProjectionLoadMetrics {
   readonly sequence: number;
   readonly captureAttempts: number;
   readonly sourceFrames: number;
-  readonly encoderInputs: number;
-  readonly encodedFrames: number;
-  readonly encodedBytes: number;
-  readonly rtpSends: number;
+  readonly previewFrames: number;
+  readonly previewBytes: number;
+  readonly rfbBytesSent: number;
+  readonly rfbBytesReceived: number;
   readonly browserReceives: number;
   readonly browserDecodes: number;
   readonly browserPaints: number;
   readonly captureSkips: number;
-  readonly encoderDrops: number;
   readonly invalidFrames: number;
   readonly transportSkips: number;
   readonly sendFailures: number;
@@ -83,9 +67,6 @@ export interface ProjectionLoadMetrics {
   readonly captureLatencySamples: number;
   readonly captureLatencyTotalMs: number;
   readonly captureLatencyMaxMs: number;
-  readonly encodeLatencySamples: number;
-  readonly encodeLatencyTotalMs: number;
-  readonly encodeLatencyMaxMs: number;
   readonly captureToPaintLatencySamples: number;
   readonly captureToPaintLatencyTotalMs: number;
   readonly captureToPaintLatencyMaxMs: number;
@@ -93,20 +74,17 @@ export interface ProjectionLoadMetrics {
 
 export interface ProjectionFailureDiagnostic {
   readonly reason: ScreenProjectionFailureReasonDto;
-  /** Internal process detail; never returned by the HTTP status contract. */
   readonly technicalError?: string;
   readonly metrics: Readonly<ProjectionLoadMetrics>;
 }
 
-/** Viewer-driven capture/encode work for one Screen. Not an HTTP status contract. */
 export interface SurfaceProjectionMedia {
   readonly surfaceId: SurfaceId;
   readonly viewers: number;
   readonly previewViewers: number;
   readonly expandedViewers: number;
   readonly captureActive: boolean;
-  readonly encodingActive: boolean;
-  readonly encoderPids: readonly number[];
+  readonly rfbActive: boolean;
 }
 
 export class ScreenProjectionUnavailableError extends Error {
@@ -119,39 +97,49 @@ export class ScreenProjectionUnavailableError extends Error {
   }
 }
 
+export interface ProjectionWebSocket {
+  send(data: string | Uint8Array): number;
+  close(code?: number, reason?: string): void;
+  getBufferedAmount(): number;
+}
+
+export type ProjectionSocketKind = "control" | "rfb";
+
+export interface ProjectionSocketReservation {
+  readonly sessionId: string;
+  readonly kind: ProjectionSocketKind;
+  readonly token: string;
+}
 
 interface ProjectionSession {
   id: string;
   owner: ComputerSurfaceOwner;
   source: BotScreenProjectionSource;
-  peer: PeerConnection;
   state: ProjectionLifecycleState;
-  peerClosed: Promise<void>;
-  resolvePeerClosed(): void;
   mode: ProjectionViewMode;
-  preview?: DataChannel;
-  control?: DataChannel;
-  input?: DataChannel;
-  videoTrack: Track;
-  rtpConfig: RtpPacketizationConfig;
-  encoder?: H264EncoderProcess | undefined;
-  videoStart?: Promise<void> | undefined;
-  videoSequence: number;
-  sequence: number;
+  control?: ProjectionWebSocket | undefined;
+  rfb?: ProjectionWebSocket | undefined;
+  controlReservation?: string | undefined;
+  rfbReservation?: string | undefined;
+  attachmentTimer?: Timer | undefined;
   timer?: Timer | undefined;
-  captureStream?: BotScreenCaptureStream | undefined;
+  expandedView?: BotScreenExpandedView | undefined;
+  viewStart?: Promise<void> | undefined;
+  viewRead?: Promise<void> | undefined;
+  viewWrite: Promise<void>;
+  viewWriteBytes: number;
   captureTask?: Promise<void> | undefined;
-  captureCleanups: Set<Promise<void>>;
+  cleanups: Set<Promise<void>>;
   nextFrameAt?: number | undefined;
+  sequence: number;
   captureAttempts: number;
   sourceFrames: number;
-  encoderInputs: number;
-  encodedFrames: number;
-  encodedBytes: number;
-  rtpSends: number;
+  previewFrames: number;
+  previewBytes: number;
+  rfbBytesSent: number;
+  rfbBytesReceived: number;
   framesSent: number;
   preCaptureBackpressureSkips: number;
-  encodedBackpressureDrops: number;
   transportUnavailableSkips: number;
   invalidFrameDrops: number;
   sendFailures: number;
@@ -159,11 +147,6 @@ interface ProjectionSession {
   captureLatencySamples: number;
   captureLatencyTotalMs: number;
   captureLatencyMaxMs: number;
-  encodeLatencySamples: number;
-  encodeLatencyTotalMs: number;
-  encodeLatencyMaxMs: number;
-  encodeStartedAt: number[];
-  awaitingKeyframe: boolean;
   captureInFlight: boolean;
   inputSuspended: boolean;
 }
@@ -207,44 +190,6 @@ const KEY_CODES: Record<string, number> = {
   Pause: 119, MetaLeft: 125, MetaRight: 126, ContextMenu: 127,
 };
 
-
-interface Deadline<T> {
-  promise: Promise<T>;
-  resolve(value: T): void;
-  reject(error: Error): void;
-  cancel(): void;
-}
-
-function deadline<T>(message: string): Deadline<T> {
-  let settled = false;
-  let resolvePromise!: (value: T) => void;
-  let rejectPromise!: (error: Error) => void;
-  let timer: Timer | undefined;
-  const promise = new Promise<T>((resolve, reject) => {
-    resolvePromise = resolve;
-    rejectPromise = reject;
-  });
-  const reject = (error: Error): void => {
-    if (settled) return;
-    settled = true;
-    clearTimeout(timer);
-    rejectPromise(error);
-  };
-  timer = setTimeout(() => reject(new Error(message)), SIGNALING_TIMEOUT_MS);
-  timer.unref?.();
-  return {
-    promise,
-    resolve: (value) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolvePromise(value);
-    },
-    reject,
-    cancel: () => reject(new Error("WebRTC signaling was cancelled")),
-  };
-}
-
 async function withinProjectionDeadline<T>(operation: Promise<T>, message: string): Promise<T> {
   let timer: Timer | undefined;
   const timeout = new Promise<never>((_, reject) => {
@@ -258,11 +203,6 @@ async function withinProjectionDeadline<T>(operation: Promise<T>, message: strin
   }
 }
 
-/**
- * Owns WebRTC peers, capture pumps, and validated Web Controllers. HTTP
- * routes exchange SDP while runtime handles, geometry, authority, ordering,
- * protocol framing, motion coalescing, release barriers, and backpressure stay here.
- */
 export class ScreenProjectionService {
   #sessions = new Map<string, ProjectionSession>();
   #failures = new Map<string, {
@@ -280,26 +220,15 @@ export class ScreenProjectionService {
   #controllers = new Map<SurfaceId, InputController>();
   #controllerEpochs = new Map<SurfaceId, number>();
   #releaseBarriers = new Map<SurfaceId, Promise<void>>();
-  #units: ApplicationUnits;
   #unsubscribeScreens: () => void;
+
   constructor(
     private readonly screens: BotScreenManager,
     private readonly diagnostics: InputDiagnostics,
     private readonly canAcceptWebControl: (owner: ComputerSurfaceOwner) => boolean,
     private readonly webControlClaimed: (owner: ComputerSurfaceOwner) => void,
     private readonly webControlReleased: (owner: ComputerSurfaceOwner) => void,
-    private readonly videoFrameRate = 15,
-    private readonly webRtcPort = 0,
-    hostRuntimeDir?: string,
-    private readonly ffmpegBin?: string,
   ) {
-    this.#units = new ApplicationUnits(hostRuntimeDir);
-    if (!Number.isSafeInteger(webRtcPort) || webRtcPort < 0 || webRtcPort > 65_535) {
-      throw new Error("Screen Projection WebRTC port must be an integer from 0 to 65535");
-    }
-    if (!Number.isSafeInteger(videoFrameRate) || videoFrameRate < 1) {
-      throw new Error("H.264 Screen Projection frame rate must be a positive integer");
-    }
     this.#unsubscribeScreens = screens.subscribe((transition) => {
       if (transition.state === "failed" || transition.state === "stopped") {
         void this.closeSurface(transition.surfaceId);
@@ -307,69 +236,30 @@ export class ScreenProjectionService {
     });
   }
 
-  async answer(owner: ComputerSurfaceOwner, offer: ScreenProjectionOfferDto): Promise<ScreenProjectionAnswerDto> {
-    if (offer.type !== "offer" || offer.sdp.trim() === "") throw new Error("a WebRTC SDP offer is required");
-    let codec: H264OfferCodec;
-    try {
-      codec = parseH264ReceiveOffer(offer.sdp);
-    } catch {
-      throw new ScreenProjectionUnavailableError(
-        "unsupported-h264",
-        "Expanded Web Control requires browser-compatible H.264 Baseline video",
-      );
-    }
+  async createSession(owner: ComputerSurfaceOwner): Promise<ScreenProjectionSessionDto> {
     const source = await this.screens.projectionSource(owner);
     if (source === undefined) {
       throw new Error(this.screens.status(owner).failure ?? "Bot Screen is unavailable");
     }
 
     const id = randomUUID();
-    const peer = new rtc.PeerConnection(`screen-projection-${id}`, {
-      iceServers: [],
-      disableAutoNegotiation: true,
-      maxMessageSize: MAX_FRAME_BYTES,
-      enableIceUdpMux: true,
-      ...(this.webRtcPort === 0
-        ? {}
-        : { portRangeBegin: this.webRtcPort, portRangeEnd: this.webRtcPort }),
-    });
-    const video = new rtc.Video(codec.mid, "SendOnly");
-    video.addH264Codec(codec.payloadType, SCREEN_H264_FMTP);
-    video.setBitrate(6_000);
-    const rtpConfig = new rtc.RtpPacketizationConfig(
-      Number.parseInt(id.replaceAll("-", "").slice(0, 8), 16),
-      "screen-projection",
-      codec.payloadType,
-      SCREEN_H264_CLOCK_RATE,
-    );
-    const videoTrack = peer.addTrack(video);
-    videoTrack.setMediaHandler(new rtc.H264RtpPacketizer("StartSequence", rtpConfig));
-    const peerClosed = Promise.withResolvers<void>();
     const session: ProjectionSession = {
       id,
       owner,
       source,
-      peer,
       state: "connecting",
-      peerClosed: peerClosed.promise,
-      resolvePeerClosed: peerClosed.resolve,
-      videoTrack,
-      rtpConfig,
       mode: "idle",
+      viewWrite: Promise.resolve(),
+      viewWriteBytes: 0,
       sequence: 0,
-      videoSequence: 0,
-      inputSuspended: false,
-      captureCleanups: new Set(),
-      captureInFlight: false,
       captureAttempts: 0,
       sourceFrames: 0,
-      encodedFrames: 0,
-      encodedBytes: 0,
+      previewFrames: 0,
+      previewBytes: 0,
+      rfbBytesSent: 0,
+      rfbBytesReceived: 0,
       framesSent: 0,
       preCaptureBackpressureSkips: 0,
-      encoderInputs: 0,
-      encodedBackpressureDrops: 0,
-      rtpSends: 0,
       transportUnavailableSkips: 0,
       invalidFrameDrops: 0,
       sendFailures: 0,
@@ -386,102 +276,122 @@ export class ScreenProjectionService {
       captureLatencySamples: 0,
       captureLatencyTotalMs: 0,
       captureLatencyMaxMs: 0,
-      encodeLatencySamples: 0,
-      encodeLatencyTotalMs: 0,
-      encodeLatencyMaxMs: 0,
-      encodeStartedAt: [],
-      awaitingKeyframe: false,
-      videoStart: undefined,
+      captureInFlight: false,
+      inputSuspended: false,
+      cleanups: new Set(),
     };
+    session.attachmentTimer = setTimeout(() => this.#close(session, false), SOCKET_ATTACH_TIMEOUT_MS);
+    session.attachmentTimer.unref?.();
     this.#sessions.set(id, session);
-    this.#terminalCleanups.add(session.peerClosed);
-    void session.peerClosed.finally(() => this.#terminalCleanups.delete(session.peerClosed));
 
-    const localDescription = deadline<{ sdp: string; type: string }>("WebRTC answer creation timed out");
-    const gathering = deadline<void>("WebRTC ICE gathering timed out");
-    const candidates: Array<{ candidate: string; sdpMid: string }> = [];
-    peer.onLocalDescription((sdp, type) => localDescription.resolve({ sdp, type }));
-    peer.onLocalCandidate((candidate, sdpMid) => candidates.push({ candidate, sdpMid }));
-    peer.onGatheringStateChange((state) => {
-      if (state === "complete") gathering.resolve();
-    });
-    peer.onDataChannel((channel) => this.#acceptChannel(session, channel));
-    peer.onStateChange((state) => {
-      if (state === "failed") {
-        this.#fail(
-          session,
-          "transport-failed",
-          new Error(`WebRTC peer failed (ice=${peer.iceState()}, gathering=${peer.gatheringState()})`),
-        );
-      } else if (state === "closed" || state === "disconnected") {
-        this.#close(session, false);
-      }
-    });
-    videoTrack.onOpen(() => {
-      if (session.mode === "expanded") this.#startVideo(session);
-    });
-    videoTrack.onClosed(() => this.#close(session, false));
-    videoTrack.onError((error) => this.#fail(
-      session,
-      "transport-failed",
-      new Error(
-        `WebRTC H.264 track failed: ${error} (peer=${peer.state()}, ice=${peer.iceState()}, bufferedBytes=${videoTrack.bufferedAmount()})`,
-      ),
-    ));
+    const query = `botId=${encodeURIComponent(owner.botId)}&surfaceId=${encodeURIComponent(owner.surfaceId)}`;
+    const sessionQuery = `${query}&sessionId=${encodeURIComponent(id)}`;
+    return {
+      version: SCREEN_PROJECTION_PROTOCOL_VERSION,
+      sessionId: id,
+      surfaceId: source.surfaceId,
+      runtimeGeneration: source.runtimeGeneration,
+      geometryGeneration: source.geometryGeneration,
+      logicalWidth: source.logicalWidth,
+      logicalHeight: source.logicalHeight,
+      videoWidth: source.videoWidth,
+      videoHeight: source.videoHeight,
+      scale: source.scale,
+      state: "connecting",
+      controlUrl: `/api/computer/projection/control?${sessionQuery}`,
+      rfbUrl: `/api/computer/projection/rfb?${sessionQuery}`,
+      snapshotUrl: `/api/computer/snapshot?${query}`,
+      security: { authentication: "none", httpsRequired: false },
+    };
+  }
 
-    try {
-      peer.setRemoteDescription(offer.sdp, "offer");
-      peer.setLocalDescription("answer");
-      const description = await localDescription.promise;
-      await gathering.promise;
-      const finalDescription = peer.localDescription();
-      return {
-        version: SCREEN_PROJECTION_PROTOCOL_VERSION,
-        type: "answer",
-        sdp: finalDescription?.sdp ?? description.sdp,
-        sessionId: id,
-        surfaceId: source.surfaceId,
-        runtimeGeneration: source.runtimeGeneration,
-        geometryGeneration: source.geometryGeneration,
-        logicalWidth: source.logicalWidth,
-        logicalHeight: source.logicalHeight,
-        videoWidth: source.videoWidth,
-        videoHeight: source.videoHeight,
-        scale: source.scale,
-        state: "connecting",
-        capabilities: {
-          previewImage: {
-            transport: "data-channel",
-            channel: SCREEN_PREVIEW_CHANNEL,
-            mediaType: "image/png",
-          },
-          expandedVideo: {
-            transport: "webrtc-video-track",
-            codec: "video/H264",
-            profileLevelId: SCREEN_H264_PROFILE,
-            clockRate: SCREEN_H264_CLOCK_RATE,
-          },
-          control: { transport: "data-channel", channel: SCREEN_CONTROL_CHANNEL },
-          input: { transport: "data-channel", channel: SCREEN_INPUT_CHANNEL },
-          snapshotFallback: { transport: "http", mediaType: "image/png" },
-        },
-        security: { authentication: "none", httpsRequired: false },
-        candidates,
-      };
-    } catch (error) {
-      this.#fail(session, "transport-failed", error);
-      throw error;
-    } finally {
-      localDescription.cancel();
-      gathering.cancel();
-      await Promise.allSettled([localDescription.promise, gathering.promise]);
+  reserveSocket(
+    owner: ComputerSurfaceOwner,
+    sessionId: string,
+    kind: ProjectionSocketKind,
+  ): ProjectionSocketReservation | undefined {
+    const session = this.#session(owner, sessionId);
+    if (session === undefined || session.state === "failed") return undefined;
+    if (kind === "control") {
+      if (session.control !== undefined || session.controlReservation !== undefined) return undefined;
+    } else if (
+      session.mode !== "expanded"
+      || session.control === undefined
+      || session.rfb !== undefined
+      || session.rfbReservation !== undefined
+      || session.source.expandedProjection !== "rfb"
+    ) {
+      return undefined;
+    }
+    const reservation = { sessionId, kind, token: randomUUID() } as const;
+    if (kind === "control") session.controlReservation = reservation.token;
+    else session.rfbReservation = reservation.token;
+    return reservation;
+  }
+
+  cancelSocketReservation(reservation: ProjectionSocketReservation): void {
+    const session = this.#sessions.get(reservation.sessionId);
+    if (session === undefined) return;
+    if (reservation.kind === "control" && session.controlReservation === reservation.token && session.control === undefined) {
+      session.controlReservation = undefined;
+    }
+    if (reservation.kind === "rfb" && session.rfbReservation === reservation.token && session.rfb === undefined) {
+      session.rfbReservation = undefined;
+    }
+  }
+
+  openSocket(reservation: ProjectionSocketReservation, socket: ProjectionWebSocket): boolean {
+    const session = this.#sessions.get(reservation.sessionId);
+    if (session === undefined || session.state === "failed") return false;
+    if (reservation.kind === "control") {
+      if (session.controlReservation !== reservation.token || session.control !== undefined) return false;
+      session.control = socket;
+      clearTimeout(session.attachmentTimer);
+      session.attachmentTimer = undefined;
+      session.state = session.mode;
+      this.#sendViewState(session);
+      return true;
+    }
+    if (
+      session.rfbReservation !== reservation.token
+      || session.rfb !== undefined
+      || session.control === undefined
+      || session.mode !== "expanded"
+    ) return false;
+    session.rfb = socket;
+    this.#startRfbView(session);
+    return true;
+  }
+
+  socketMessage(reservation: ProjectionSocketReservation, raw: string | Uint8Array): void {
+    const session = this.#sessions.get(reservation.sessionId);
+    if (session === undefined || session.state === "failed") return;
+    if (reservation.kind === "control") {
+      if (session.controlReservation !== reservation.token || session.control === undefined) return;
+      this.#control(session, raw);
+    } else {
+      if (session.rfbReservation !== reservation.token || session.rfb === undefined) return;
+      this.#rfbInput(session, raw);
+    }
+  }
+
+  socketClosed(reservation: ProjectionSocketReservation): void {
+    const session = this.#sessions.get(reservation.sessionId);
+    if (session === undefined) return;
+    if (reservation.kind === "control" && session.controlReservation === reservation.token) {
+      session.control = undefined;
+      session.controlReservation = undefined;
+      this.#close(session, false);
+    } else if (reservation.kind === "rfb" && session.rfbReservation === reservation.token) {
+      session.rfb = undefined;
+      session.rfbReservation = undefined;
+      this.#stopExpandedView(session);
     }
   }
 
   status(owner: ComputerSurfaceOwner, sessionId: string): ProjectionStatus | undefined {
-    const session = this.#sessions.get(sessionId);
+    const session = this.#session(owner, sessionId);
     if (session !== undefined) {
-      if (session.owner.botId !== owner.botId || session.owner.surfaceId !== owner.surfaceId) return undefined;
       const failure = this.#failures.get(sessionId)?.diagnostic.reason;
       return {
         sessionId,
@@ -494,62 +404,39 @@ export class ScreenProjectionService {
       };
     }
     const failure = this.#failures.get(sessionId);
-    if (failure === undefined || failure.botId !== owner.botId || failure.surfaceId !== owner.surfaceId) {
-      return undefined;
-    }
+    if (failure === undefined || failure.botId !== owner.botId || failure.surfaceId !== owner.surfaceId) return undefined;
     return {
       sessionId,
       surfaceId: failure.surfaceId,
       runtimeGeneration: failure.runtimeGeneration,
       state: "failed",
       mode: "idle",
-      framesSent: failure.diagnostic.metrics.rtpSends,
+      framesSent: failure.diagnostic.metrics.previewFrames,
       failure: failure.diagnostic.reason,
       snapshotFallback: true,
     };
   }
 
-  /**
-   * Internal diagnostic snapshot for load/conformance harnesses. This is not
-   * exposed by the HTTP projection status contract.
-   */
   loadMetrics(owner: ComputerSurfaceOwner, sessionId: string): Readonly<ProjectionLoadMetrics> | undefined {
-    const session = this.#sessions.get(sessionId);
-    if (session !== undefined) {
-      if (session.owner.botId !== owner.botId || session.owner.surfaceId !== owner.surfaceId) return undefined;
-      return this.#metricsSnapshot(session);
-    }
+    const session = this.#session(owner, sessionId);
+    if (session !== undefined) return this.#metricsSnapshot(session);
     const failure = this.#failures.get(sessionId);
-    if (failure === undefined || failure.botId !== owner.botId || failure.surfaceId !== owner.surfaceId) {
-      return undefined;
-    }
+    if (failure === undefined || failure.botId !== owner.botId || failure.surfaceId !== owner.surfaceId) return undefined;
     return failure.diagnostic.metrics;
   }
 
-  /**
-   * Viewer-driven capture and encode work still attached to a Screen.
-   * Internal/harness observation; not an HTTP status contract.
-   */
   surfaceMedia(surfaceId: SurfaceId): SurfaceProjectionMedia {
     const sessions = [...this.#sessions.values()].filter((session) => session.source.surfaceId === surfaceId);
-    const encoderPids = sessions.flatMap((session) => {
-      const pid = session.encoder?.pid;
-      return pid === undefined ? [] : [pid];
-    });
     return {
       surfaceId,
-      viewers: sessions.length,
-      previewViewers: sessions.filter((session) => session.mode === "preview").length,
-      expandedViewers: sessions.filter((session) => session.mode === "expanded").length,
-      captureActive: sessions.some((session) =>
-        session.captureStream !== undefined || session.timer !== undefined || session.captureInFlight
-      ),
-      encodingActive: sessions.some((session) => session.encoder !== undefined || session.videoStart !== undefined),
-      encoderPids,
+      viewers: sessions.filter((session) => session.control !== undefined).length,
+      previewViewers: sessions.filter((session) => session.control !== undefined && session.mode === "preview").length,
+      expandedViewers: sessions.filter((session) => session.control !== undefined && session.mode === "expanded").length,
+      captureActive: sessions.some((session) => session.captureTask !== undefined || session.timer !== undefined || session.captureInFlight),
+      rfbActive: sessions.some((session) => session.expandedView !== undefined || session.viewStart !== undefined),
     };
   }
 
-  /** Internal terminal failure snapshot for focused integration diagnostics. */
   failureDiagnostic(owner: ComputerSurfaceOwner, sessionId: string): ProjectionFailureDiagnostic | undefined {
     const failure = this.#failures.get(sessionId);
     if (failure === undefined || failure.botId !== owner.botId || failure.surfaceId !== owner.surfaceId) return undefined;
@@ -557,8 +444,8 @@ export class ScreenProjectionService {
   }
 
   async close(owner: ComputerSurfaceOwner, sessionId: string): Promise<boolean> {
-    const session = this.#sessions.get(sessionId);
-    if (session === undefined || session.owner.botId !== owner.botId || session.owner.surfaceId !== owner.surfaceId) {
+    const session = this.#session(owner, sessionId);
+    if (session === undefined) {
       const termination = this.#terminations.get(sessionId);
       if (termination !== undefined && termination.botId === owner.botId && termination.surfaceId === owner.surfaceId) {
         await termination.promise;
@@ -593,7 +480,7 @@ export class ScreenProjectionService {
     const session = [...this.#sessions.values()].find((candidate) =>
       candidate.source.surfaceId === surfaceId
       && candidate.mode === "expanded"
-      && candidate.input?.isOpen() === true
+      && candidate.control !== undefined
     );
     if (session === undefined) throw new Error("Web Control session is unavailable");
     session.inputSuspended = false;
@@ -610,9 +497,10 @@ export class ScreenProjectionService {
     await Promise.allSettled([
       ...sessions.flatMap((session) => [
         ...(session.captureTask === undefined ? [] : [session.captureTask]),
-        ...(session.videoStart === undefined ? [] : [session.videoStart]),
-        ...session.captureCleanups,
-        session.peerClosed,
+        ...(session.viewStart === undefined ? [] : [session.viewStart]),
+        ...(session.viewRead === undefined ? [] : [session.viewRead]),
+        session.viewWrite,
+        ...session.cleanups,
       ]),
       ...this.#terminalCleanups,
       ...[...this.#terminations.values()].map((termination) => termination.promise),
@@ -621,213 +509,106 @@ export class ScreenProjectionService {
     this.diagnostics.shutdown();
   }
 
-  #acceptChannel(session: ProjectionSession, channel: DataChannel): void {
-    if (session.preview === channel || session.control === channel || session.input === channel) return;
-    const label = channel.getLabel();
-    if (label === SCREEN_PREVIEW_CHANNEL) session.preview = channel;
-    else if (label === SCREEN_CONTROL_CHANNEL) {
-      session.control = channel;
-      channel.onMessage((raw) => this.#control(session, raw));
-    } else if (label === SCREEN_INPUT_CHANNEL) {
-      session.input = channel;
-      channel.onMessage((raw) => this.#input(session, raw));
-    } else {
-      channel.close();
-      return;
+  #session(owner: ComputerSurfaceOwner, sessionId: string): ProjectionSession | undefined {
+    const session = this.#sessions.get(sessionId);
+    if (session === undefined || session.owner.botId !== owner.botId || session.owner.surfaceId !== owner.surfaceId) {
+      return undefined;
     }
-    channel.onOpen(() => {
-      if (this.#sessions.get(session.id) !== session) return;
-      if (session.state === "connecting") session.state = "idle";
-      if (label === SCREEN_INPUT_CHANNEL && session.mode === "expanded") {
-        void this.#claimInput(session).catch(() => {});
-      }
-    });
-    channel.onClosed(() => this.#close(session, false));
-    channel.onError((error) => this.#fail(
-      session,
-      "transport-failed",
-      new Error(
-        `WebRTC data channel ${label} failed: ${error} (peer=${session.peer.state()}, ice=${session.peer.iceState()}, bufferedBytes=${channel.bufferedAmount()})`,
-      ),
-    ));
+    return session;
   }
 
-  #control(session: ProjectionSession, raw: string | Buffer | ArrayBuffer): void {
-    if (typeof raw !== "string") return;
+  #control(session: ProjectionSession, raw: string | Uint8Array): void {
+    if (typeof raw !== "string") {
+      this.#rejectInput(session);
+      return;
+    }
     let parsed: unknown;
     try {
       parsed = JSON.parse(raw);
     } catch {
+      this.#rejectInput(session);
       return;
     }
 
-    const message = ScreenProjectionClientControlMessageDto.safeParse(parsed);
-    if (
-      !message.success
-      || this.#sessions.get(session.id) !== session
-      || message.data.surfaceId !== session.source.surfaceId
-      || message.data.runtimeGeneration !== session.source.runtimeGeneration
-      || session.state === "failed"
-    ) return;
-    if (message.data.type === "browser-metrics") {
-      const current = session.browserMetrics;
-      const next = message.data.metrics;
-      session.browserMetrics = {
-        browserReceives: Math.max(current.browserReceives, next.browserReceives),
-        browserDecodes: Math.max(current.browserDecodes, next.browserDecodes),
-        browserPaints: Math.max(current.browserPaints, next.browserPaints),
-        decodeDrops: Math.max(current.decodeDrops, next.decodeDrops),
-        paintDrops: Math.max(current.paintDrops, next.paintDrops),
-        captureToPaintLatencySamples: Math.max(
-          current.captureToPaintLatencySamples,
-          next.captureToPaintLatencySamples,
-        ),
-        captureToPaintLatencyTotalMs: Math.max(
-          current.captureToPaintLatencyTotalMs,
-          next.captureToPaintLatencyTotalMs,
-        ),
-        captureToPaintLatencyMaxMs: Math.max(
-          current.captureToPaintLatencyMaxMs,
-          next.captureToPaintLatencyMaxMs,
-        ),
-      };
+    const control = ScreenProjectionClientControlMessageDto.safeParse(parsed);
+    if (control.success) {
+      if (!this.#matches(session, control.data)) {
+        this.#rejectInput(session);
+        return;
+      }
+      if (control.data.type === "browser-metrics") {
+        this.#mergeBrowserMetrics(session, control.data.metrics);
+      } else {
+        this.#setMode(session, control.data.mode);
+      }
       return;
     }
-    this.#setMode(session, message.data.mode);
+    this.#input(session, parsed);
   }
 
+  #matches(
+    session: ProjectionSession,
+    envelope: { sessionId: string; surfaceId: SurfaceId; runtimeGeneration: number },
+  ): boolean {
+    return this.#sessions.get(session.id) === session
+      && envelope.sessionId === session.id
+      && envelope.surfaceId === session.source.surfaceId
+      && envelope.runtimeGeneration === session.source.runtimeGeneration
+      && session.state !== "failed";
+  }
+
+  #mergeBrowserMetrics(session: ProjectionSession, next: ScreenProjectionBrowserMetricsDto): void {
+    const current = session.browserMetrics;
+    session.browserMetrics = {
+      browserReceives: Math.max(current.browserReceives, next.browserReceives),
+      browserDecodes: Math.max(current.browserDecodes, next.browserDecodes),
+      browserPaints: Math.max(current.browserPaints, next.browserPaints),
+      decodeDrops: Math.max(current.decodeDrops, next.decodeDrops),
+      paintDrops: Math.max(current.paintDrops, next.paintDrops),
+      captureToPaintLatencySamples: Math.max(current.captureToPaintLatencySamples, next.captureToPaintLatencySamples),
+      captureToPaintLatencyTotalMs: Math.max(current.captureToPaintLatencyTotalMs, next.captureToPaintLatencyTotalMs),
+      captureToPaintLatencyMaxMs: Math.max(current.captureToPaintLatencyMaxMs, next.captureToPaintLatencyMaxMs),
+    };
+  }
 
   #setMode(session: ProjectionSession, mode: ProjectionViewMode): void {
     if (session.timer !== undefined) clearTimeout(session.timer);
     session.timer = undefined;
-    if (session.mode === "expanded" && mode !== "expanded") void this.#revokeInputFor(session);
     const changed = session.mode !== mode;
-    if (changed) {
-      this.#stopCaptureStream(session);
-      this.#stopEncoder(session);
+    if (session.mode === "expanded" && mode !== "expanded") {
+      void this.#revokeInputFor(session);
+      this.#detachRfb(session);
     }
     session.inputSuspended = false;
     session.mode = mode;
     session.nextFrameAt = mode === "idle" ? undefined : performance.now();
     session.state = mode;
+    this.#sendViewState(session);
     if (mode === "expanded") {
-      this.#startVideo(session);
       if (changed || !this.#isInputController(session)) void this.#claimInput(session).catch(() => {});
     } else if (mode === "preview") {
       this.#schedule(session, 0);
     }
   }
 
-  #startVideo(session: ProjectionSession): void {
-    if (
-      session.mode !== "expanded"
-      || session.encoder !== undefined
-      || session.videoStart !== undefined
-      || !session.videoTrack.isOpen()
-      || this.#sessions.get(session.id) !== session
-    ) return;
-    const start = (async () => {
-      await Promise.allSettled([
-        ...session.captureCleanups,
-        ...[...this.#terminations.values()]
-          .filter((termination) => termination.surfaceId === session.source.surfaceId)
-          .map((termination) => termination.promise),
-      ]);
-      if (
-        session.mode !== "expanded"
-        || session.encoder !== undefined
-        || !session.videoTrack.isOpen()
-        || this.#sessions.get(session.id) !== session
-      ) return;
-      let encoder!: H264EncoderProcess;
-      try {
-        const encoderEnvironment = {
-          HOME: process.env.HOME ?? "",
-          LANG: process.env.LANG ?? "C.UTF-8",
-          PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
-        };
-        encoder = startH264Encoder({
-          width: session.source.videoWidth,
-          height: session.source.videoHeight,
-          frameRate: this.videoFrameRate,
-          ...(this.ffmpegBin === undefined ? {} : { binary: this.ffmpegBin }),
-          ...(this.#units.enabled
-            ? {
-                commandPrefix: (encoderGeneration) =>
-                  this.#units.command(
-                    session.source.surfaceId,
-                    session.source.runtimeGeneration,
-                    `encoder-${session.id}-${encoderGeneration}`,
-                    encoderEnvironment,
-                  ),
-                launcherEnvironment: this.#units.launcherEnvironment(encoderEnvironment),
-              }
-            : {}),
-          onAccessUnit: (unit) => {
-            if (
-              session.encoder !== encoder
-              || session.mode !== "expanded"
-              || this.#sessions.get(session.id) !== session
-            ) return;
-            const encodedAt = performance.now();
-            const encodeStartedAt = session.encodeStartedAt.shift();
-            if (encodeStartedAt !== undefined) {
-              const latency = Math.max(0, encodedAt - encodeStartedAt);
-              session.encodeLatencySamples += 1;
-              session.encodeLatencyTotalMs += latency;
-              session.encodeLatencyMaxMs = Math.max(session.encodeLatencyMaxMs, latency);
-            }
-            session.encodedFrames += 1;
-            session.encodedBytes += unit.bytes.byteLength;
-            if (session.awaitingKeyframe && !unit.keyframe) {
-              session.encodedBackpressureDrops += 1;
-              return;
-            }
-            if (unit.keyframe) session.awaitingKeyframe = false;
-            if (!session.videoTrack.isOpen()) {
-              session.transportUnavailableSkips += 1;
-              return;
-            }
-            session.rtpConfig.timestamp = h264Timestamp(session.videoSequence, this.videoFrameRate);
-            session.videoSequence += 1;
-            try {
-              if (session.videoTrack.sendMessageBinary(unit.bytes)) {
-                session.sequence += 1;
-                session.rtpSends += 1;
-                session.framesSent += 1;
-              } else {
-                session.sendFailures += 1;
-              }
-            } catch {
-              session.sendFailures += 1;
-            }
-          },
-        });
-      } catch (error) {
-        this.#fail(session, "encoder-failed", error);
-        return;
-      }
-      session.encoder = encoder;
-      session.awaitingKeyframe = true;
-      void encoder.done.then(
-        () => {
-          if (session.encoder === encoder) {
-            this.#fail(session, "encoder-failed", new Error("H.264 encoder completed unexpectedly"));
-          }
-        },
-        (error) => {
-          if (session.encoder === encoder) this.#fail(session, "encoder-failed", error);
-        },
-      );
-      this.#schedule(session, 0);
-    })();
-    session.videoStart = start;
-    void start.finally(() => {
-      if (session.videoStart === start) session.videoStart = undefined;
-    });
+  #sendViewState(session: ProjectionSession): void {
+    const message: ScreenProjectionViewStateMessageDto = {
+      version: SCREEN_PROJECTION_PROTOCOL_VERSION,
+      type: "view-state",
+      sessionId: session.id,
+      surfaceId: session.source.surfaceId,
+      runtimeGeneration: session.source.runtimeGeneration,
+      mode: session.mode,
+    };
+    try {
+      if (session.control !== undefined) session.control.send(JSON.stringify(message));
+    } catch (error) {
+      this.#close(session, true, error);
+    }
   }
+
   #schedule(session: ProjectionSession, delay: number): void {
-    if (session.timer !== undefined || session.mode === "idle" || this.#sessions.get(session.id) !== session) return;
+    if (session.timer !== undefined || session.mode !== "preview" || this.#sessions.get(session.id) !== session) return;
     session.timer = setTimeout(() => {
       session.timer = undefined;
       const captureTask = this.#projectFrame(session);
@@ -840,19 +621,14 @@ export class ScreenProjectionService {
   }
 
   async #projectFrame(session: ProjectionSession): Promise<void> {
-    const mode = session.mode;
-    if (session.captureInFlight || mode === "idle" || this.#captureStopped(session, mode)) return;
-    const preview = session.preview;
-    const encoder = session.encoder;
-    if (
-      (mode === "preview" && (preview === undefined || !preview.isOpen()))
-      || (mode === "expanded" && (encoder === undefined || !session.videoTrack.isOpen()))
-    ) {
+    if (session.captureInFlight || session.mode !== "preview" || this.#sessions.get(session.id) !== session) return;
+    const control = session.control;
+    if (control === undefined) {
       session.transportUnavailableSkips += 1;
       this.#scheduleNext(session);
       return;
     }
-    if (mode === "preview" && preview!.bufferedAmount() > 0) {
+    if (control.getBufferedAmount() > 0) {
       session.preCaptureBackpressureSkips += 1;
       this.#scheduleNext(session);
       return;
@@ -861,107 +637,20 @@ export class ScreenProjectionService {
     session.captureInFlight = true;
     session.captureAttempts += 1;
     const captureStartedAt = performance.now();
-    let failure: ScreenProjectionFailureReasonDto = "capture-failed";
     try {
-      let captureStream = session.captureStream;
-      if (captureStream === undefined) {
-        await Promise.allSettled(session.captureCleanups);
-        if (this.#captureStopped(session, mode)) return;
-        const opening = session.source.openCaptureStream();
-        try {
-          captureStream = await withinProjectionDeadline(
-            opening,
-            "Screen capture helper did not start within its latency bound",
-          );
-        } catch (error) {
-          void opening.then((stream) => stream.close()).catch(() => {});
-          throw error;
-        }
-      }
-      if (this.#captureStopped(session, mode)) {
-        await captureStream.close().catch(() => {});
-        return;
-      }
-      session.captureStream = captureStream;
-      const frame = await withinProjectionDeadline(
-        captureStream.next(),
-        "Screen capture helper did not produce a frame within its latency bound",
+      const image = await withinProjectionDeadline(
+        session.source.capture(),
+        "Screen capture did not produce a frame within its latency bound",
       );
-      if (session.captureStream !== captureStream || this.#captureStopped(session, mode)) return;
+      if (session.mode !== "preview" || this.#sessions.get(session.id) !== session) return;
       session.sourceFrames += 1;
-      if (mode === "expanded") session.encoderInputs += 1;
-      const expectedByteLength = session.source.videoWidth * session.source.videoHeight * 4;
-      if (
-        frame.pixelFormat !== "rgba"
-        || frame.width !== session.source.videoWidth
-        || frame.height !== session.source.videoHeight
-        || frame.bytes.byteLength !== expectedByteLength
-      ) {
+      if (image.mediaType !== "image/png" || image.bytes.byteLength === 0 || image.bytes.byteLength > MAX_FRAME_BYTES) {
         session.invalidFrameDrops += 1;
         return;
       }
-      if (mode === "expanded") {
-        failure = "encoder-failed";
-        const encodeStartedAt = performance.now();
-        const result = encoder!.writeFrame(frame.bytes);
-        if (result.replacedPendingFrame) {
-          session.encodedBackpressureDrops += 1;
-          session.encodeStartedAt.pop();
-        }
-        session.encodeStartedAt.push(encodeStartedAt);
-        return;
-      }
-      const encoded = await sharp(frame.bytes, {
-        raw: { width: frame.width, height: frame.height, channels: 4 },
-        failOn: "error",
-        limitInputPixels: frame.width * frame.height,
-      }).png().toBuffer();
-      const bytes = new Uint8Array(encoded.buffer, encoded.byteOffset, encoded.byteLength);
-      if (bytes.byteLength === 0 || bytes.byteLength > MAX_FRAME_BYTES) {
-        session.invalidFrameDrops += 1;
-        return;
-      }
-      const byteLength = bytes.byteLength;
-      if (preview!.bufferedAmount() + byteLength > MAX_BUFFERED_BYTES) {
-        session.encodedBackpressureDrops += 1;
-        return;
-      }
-      const chunkCount = Math.ceil(byteLength / CHUNK_BYTES);
-      const header = JSON.stringify({
-        version: SCREEN_PROJECTION_PROTOCOL_VERSION,
-        type: "preview-frame",
-        surfaceId: session.source.surfaceId,
-        runtimeGeneration: session.source.runtimeGeneration,
-        geometryGeneration: session.source.geometryGeneration,
-        logicalWidth: session.source.logicalWidth,
-        logicalHeight: session.source.logicalHeight,
-        videoWidth: session.source.videoWidth,
-        videoHeight: session.source.videoHeight,
-        scale: session.source.scale,
-        sequence: ++session.sequence,
-        mediaType: "image/png" as const,
-        capturedAt: frame.capturedAt.toISOString(),
-        byteLength,
-        chunkCount,
-      });
-      try {
-        if (!preview!.sendMessage(header)) {
-          session.sendFailures += 1;
-          return;
-        }
-        for (let offset = 0; offset < byteLength; offset += CHUNK_BYTES) {
-          if (!preview!.sendMessageBinary(bytes.subarray(offset, Math.min(offset + CHUNK_BYTES, byteLength)))) {
-            session.sendFailures += 1;
-            return;
-          }
-        }
-        session.framesSent += 1;
-      } catch {
-        session.sendFailures += 1;
-      }
-    } catch {
-      queueMicrotask(() => this.#fail(session, failure));
-      return;
+      this.#sendPreviewPng(session, image.bytes, new Date());
+    } catch (error) {
+      queueMicrotask(() => this.#fail(session, "capture-failed", error));
     } finally {
       const captureLatency = Math.max(0, performance.now() - captureStartedAt);
       session.captureLatencySamples += 1;
@@ -972,45 +661,80 @@ export class ScreenProjectionService {
     }
   }
 
+  #sendPreviewPng(session: ProjectionSession, bytes: Uint8Array, capturedAt: Date): void {
+    const control = session.control;
+    if (control === undefined) {
+      session.transportUnavailableSkips += 1;
+      return;
+    }
+    if (bytes.byteLength === 0 || bytes.byteLength > MAX_FRAME_BYTES) {
+      session.invalidFrameDrops += 1;
+      return;
+    }
+    if (control.getBufferedAmount() + bytes.byteLength > MAX_BUFFERED_BYTES) {
+      session.preCaptureBackpressureSkips += 1;
+      return;
+    }
+    const header = JSON.stringify({
+      version: SCREEN_PROJECTION_PROTOCOL_VERSION,
+      type: "preview-frame",
+      sessionId: session.id,
+      surfaceId: session.source.surfaceId,
+      runtimeGeneration: session.source.runtimeGeneration,
+      geometryGeneration: session.source.geometryGeneration,
+      logicalWidth: session.source.logicalWidth,
+      logicalHeight: session.source.logicalHeight,
+      videoWidth: session.source.videoWidth,
+      videoHeight: session.source.videoHeight,
+      scale: session.source.scale,
+      sequence: ++session.sequence,
+      mediaType: "image/png" as const,
+      capturedAt: capturedAt.toISOString(),
+      byteLength: bytes.byteLength,
+    });
+    try {
+      if (control.send(header) <= 0 || control.send(bytes) <= 0) {
+        session.sendFailures += 1;
+        return;
+      }
+      session.previewFrames += 1;
+      session.previewBytes += bytes.byteLength;
+      session.framesSent += 1;
+    } catch {
+      session.sendFailures += 1;
+    }
+  }
+
   #scheduleNext(session: ProjectionSession): void {
+    if (session.mode !== "preview" || this.#sessions.get(session.id) !== session) return;
     const now = performance.now();
-    const interval = session.mode === "expanded" ? 1_000 / this.videoFrameRate : PREVIEW_INTERVAL_MS;
-    session.nextFrameAt = Math.max((session.nextFrameAt ?? now) + interval, now);
+    session.nextFrameAt = Math.max((session.nextFrameAt ?? now) + PREVIEW_INTERVAL_MS, now);
     this.#schedule(session, session.nextFrameAt - now);
   }
 
-
-  #input(session: ProjectionSession, raw: string | Buffer | ArrayBuffer): void {
+  #input(session: ProjectionSession, parsed: unknown): void {
     const controller = this.#controllers.get(session.source.surfaceId);
     if (
       controller?.session !== session
       || controller.revoked
       || !controller.active
       || session.mode !== "expanded"
-      || typeof raw !== "string"
     ) {
       this.#rejectInput(session);
       return;
     }
     if (!this.canAcceptWebControl(session.owner)) {
-      void this.#revokeInput(controller).catch(() => this.#close(session, true));
-      return;
-    }
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(raw);
-    } catch {
-      this.#rejectInput(session);
+      void this.#revokeInput(controller).catch((error) => this.#close(session, true, error));
       return;
     }
     const message = ScreenInputMessageDto.safeParse(parsed);
     if (
       !message.success
-      || message.data.surfaceId !== session.source.surfaceId
-      || message.data.runtimeGeneration !== session.source.runtimeGeneration
+      || !this.#matches(session, message.data)
       || message.data.geometryGeneration !== session.source.geometryGeneration
       || message.data.controllerEpoch !== controller.epoch
       || message.data.sequence !== controller.nextSequence
+      || controller.queue.length >= MAX_INPUT_QUEUE
       || (
         (message.data.type === "pointer-motion"
           || message.data.type === "pointer-button"
@@ -1020,10 +744,7 @@ export class ScreenProjectionService {
       || (message.data.type === "pointer-scroll" && message.data.deltaX === 0 && message.data.deltaY === 0)
       || (
         message.data.type === "paste"
-        && (
-          message.data.text.includes("\0")
-          || new TextEncoder().encode(message.data.text).byteLength > 65_536
-        )
+        && (message.data.text.includes("\0") || new TextEncoder().encode(message.data.text).byteLength > 65_536)
       )
     ) {
       this.#rejectInput(session);
@@ -1032,22 +753,13 @@ export class ScreenProjectionService {
     const { surfaceId, runtimeGeneration, geometryGeneration, controllerEpoch, sequence } = message.data;
     if (message.data.type === "release-control") {
       controller.nextSequence += 1;
-      this.#revokeInput(controller);
+      void this.#revokeInput(controller);
       return;
     }
 
     let event: BotScreenInputEvent;
     if (message.data.type === "pointer-motion") {
-      event = {
-        surfaceId,
-        runtimeGeneration,
-        geometryGeneration,
-        controllerEpoch,
-        sequence,
-        type: "motion",
-        x: message.data.x,
-        y: message.data.y,
-      };
+      event = { surfaceId, runtimeGeneration, geometryGeneration, controllerEpoch, sequence, type: "motion", x: message.data.x, y: message.data.y };
     } else if (message.data.type === "pointer-button") {
       if (message.data.state === "pressed") {
         if (controller.heldButtons.has(message.data.button)) {
@@ -1085,15 +797,7 @@ export class ScreenProjectionService {
         deltaY: message.data.deltaY,
       };
     } else if (message.data.type === "paste") {
-      event = {
-        surfaceId,
-        runtimeGeneration,
-        geometryGeneration,
-        controllerEpoch,
-        sequence,
-        type: "paste",
-        text: message.data.text,
-      };
+      event = { surfaceId, runtimeGeneration, geometryGeneration, controllerEpoch, sequence, type: "paste", text: message.data.text };
     } else {
       const heldCodes = new Set(controller.heldCodes);
       if (message.data.state === "pressed") {
@@ -1102,11 +806,9 @@ export class ScreenProjectionService {
           return;
         }
         heldCodes.add(message.data.code);
-      } else {
-        if (!heldCodes.delete(message.data.code)) {
-          this.#rejectInput(session);
-          return;
-        }
+      } else if (!heldCodes.delete(message.data.code)) {
+        this.#rejectInput(session);
+        return;
       }
       const actualModifiers = {
         control: heldCodes.has("ControlLeft") || heldCodes.has("ControlRight"),
@@ -1135,6 +837,7 @@ export class ScreenProjectionService {
         state: message.data.state,
       };
     }
+
     controller.nextSequence += 1;
     const category: InputDiagnosticCategory | undefined = message.data.type === "pointer-button"
       ? "pointer-button"
@@ -1143,12 +846,7 @@ export class ScreenProjectionService {
         : message.data.type === "paste"
           ? "paste"
           : message.data.type === "key"
-            ? (
-                message.data.state === "pressed"
-                && (message.data.modifiers.control || message.data.modifiers.alt || message.data.modifiers.meta)
-                  ? "shortcut"
-                  : "key"
-              )
+            ? (message.data.state === "pressed" && (message.data.modifiers.control || message.data.modifiers.alt || message.data.modifiers.meta) ? "shortcut" : "key")
             : undefined;
     const queued = {
       event,
@@ -1157,13 +855,7 @@ export class ScreenProjectionService {
       ...(message.data.type === "paste" ? { redactedLength: Array.from(message.data.text).length } : {}),
     };
     if (queued.category !== undefined) {
-      this.#recordDiagnostic(
-        session.source.surfaceId,
-        queued.category,
-        "accepted",
-        0,
-        queued.redactedLength,
-      );
+      this.#recordDiagnostic(session.source.surfaceId, queued.category, "accepted", 0, queued.redactedLength);
     }
     const last = controller.queue.at(-1);
     if (event.type === "motion" && last?.event.type === "motion") controller.queue[controller.queue.length - 1] = queued;
@@ -1176,11 +868,7 @@ export class ScreenProjectionService {
 
   async #drainInput(controller: InputController): Promise<void> {
     try {
-      while (
-        !controller.revoked
-        && controller.active
-        && this.#controllers.get(controller.session.source.surfaceId) === controller
-      ) {
+      while (!controller.revoked && controller.active && this.#controllers.get(controller.session.source.surfaceId) === controller) {
         const queued = controller.queue.shift();
         if (queued === undefined) return;
         try {
@@ -1212,17 +900,14 @@ export class ScreenProjectionService {
     if (
       this.#sessions.get(session.id) !== session
       || session.mode !== "expanded"
-      || session.input === undefined
-      || !session.input.isOpen()
+      || session.control === undefined
       || (!force && !this.canAcceptWebControl(session.owner))
       || this.#isInputController(session)
       || session.inputSuspended
     ) return false;
     const surfaceId = session.source.surfaceId;
     const previous = this.#controllers.get(surfaceId);
-    if (previous !== undefined && previous.session !== session) {
-      void this.#revokeInput(previous);
-    }
+    if (previous !== undefined && previous.session !== session) void this.#revokeInput(previous);
     const epoch = (this.#controllerEpochs.get(surfaceId) ?? 0) + 1;
     this.#controllerEpochs.set(surfaceId, epoch);
     const controller: InputController = {
@@ -1249,7 +934,9 @@ export class ScreenProjectionService {
         || this.#sessions.get(session.id) !== session
         || session.mode !== "expanded"
       ) return;
-      await session.source.setInputAuthority(epoch);
+      const accepted = await session.source.setInputAuthority(epoch);
+      controller.epoch = accepted;
+      this.#controllerEpochs.set(surfaceId, accepted);
       controller.provisioned = true;
       if (
         controller.revoked
@@ -1257,9 +944,7 @@ export class ScreenProjectionService {
         || this.#sessions.get(session.id) !== session
         || session.mode !== "expanded"
         || (!force && !this.canAcceptWebControl(session.owner))
-      ) {
-        return;
-      }
+      ) return;
       controller.active = true;
       this.webControlClaimed(session.owner);
       controller.announced = true;
@@ -1270,18 +955,16 @@ export class ScreenProjectionService {
     });
     await controller.release;
     if (activationFailed) {
-      this.#close(session, true);
+      if (!controller.revoked) void this.#revokeInput(controller).catch(() => {});
       return false;
     }
-    if (!controller.active && controller.provisioned && !controller.revoked) {
-      await this.#revokeInput(controller);
-    }
+    if (!controller.active && controller.provisioned && !controller.revoked) await this.#revokeInput(controller);
     return controller.active;
   }
 
   #rejectInput(session: ProjectionSession): void {
     this.#recordDiagnostic(session.source.surfaceId, "invalid", "rejected", 0);
-    this.#close(session, true);
+    this.#close(session, true, new Error("invalid Web Control input"));
   }
 
   #recordDiagnostic(
@@ -1344,12 +1027,14 @@ export class ScreenProjectionService {
   }
 
   #sendInputAuthority(controller: InputController, active: boolean): void {
-    const { input, source } = controller.session;
-    if (input === undefined || !input.isOpen()) return;
+    const { session } = controller;
+    const { source } = session;
+    if (session.control === undefined) return;
     const message: ScreenInputAuthorityMessageDto = {
       version: SCREEN_PROJECTION_PROTOCOL_VERSION,
       type: "input-authority",
       active,
+      sessionId: session.id,
       surfaceId: source.surfaceId,
       runtimeGeneration: source.runtimeGeneration,
       geometryGeneration: source.geometryGeneration,
@@ -1361,51 +1046,139 @@ export class ScreenProjectionService {
       scale: source.scale,
     };
     try {
-      input.sendMessage(JSON.stringify(message));
+      session.control.send(JSON.stringify(message));
     } catch {
-      // Revocation may race the native data channel closing.
+      // Revocation may race the control socket closing.
     }
   }
 
-  #captureStopped(session: ProjectionSession, mode = session.mode): boolean {
-    return session.mode !== mode || mode === "idle" || this.#sessions.get(session.id) !== session;
+  #rfbInput(session: ProjectionSession, raw: string | Uint8Array): void {
+    if (typeof raw === "string" || raw.byteLength === 0 || raw.byteLength > MAX_FRAME_BYTES) {
+      this.#fail(session, "view-client-failed", new Error("RFB WebSocket accepts bounded binary messages only"));
+      return;
+    }
+    if (session.viewWriteBytes + raw.byteLength > MAX_BUFFERED_BYTES) {
+      this.#fail(session, "view-client-failed", new Error("RFB client queue exceeded its byte bound"));
+      return;
+    }
+    const bytes = raw.slice();
+    session.viewWriteBytes += bytes.byteLength;
+    const write = session.viewWrite.then(async () => {
+      if (session.viewStart !== undefined) await session.viewStart;
+      const lease = session.expandedView;
+      if (lease === undefined || session.rfb === undefined || session.mode !== "expanded") {
+        throw new Error("RFB bridge is unavailable");
+      }
+      await lease.send(bytes);
+      session.rfbBytesReceived += bytes.byteLength;
+    }).catch((error) => {
+      this.#fail(session, "rfb-bridge-failed", error);
+    }).finally(() => {
+      session.viewWriteBytes -= bytes.byteLength;
+    });
+    session.viewWrite = write;
   }
 
-  #stopCaptureStream(session: ProjectionSession): void {
-    const stream = session.captureStream;
-    session.captureStream = undefined;
-    if (stream === undefined) return;
+  #startRfbView(session: ProjectionSession): void {
+    if (
+      session.mode !== "expanded"
+      || session.rfb === undefined
+      || session.source.expandedProjection !== "rfb"
+      || session.expandedView !== undefined
+      || session.viewStart !== undefined
+      || this.#sessions.get(session.id) !== session
+    ) return;
+    const start = (async () => {
+      await Promise.allSettled([
+        ...session.cleanups,
+        ...[...this.#terminations.values()]
+          .filter((termination) => termination.surfaceId === session.source.surfaceId)
+          .map((termination) => termination.promise),
+      ]);
+      if (session.mode !== "expanded" || session.rfb === undefined || this.#sessions.get(session.id) !== session) return;
+      let lease: BotScreenExpandedView;
+      try {
+        lease = await session.source.acquireExpandedView();
+      } catch (error) {
+        this.#fail(session, "rfb-start-failed", error);
+        return;
+      }
+      if (session.mode !== "expanded" || session.rfb === undefined || this.#sessions.get(session.id) !== session) {
+        await lease.close().catch(() => {});
+        return;
+      }
+      session.expandedView = lease;
+      const read = this.#readRfb(session, lease);
+      session.viewRead = read;
+      void read.finally(() => {
+        if (session.viewRead === read) session.viewRead = undefined;
+      });
+    })();
+    session.viewStart = start;
+    void start.finally(() => {
+      if (session.viewStart === start) session.viewStart = undefined;
+    });
+  }
+
+  async #readRfb(session: ProjectionSession, lease: BotScreenExpandedView): Promise<void> {
+    try {
+      while (session.expandedView === lease && session.rfb !== undefined && this.#sessions.get(session.id) === session) {
+        const bytes = await lease.receive();
+        if (bytes.byteLength === 0 || bytes.byteLength > MAX_FRAME_BYTES) {
+          throw new Error("RFB source produced an invalid message size");
+        }
+        await this.#sendRfb(session, bytes);
+      }
+    } catch (error) {
+      if (session.expandedView === lease && this.#sessions.get(session.id) === session) {
+        this.#fail(session, "rfb-bridge-failed", error);
+      }
+    }
+  }
+
+  async #sendRfb(session: ProjectionSession, bytes: Uint8Array): Promise<void> {
+    const deadline = performance.now() + RFB_BACKPRESSURE_TIMEOUT_MS;
+    for (;;) {
+      const socket = session.rfb;
+      if (socket === undefined || session.mode !== "expanded" || this.#sessions.get(session.id) !== session) {
+        throw new Error("RFB client disconnected");
+      }
+      if (socket.getBufferedAmount() + bytes.byteLength <= MAX_BUFFERED_BYTES) {
+        if (socket.send(bytes) <= 0) throw new Error("RFB WebSocket send failed");
+        session.rfbBytesSent += bytes.byteLength;
+        return;
+      }
+      if (performance.now() >= deadline) throw new Error("RFB WebSocket remained backpressured");
+      await Bun.sleep(10);
+    }
+  }
+
+  #detachRfb(session: ProjectionSession): void {
+    const socket = session.rfb;
+    session.rfb = undefined;
+    session.rfbReservation = undefined;
+    this.#stopExpandedView(session);
+    try {
+      socket?.close(1000, "RFB view ended");
+    } catch {
+      // The peer may already be closed.
+    }
+  }
+
+  #stopExpandedView(session: ProjectionSession): void {
+    const lease = session.expandedView;
+    session.expandedView = undefined;
+    if (lease === undefined) return;
     let cleanup: Promise<void>;
     try {
-      cleanup = stream.close();
+      cleanup = lease.close();
     } catch {
       cleanup = Promise.resolve();
     }
-    session.captureCleanups.add(cleanup);
+    session.cleanups.add(cleanup);
     this.#terminalCleanups.add(cleanup);
     void cleanup.finally(() => {
-      session.captureCleanups.delete(cleanup);
-      this.#terminalCleanups.delete(cleanup);
-    }).catch(() => {});
-  }
-
-  #stopEncoder(session: ProjectionSession): void {
-    const encoder = session.encoder;
-    session.encoder = undefined;
-    session.awaitingKeyframe = false;
-    session.encodedBackpressureDrops += session.encodeStartedAt.length;
-    session.encodeStartedAt.length = 0;
-    if (encoder === undefined) return;
-    let cleanup: Promise<void>;
-    try {
-      cleanup = encoder.close();
-    } catch {
-      cleanup = Promise.resolve();
-    }
-    session.captureCleanups.add(cleanup);
-    this.#terminalCleanups.add(cleanup);
-    void cleanup.finally(() => {
-      session.captureCleanups.delete(cleanup);
+      session.cleanups.delete(cleanup);
       this.#terminalCleanups.delete(cleanup);
     }).catch(() => {});
   }
@@ -1415,70 +1188,33 @@ export class ScreenProjectionService {
     const captureOutstanding = session.captureInFlight ? 1 : 0;
     const captureShortfall = session.state === "failed"
       ? 0
-      : Math.max(
-          0,
-          session.captureAttempts - session.sourceFrames - session.preCaptureBackpressureSkips - captureOutstanding,
-        );
-    const encoderShortfall = session.mode === "expanded" || session.encodedFrames > 0
-      ? Math.max(
-          0,
-          session.encoderInputs
-            - session.invalidFrameDrops
-            - session.encodedFrames
-            - session.encodedBackpressureDrops
-            - session.encodeStartedAt.length,
-        )
-      : 0;
-    const transportShortfall = Math.max(
-      0,
-      session.encodedFrames
-        - session.rtpSends
-        - session.transportUnavailableSkips
-        - session.sendFailures
-        - session.encodedBackpressureDrops,
-    );
-    const receiveShortfall = Math.max(0, session.rtpSends - browser.browserReceives);
-    const decodeShortfall = Math.max(
-      0,
-      browser.browserReceives - browser.browserDecodes - browser.decodeDrops,
-    );
-    const paintShortfall = Math.max(
-      0,
-      browser.browserDecodes - browser.browserPaints - browser.paintDrops,
-    );
+      : Math.max(0, session.captureAttempts - session.sourceFrames - session.preCaptureBackpressureSkips - captureOutstanding);
+    const receiveShortfall = Math.max(0, session.previewFrames - browser.browserReceives);
+    const decodeShortfall = Math.max(0, browser.browserReceives - browser.browserDecodes - browser.decodeDrops);
+    const paintShortfall = Math.max(0, browser.browserDecodes - browser.browserPaints - browser.paintDrops);
     return Object.freeze({
       sessionId: session.id,
       surfaceId: session.source.surfaceId,
       sequence: session.sequence,
       captureAttempts: session.captureAttempts,
       sourceFrames: session.sourceFrames,
-      encoderInputs: session.encoderInputs,
-      encodedFrames: session.encodedFrames,
-      encodedBytes: session.encodedBytes,
-      rtpSends: session.rtpSends,
+      previewFrames: session.previewFrames,
+      previewBytes: session.previewBytes,
+      rfbBytesSent: session.rfbBytesSent,
+      rfbBytesReceived: session.rfbBytesReceived,
       browserReceives: browser.browserReceives,
       browserDecodes: browser.browserDecodes,
       browserPaints: browser.browserPaints,
       captureSkips: session.preCaptureBackpressureSkips,
-      encoderDrops: session.encodedBackpressureDrops,
       invalidFrames: session.invalidFrameDrops,
       transportSkips: session.transportUnavailableSkips,
       sendFailures: session.sendFailures,
       decodeDrops: browser.decodeDrops,
       paintDrops: browser.paintDrops,
-      unexplainedShortfalls:
-        captureShortfall
-        + encoderShortfall
-        + transportShortfall
-        + receiveShortfall
-        + decodeShortfall
-        + paintShortfall,
+      unexplainedShortfalls: captureShortfall + receiveShortfall + decodeShortfall + paintShortfall,
       captureLatencySamples: session.captureLatencySamples,
       captureLatencyTotalMs: session.captureLatencyTotalMs,
       captureLatencyMaxMs: session.captureLatencyMaxMs,
-      encodeLatencySamples: session.encodeLatencySamples,
-      encodeLatencyTotalMs: session.encodeLatencyTotalMs,
-      encodeLatencyMaxMs: session.encodeLatencyMaxMs,
       captureToPaintLatencySamples: browser.captureToPaintLatencySamples,
       captureToPaintLatencyTotalMs: browser.captureToPaintLatencyTotalMs,
       captureToPaintLatencyMaxMs: browser.captureToPaintLatencyMaxMs,
@@ -1497,9 +1233,7 @@ export class ScreenProjectionService {
       runtimeGeneration: session.source.runtimeGeneration,
       diagnostic: Object.freeze({
         reason,
-        ...(technicalError === undefined
-          ? {}
-          : { technicalError: technicalError instanceof Error ? technicalError.message : String(technicalError) }),
+        ...(technicalError === undefined ? {} : { technicalError: technicalError instanceof Error ? technicalError.message : String(technicalError) }),
         metrics: this.#metricsSnapshot(session),
       }),
     });
@@ -1507,79 +1241,68 @@ export class ScreenProjectionService {
     if (this.#failures.size > 64 && !oldest.done) this.#failures.delete(oldest.value);
   }
 
-  #fail(
-    session: ProjectionSession,
-    reason: ScreenProjectionFailureReasonDto,
-    technicalError?: unknown,
-  ): void {
+  #fail(session: ProjectionSession, reason: ScreenProjectionFailureReasonDto, technicalError?: unknown): void {
     if (this.#sessions.get(session.id) !== session || session.state === "failed") return;
     session.state = "failed";
     session.mode = "idle";
     this.#recordFailure(session, reason, technicalError);
     session.inputSuspended = true;
-    clearTimeout(session.timer);
+    if (session.timer !== undefined) clearTimeout(session.timer);
     session.timer = undefined;
     void this.#revokeInputFor(session).catch(() => {});
-    this.#stopCaptureStream(session);
-    this.#stopEncoder(session);
+    this.#detachRfb(session);
     const message: ScreenProjectionFailureMessageDto = {
       version: SCREEN_PROJECTION_PROTOCOL_VERSION,
       type: "projection-failure",
+      sessionId: session.id,
       surfaceId: session.source.surfaceId,
       runtimeGeneration: session.source.runtimeGeneration,
       reason,
       snapshotFallback: true,
     };
     try {
-      if (session.control?.isOpen() === true) session.control.sendMessage(JSON.stringify(message));
+      session.control?.send(JSON.stringify(message));
     } catch {
-      // The peer may close before its terminal Surface state is delivered.
+      // The control socket may close before failure delivery.
     }
     session.timer = setTimeout(() => {
       session.timer = undefined;
-      this.#close(session, true);
+      this.#close(session, false);
     }, FAILURE_DELIVERY_GRACE_MS);
     session.timer.unref?.();
   }
 
-  #close(session: ProjectionSession, failed: boolean): void {
+  #close(session: ProjectionSession, failed: boolean, technicalError?: unknown): void {
     if (this.#sessions.get(session.id) !== session) return;
-    if (failed) this.#recordFailure(session, "transport-failed");
-    void this.#revokeInputFor(session).catch(() => {});
+    if (failed) this.#recordFailure(session, "transport-failed", technicalError);
     this.#sessions.delete(session.id);
-    if (session.timer !== undefined) clearTimeout(session.timer);
+    clearTimeout(session.attachmentTimer);
+    clearTimeout(session.timer);
+    session.attachmentTimer = undefined;
     session.timer = undefined;
-    this.#stopCaptureStream(session);
-    this.#stopEncoder(session);
+    void this.#revokeInputFor(session).catch(() => {});
+    const control = session.control;
+    session.control = undefined;
+    session.controlReservation = undefined;
+    this.#detachRfb(session);
     session.mode = "idle";
     session.state = failed ? "failed" : "closed";
-    for (const channel of [session.preview, session.control, session.input]) {
-      try {
-        channel?.close();
-      } catch {
-        // Peer teardown is best-effort after the session has been made unreachable.
-      }
+    try {
+      control?.close(1000, "Screen Projection ended");
+    } catch {
+      // The peer may already be closed.
     }
     const termination = Promise.allSettled([
       ...(session.captureTask === undefined ? [] : [session.captureTask]),
-      ...(session.videoStart === undefined ? [] : [session.videoStart]),
-      ...session.captureCleanups,
-      session.peerClosed,
+      ...(session.viewStart === undefined ? [] : [session.viewStart]),
+      ...(session.viewRead === undefined ? [] : [session.viewRead]),
+      session.viewWrite,
+      ...session.cleanups,
     ]).then(() => {});
-    const terminal = {
-      botId: session.owner.botId,
-      surfaceId: session.owner.surfaceId,
-      promise: termination,
-    };
+    const terminal = { botId: session.owner.botId, surfaceId: session.owner.surfaceId, promise: termination };
     this.#terminations.set(session.id, terminal);
     void termination.finally(() => {
       if (this.#terminations.get(session.id) === terminal) this.#terminations.delete(session.id);
     });
-    try {
-      session.peer.close();
-    } catch {
-      // Native peer may already be closed.
-    }
-    if (session.peer.state() === "closed") session.resolvePeerClosed();
   }
 }

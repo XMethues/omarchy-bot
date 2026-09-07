@@ -1,6 +1,6 @@
 # Current vs historical documentation
 
-Status: current routing map (2026-09-05). This accounts for still-valid requirements and historical evidence. Runtime tickets 01–07 have landed; mandatory human host acceptance remains open.
+Status: current routing map (2026-09-06). Runtime tickets 01–07 describe the 2026-09-05 Cage implementation; Computer ADR 0009 selects the pending Sway target. Target-runtime conformance and mandatory human host acceptance remain open.
 
 Read this map when an older specification, ticket, or research note appears to prescribe Changes, a single Shared Screen, nested Hyprland, per-Bot browser/profile/login policy, or four-stream capacity as current acceptance.
 
@@ -8,15 +8,15 @@ Read this map when an older specification, ticket, or research note appears to p
 
 | Kind | Document | Role |
 | --- | --- | --- |
-| Implementation specification | [Shared Workspace and Bot Desktop Boundary Correction](spec.md) | Current accepted implementation contract. Tickets 01–08 are resolved; ticket 09 human host acceptance remains unmet. |
-| Product model | [workspace-redesign.md](../../docs/workspace-redesign.md#shared-workspace-and-plugin-boundary) | Directory, ownership, Computer Surface, host-safety/resource evidence, and implementation gaps. |
-| Cross-context decisions | [ADR 0009](../../docs/adr/0009-share-work-files-isolate-bot-screens.md), [ADR 0010](../../docs/adr/0010-reuse-web-client-in-tauri.md) | Shared files vs isolated Screens; Web-to-Tauri reuse. |
+| Implementation specification | [Shared Workspace and Bot Desktop Boundary Correction](spec.md) | Current accepted implementation contract. The original correction landed; Sway runtime migration and ticketed human acceptance remain unmet. |
+| Product model | [workspace-redesign.md](../../docs/workspace-redesign.md#shared-workspace-and-plugin-boundary) | Directory, ownership, Computer Surface, target desktop stack, host-safety/resource evidence, and implementation gaps. |
+| Cross-context decisions | [system ADR 0009](../../docs/adr/0009-share-work-files-isolate-bot-screens.md), [system ADR 0010](../../docs/adr/0010-reuse-web-client-in-tauri.md) | Shared files vs isolated Screens; Web-to-Tauri reuse. |
 | Routing | [CONTEXT-MAP.md](../../CONTEXT-MAP.md) | Context and current-vs-historical entry. |
 | Glossaries | [Workspace](../../docs/contexts/workspace/CONTEXT.md), [Agent Integration](../../docs/contexts/agent-integration/CONTEXT.md), [Computer Control](../../docs/contexts/computer-control/CONTEXT.md) | Definitions only. |
-| Current compositor | [Computer ADR 0008](../../docs/contexts/computer-control/adr/0008-run-cage-bot-desktops.md) | On-demand pure-headless Cage. |
+| Target desktop stack | [Computer ADR 0009](../../docs/contexts/computer-control/adr/0009-adopt-sway-bot-desktops.md) | Private pure-headless Sway, on-demand view-only WayVNC, existing Broker-authorized input, and native Sway IPC. [ADR 0008](../../docs/contexts/computer-control/adr/0008-run-cage-bot-desktops.md) is historical Cage evidence. |
 | Deletion / Takeover | [ADR 0006](../../docs/adr/0006-bot-deletion-is-local-only.md), [ADR 0003](../../docs/adr/0003-hold-takeover-at-computer-tool-boundary.md) | Native-data survival; tool-scoped handoff. |
 
-Do not change these product choices from older tickets. Do not treat this documentation cutover as Screen-startup repair, host-safety proof, measured savings, or human acceptance.
+Do not change these product choices from older tickets. This documentation decision does not claim that the Sway adapter, target projection, runtime conformance, host-safety gate, measured savings, or human acceptance has landed.
 
 ## Vocabulary
 
@@ -50,18 +50,18 @@ No historical specification or ticket was deleted. Tracked `.scratch` files rema
 | [capability-panel 04](../workspace-capability-panel/issues/04-show-working-tree-summary.md) | Fully superseded | No current product requirement. Historical delivery only. Do not preserve or reintroduce Changes. |
 | [capability-panel 05](../workspace-capability-panel/issues/05-open-bounded-file-diff.md) | Fully superseded | No current product requirement. Do not replace Changes with a review or artifact panel. |
 | [capability-panel 06](../workspace-capability-panel/issues/06-complete-refresh-and-responsive-acceptance.md) | Mixed | Composer, Computer, responsive/accessibility → current docs. Changes refresh/polling/diff state → retired. |
-| [bot-screens spec](../bot-screens/spec.md) | Mixed; nested Hyprland retired | Per-Bot Screen identity, independent input, Preview/Web Control/Takeover, local deletion, non-adversarial isolation → ADR 0008/0009, workspace-redesign Computer, parent spec. Nested Hyprland mechanism and per-Bot application-profile policy → historical. Four-stream capacity → evidence only. |
+| [bot-screens spec](../bot-screens/spec.md) | Mixed; nested Hyprland retired | Per-Bot Screen identity, independent input, Preview/Web Control/Takeover, local deletion, non-adversarial isolation → Computer ADR 0009, system ADR 0009, workspace-redesign Computer, parent spec. Nested Hyprland mechanism and per-Bot application-profile policy → historical. Four-stream capacity → evidence only. |
 | [bot-screens issues 01–11](../bot-screens/issues/) | Historical delivery | Resolved implementation record. Do not revive nested Hyprland, Shared Screen, or profile/login policy from their acceptance lines. |
-| [media/desktop spec](../bot-screen-media-desktop/spec.md) | Mixed; Hyprland-until-Cage retired | Cage, PNG/H.264, neutral Bot Desktop, viewer ≠ session lifetime → ADR 0008/0009, parent spec. Per-Bot browser/profile/login → retired. Four-stream gate → historical evidence. Experiment notes remain evidence. |
-| [media/desktop issues 01–08](../bot-screen-media-desktop/issues/) | Historical delivery | Cage/H.264 cutover record. Sibling smoke and capacity rows are not current Host Session or normal-use-cost acceptance. |
+| [media/desktop spec](../bot-screen-media-desktop/spec.md) | Mixed; Hyprland-until-Cage retired; Cage now transitional | Neutral Bot Desktop, viewer ≠ session lifetime, and projection safety → Computer ADR 0009, system ADR 0009, parent spec. Cage/H.264 details remain transitional implementation history. Per-Bot browser/profile/login → retired. Four-stream gate → historical evidence. |
+| [media/desktop issues 01–08](../bot-screen-media-desktop/issues/) | Historical delivery | Cage/H.264 cutover record, not the new target. Sibling smoke and capacity rows are not current Host Session or target-runtime acceptance. |
 | [capacity-report.json](../bot-screen-media-desktop/capacity-report.json) | Historical evidence | Baseline measurements only. Not an accepted normal-use budget or host-safety pass. |
 | [ai-teammate-workspace spec](../ai-teammate-workspace/spec.md) | Mixed; Shared Screen retired | Bot/Agent identity, Composer, drafts, attachments, dictation, steering, migration, Computer glyph/Takeover, Astryx/a11y → workspace-redesign and related current specs. Global Shared Screen serialization and emergency control → retired. Archive/Activity already superseded elsewhere. Tauri exclusion superseded by ADR 0010. |
 | [ai-teammate-workspace issues](../ai-teammate-workspace/issues/) | Historical conversation delivery | Still-valid conversation behavior lives in workspace-redesign. Shared Screen tickets are not current desktop instructions. |
-| [Computer ADR 0007](../../docs/contexts/computer-control/adr/0007-provision-nested-hyprland-per-bot.md) | Historical decision | Retained rationale: Bot-owned Surfaces, private sockets, independent input, non-adversarial isolation (now in 0008/0009). Nested Hyprland / parent-Wayland mechanism retired. Measurements are historical capacity evidence. |
-| [Computer ADR 0001](../../docs/contexts/computer-control/adr/0001-computer-broker-backend.md) | Mixed | MCP computer-worker backend remains. Single-Shared-Screen backend is historical. |
+| [Computer ADR 0007](../../docs/contexts/computer-control/adr/0007-provision-nested-hyprland-per-bot.md) | Historical decision | Retained rationale: Bot-owned Surfaces, private sockets, independent input, non-adversarial isolation (now in Computer ADR 0009 and system ADR 0009). Nested Hyprland / parent-Wayland mechanism retired. Measurements are historical capacity evidence. |
+| [Computer ADR 0001](../../docs/contexts/computer-control/adr/0001-computer-broker-backend.md) | Mixed | MCP computer-worker seam remains. Single-Shared-Screen backend is historical; Sway needs a native window adapter rather than the X11-shaped i3 parser. |
 | [Computer ADR 0004](../../docs/contexts/computer-control/adr/0004-hide-single-screen-input-arbitration.md) | Mixed | Hide coordination details remains. Global Shared Screen serialization is historical. |
-| [Computer ADR 0005](../../docs/contexts/computer-control/adr/0005-project-shared-screen-over-webrtc.md) | Fully superseded | Shared Screen projection model retired. Current transport/compositor: ADR 0008. |
-| [feasibility research](../../docs/research/omarchy-bot-screen-feasibility.md) | Historical evidence | Nested-Hyprland probes retained. Production compositor is Cage (ADR 0008). |
+| [Computer ADR 0005](../../docs/contexts/computer-control/adr/0005-project-shared-screen-over-webrtc.md) | Fully superseded | Shared Screen projection model retired. Target compositor/projection: Computer ADR 0009. |
+| [feasibility research](../../docs/research/omarchy-bot-screen-feasibility.md) | Historical evidence | Nested-Hyprland probes retained. Cage became production under ADR 0008; Sway is now the accepted migration target under Computer ADR 0009. |
 | [GitHub issues research](../../docs/research/github-open-issues-implementation-details.md) | Historical notes | Dated 2026-09-04. Do not implement Changes from its #5 recommendation. Composer/Computer seams remain in current docs. |
 | [multi-bot computer research](../../docs/research/multi-bot-computer-control.md) | Historical evidence | Grok-style per-Bot screens and contextual Takeover informed ADR 0003/0009; not a Changes or profile-policy source. |
 
@@ -77,7 +77,7 @@ No historical specification or ticket was deleted. Tracked `.scratch` files rema
 | Story 44 projection/selection cleanup (Computer) | Retained | Parent stories 51–54 |
 | Story 45 compact rail, not an IDE | Retained as Computer constraint | Parent story 28; workspace-redesign plugin boundary |
 | Astryx-only; no Board/Tailwind | Retained | [workspace-redesign visual system](../../docs/workspace-redesign.md#12-visual-system); [technology-selection](../../docs/technology-selection.md) |
-| Cage/H.264; no nested Hyprland revival | Retained | ADR 0008, ADR 0009 |
+| Sway/WayVNC target; no nested Hyprland revival | Retained | Computer ADR 0009, system ADR 0009 |
 | Stories 15, 20–38, 43, 47–48; Git cwd fallback; Changes API/UI/polling | Retired | Do not reintroduce. Removal landed in ticket 02. |
 
 ### Bot Screens specification
@@ -85,30 +85,30 @@ No historical specification or ticket was deleted. Tracked `.scratch` files rema
 | Source | Disposition | Current home |
 | --- | --- | --- |
 | One Bot Screen identity; many Threads; Bots sharing an Agent stay separate | Retained | ADR 0009; workspace-redesign Computer; parent stories 36–39 |
-| Independent pixels, focus, pointer, keyboard; concurrent Bots | Retained | ADR 0008/0009; parent stories 40–41 |
+| Independent pixels, focus, pointer, keyboard; concurrent Bots | Retained | Computer ADR 0009; system ADR 0009; parent stories 40–41 |
 | Preview read-only; Expanded Web Control; Takeover/return; incomplete Takeover stays unfinished | Retained | workspace-redesign Computer; ADR 0003; parent stories 57–65 |
 | Switch projection without cancelling the other Bot | Retained | ADR 0009; parent stories 51–55 |
 | Deletion removes plugin-owned runtime; Native Sessions survive | Retained | ADR 0006, ADR 0009; parent story 75 |
-| Host Session stays one Omarchy/UWSM login; no child autostart/import-environment | Retained | ADR 0008/0009; parent stories 44, 68–73 |
-| Isolation is routing, not an adversarial sandbox | Retained | ADR 0008/0009; parent story 76 |
+| Host Session stays one Omarchy/UWSM login; no child autostart/import-environment | Retained | Computer ADR 0009; system ADR 0009; parent stories 44, 68–73 |
+| Isolation is routing, not an adversarial sandbox | Retained | Computer ADR 0009; system ADR 0009; parent story 76 |
 | ADR 0004 unauthenticated-remote-access posture | Retained | [ADR 0004](../../docs/adr/0004-defer-web-control-transport-security.md) |
-| Nested Hyprland / parent-Wayland bootstrap / `hyprctl` readiness | Retired | Historical in ADR 0007. Current: ADR 0008 |
-| Per-Bot browser/Electron profile or login-sharing policy | Retired | ADR 0009; parent story 7. Private runtime directories remain plugin-owned |
+| Nested Hyprland / parent-Wayland bootstrap / `hyprctl` readiness | Retired | Historical in ADR 0007. Current target: Computer ADR 0009 |
+| Per-Bot browser/Electron profile or login-sharing policy | Retired | System ADR 0009; parent story 7. Private runtime directories remain plugin-owned |
 | Four concurrent 1080p streams as default capacity or host-safety proof | Historical evidence | [capacity-report.json](../bot-screen-media-desktop/capacity-report.json); current acceptance: [required evidence](../../docs/workspace-redesign.md#required-host-safety-and-resource-evidence) |
 
 ### Media and desktop specification
 
 | Source | Disposition | Current home |
 | --- | --- | --- |
-| Cage sole compositor; pure-headless; no dual runtime | Retained | ADR 0008; parent desktop decisions |
-| PNG Preview, H.264 Web Control, HTTP snapshot fallback | Retained | ADR 0008; workspace-redesign Computer; parent stories 57–59, 65 |
+| Sway sole target compositor after conformance; no dual production runtime | Retained | Computer ADR 0009; parent desktop decisions |
+| PNG Preview, target WayVNC Web Control, HTTP snapshot fallback | Retained | Computer ADR 0009; workspace-redesign Computer; parent stories 57–59, 65 |
 | Neutral persistent Bot Desktop; app exit ≠ Screen death | Retained | workspace-redesign Computer; parent stories 42–43 |
 | Stop expanded encoding when unused; Agent screenshots without a viewer | Retained | ADR 0009; parent stories 56, 60 |
 | Independent per-Bot input; viewer switch ≠ session destroy | Retained | ADR 0009; parent stories 40, 51–55 |
-| “Nested Hyprland remains production until Cage passes” | Historical | Cage cutover recorded in media/desktop ticket 08 and ADR 0008 |
+| “Nested Hyprland remains production until Cage passes” | Historical | Cage cutover was recorded in media/desktop ticket 08 and ADR 0008; Sway migration now follows Computer ADR 0009 |
 | Per-Bot browser/profile/Cookie/login policy | Retired | ADR 0009; story 20 already marked superseded |
 | Four-Screen active-stream gate as normal-use cost | Historical evidence | capacity-report.json; parent stories 77–84 |
-| JPEG/H.264/wayvnc/Cage prototype numbers in Further Notes | Historical evidence | Keep with stated limits; not current acceptance |
+| JPEG/H.264/WayVNC/Cage/Sway prototype numbers in Further Notes or research | Historical evidence | Keep with stated limits; none alone is current target-runtime acceptance |
 
 ### AI teammate workspace specification
 

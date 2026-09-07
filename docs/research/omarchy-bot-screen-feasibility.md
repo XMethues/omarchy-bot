@@ -3,7 +3,7 @@
 **Research date:** 2026-09-03<br>
 **Verdict:** **Conditional yes** for multiple concurrent independent Bot Screens under one Unix login, but **not** as multiple full Omarchy/UWSM graphical sessions. The supported shape is one real Omarchy/UWSM login session plus one nested compositor process per Bot. For strict separation from the Shared Screen, each nested Hyprland must bootstrap through Aquamarine’s Wayland backend, create its own headless output, remove its parent-visible `WAYLAND-*` output, and accept capture/input only through its own child Wayland socket. This strict headless transition is source-supported and locally verified. Two concurrent nested Hyprland instances with separate clients, input, and screenshots have been proven locally.
 
-> **Production update (2026-09-04):** The nested-Hyprland mechanism and the interim recommendation below are superseded by [Computer Control ADR 0008](../contexts/computer-control/adr/0008-run-cage-bot-desktops.md). The measurements remain historical evidence; production now provisions pure-headless Cage directly.
+> **Historical.** The nested-Hyprland mechanism and the interim recommendation below were superseded by [Computer Control ADR 0008](../contexts/computer-control/adr/0008-run-cage-bot-desktops.md) (Cage). Production compositor is now [ADR 0009](../contexts/computer-control/adr/0009-adopt-sway-bot-desktops.md) (Sway). The measurements remain historical evidence and are not rewritten.
 
 A pure headless Hyprland launch is **not currently supported**: Hyprland 0.56.2 has no backend-selection option, Aquamarine’s headless backend supplies no DRM/render fd, and Aquamarine requires another implementation to provide an allocator. Old `WLR_BACKENDS=headless Hyprland` recipes do not apply because current Hyprland uses Aquamarine, not wlroots.
 
@@ -151,6 +151,8 @@ A matched one-Screen, five-second, final-browser DataChannel run compared PNG wi
 | JPEG q60 | 16.13 | 36.7 / 49.0 ms | 22 / 27 ms | 0 |
 
 Both rows passed the operational gate. The harness commands intentionally selected only the one-Screen matrix row, so each test process exited at the separate release gate because the approved four-Screen row was absent; `/tmp/codec-png.json` and `/tmp/codec-jpeg60.json` were written before that expected gate failure.
+
+> **Historical H.264 probe.** Ticket 12 removed the expanded H.264 / ffmpeg / RTP / video-track path. Production Web Control is view-only RFB on a WebRTC data channel. The measurements below remain probe evidence and are not a current transport.
 
 The H.264 probe kept the existing WebRTC peer but sent Annex-B H.264 through a `node-datachannel` video track. A long-lived `ffmpeg`/libx264 process consumed 10 FPS PPM captures from the child socket. Under the changing-text fixture it sent 112 frames with zero send failures; Chromium rendered 111 frames at 9.94 FPS and 1920×1080. PPM capture p50/p95 was 18.04/31.46 ms. Encoded access units averaged 61,673 bytes (p50 50,164; p95 161,483), about half the per-frame bytes of PNG/JPEG in that fixture. The probe processes used about 23.5% of one CPU core combined and 221 MiB RSS during the sample. First frame arrived 443 ms after page startup and signaling; this is startup, not steady-state input-to-visible latency.
 

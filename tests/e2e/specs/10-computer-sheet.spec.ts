@@ -33,235 +33,390 @@ async function settleCapabilityLayout(page: Page): Promise<void> {
   });
 }
 
+interface ProjectionFixtureState {
+  control: import("@playwright/test").WebSocketRoute | undefined;
+  surfaceId: string;
+  sessionId: string;
+  runtimeGeneration: number;
+  geometryGeneration: number;
+  sequence: number;
+  controllerEpoch: number;
+  mode: "idle" | "preview" | "expanded";
+  inputAuthorityAvailable: boolean;
+  inputAuthorityActive: boolean;
+  frameAvailable: boolean;
+}
+
 async function installProjectionPeer(
   page: Page,
   options: { inputAuthorityAvailable?: boolean; frameAvailable?: boolean } = {},
 ): Promise<void> {
-  await page.addInitScript(({ pngBase64, inputAuthorityAvailable, frameAvailable }) => {
-    const png = Uint8Array.from(atob(pngBase64), (character) => character.charCodeAt(0)).buffer;
-    const canvas = document.createElement("canvas");
-    canvas.width = 2000;
-    canvas.height = 1000;
-    const canvasContext = canvas.getContext("2d");
-    if (canvasContext === null) throw new Error("fake projection canvas was unavailable");
-    const paintContext: CanvasRenderingContext2D = canvasContext;
-    paintContext.fillStyle = "#345";
-    paintContext.fillRect(0, 0, canvas.width, canvas.height);
-    const videoStream = canvas.captureStream(5);
-    const fakeOffer = [
-      "v=0",
-      "m=video 9 UDP/TLS/RTP/SAVPF 104",
-      "a=recvonly",
-      "a=rtpmap:104 H264/90000",
-      "a=fmtp:104 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f",
-      "",
-    ].join("\r\n");
+  await page.addInitScript(({ inputAuthorityAvailable }) => {
     const inputMessages: unknown[] = [];
-    Object.defineProperty(window, "__screenInputMessages", { configurable: true, value: inputMessages });
     const controlMessages: unknown[] = [];
+    const rfbClientMessages: number[][] = [];
+    Object.defineProperty(window, "__screenInputMessages", { configurable: true, value: inputMessages });
     Object.defineProperty(window, "__screenControlMessages", { configurable: true, value: controlMessages });
-    class FakeDataChannel extends EventTarget {
-      readonly label: string;
-      readonly ordered = true;
-      readonly protocol = "";
-      readonly id = null;
-      readonly negotiated = false;
-      readonly maxPacketLifeTime = null;
-      readonly maxRetransmits = null;
-      binaryType: BinaryType = "arraybuffer";
-      bufferedAmount = 0;
-      bufferedAmountLowThreshold = 0;
-      readyState: RTCDataChannelState = "open";
-      onbufferedamountlow = null;
-      onclose = null;
-      onclosing = null;
-      onerror = null;
-      onmessage = null;
-      onopen = null;
+    Object.defineProperty(window, "__screenRfbClientMessages", { configurable: true, value: rfbClientMessages });
+    Object.defineProperty(window, "__screenRfbClosedCount", { configurable: true, writable: true, value: 0 });
 
-      constructor(label: string, private readonly sendToPeer: (label: string, data: string) => void) {
-        super();
-        this.label = label;
-      }
-
-      send(data: string | Blob | ArrayBuffer | ArrayBufferView): void {
-        if (typeof data === "string") this.sendToPeer(this.label, data);
-      }
-
-      close(): void {
-        if (this.readyState === "closed") return;
-        this.readyState = "closed";
-        this.dispatchEvent(new Event("close"));
-      }
-    }
-
-    class FakePeerConnection extends EventTarget {
-      localDescription: RTCSessionDescription | null = null;
-      remoteDescription: RTCSessionDescription | null = null;
-      currentLocalDescription = null;
-      currentRemoteDescription = null;
-      pendingLocalDescription = null;
-      pendingRemoteDescription = null;
-      signalingState: RTCSignalingState = "stable";
-      iceGatheringState: RTCIceGatheringState = "complete";
-      iceConnectionState: RTCIceConnectionState = "connected";
-      connectionState: RTCPeerConnectionState = "connected";
-      canTrickleIceCandidates = false;
-      sctp = null;
-      onconnectionstatechange = null;
-      ondatachannel = null;
-      onicecandidate = null;
-      onicecandidateerror = null;
-      oniceconnectionstatechange = null;
-      onicegatheringstatechange = null;
-      onnegotiationneeded = null;
-      onsignalingstatechange = null;
-      private readonly channels = new Map<string, FakeDataChannel>();
-      private surfaceId = "";
-      private sequence = 0;
-      private trackSent = false;
-      constructor() {
-        super();
-        peers.push(this);
-      }
-
-      dispatchInputAuthority(active: boolean, controllerEpoch = 7): void {
-        testControl.inputAuthorityActive = active;
-        this.channels.get("screen.input.v2")?.dispatchEvent(new MessageEvent("message", {
-          data: JSON.stringify({
-            version: 2,
-            type: "input-authority",
-            active,
-            surfaceId: this.surfaceId,
-            runtimeGeneration: 1,
-            geometryGeneration: 1,
-            controllerEpoch,
-            logicalWidth: 1000,
-            logicalHeight: 500,
-            videoWidth: 2000,
-            videoHeight: 1000,
-            scale: 2,
-          }),
-        }));
-      }
-
-      createDataChannel(label: string): RTCDataChannel {
-        const channel = new FakeDataChannel(label, (sentLabel, raw) => {
-          if (sentLabel === "screen.input.v2") {
-            const message = JSON.parse(raw) as { type?: string; controllerEpoch?: number };
-            inputMessages.push(message);
-            if (message.type === "release-control") {
-              queueMicrotask(() => this.dispatchInputAuthority(false, message.controllerEpoch ?? 7));
-            }
-            return;
+    // Playwright's routed socket inherits WebSocket members one prototype deeper
+    // than the native browser object. noVNC validates the native property surface.
+    // Install after the routing shim, without replacing the real noVNC client.
+    const observeSockets = (): void => {
+      const prototype = WebSocket.prototype;
+      for (const property of ["send", "close", "binaryType", "protocol", "readyState", "onopen", "onclose", "onerror", "onmessage"]) {
+        if (Object.prototype.hasOwnProperty.call(prototype, property)) continue;
+        let ancestor = Object.getPrototypeOf(prototype);
+        while (ancestor !== null) {
+          const descriptor = Object.getOwnPropertyDescriptor(ancestor, property);
+          if (descriptor !== undefined) {
+            Object.defineProperty(prototype, property, descriptor);
+            break;
           }
-          if (sentLabel !== "screen.control.v2") return;
-          const message = JSON.parse(raw) as { mode?: string };
-          controlMessages.push(message);
-          if (message.mode !== "preview" && message.mode !== "expanded") return;
-          if (!testControl.frameAvailable) return;
-          if (message.mode === "expanded") {
-            queueMicrotask(() => {
-              if (!this.trackSent) {
-                this.trackSent = true;
-                const event = new Event("track") as Event & {
-                  track: MediaStreamTrack;
-                  streams: MediaStream[];
-                };
-                Object.defineProperties(event, {
-                  track: { value: videoStream.getVideoTracks()[0] },
-                  streams: { value: [videoStream] },
-                });
-                this.dispatchEvent(event);
-              }
-              paintContext.fillStyle = this.sequence++ % 2 === 0 ? "#345" : "#456";
-              paintContext.fillRect(0, 0, canvas.width, canvas.height);
-              if (testControl.inputAuthorityAvailable) this.dispatchInputAuthority(true);
-            });
-            return;
+          ancestor = Object.getPrototypeOf(ancestor);
+        }
+      }
+      const nativeSend = WebSocket.prototype.send;
+      WebSocket.prototype.send = function(data: string | ArrayBufferLike | Blob | ArrayBufferView): void {
+        const pathname = new URL(this.url).pathname;
+        if (pathname.endsWith("/control") && typeof data === "string") {
+          try {
+            const message = JSON.parse(data) as { type?: string };
+            if (message.type === "view" || message.type === "browser-metrics") controlMessages.push(message);
+            else inputMessages.push(message);
+          } catch {
+            // Malformed control messages remain observable at the server route.
           }
-          const frames = this.channels.get("screen.preview.v2");
-          if (frames === undefined) return;
-          this.sequence += 1;
-          queueMicrotask(() => {
-            frames.dispatchEvent(new MessageEvent("message", {
-              data: JSON.stringify({
-                version: 2,
-                type: "preview-frame",
-                surfaceId: this.surfaceId,
-                runtimeGeneration: 1,
-                geometryGeneration: 1,
-                logicalWidth: 1000,
-                logicalHeight: 500,
-                videoWidth: 2000,
-                videoHeight: 1000,
-                scale: 2,
-                sequence: this.sequence,
-                mediaType: "image/png",
-                byteLength: png.byteLength,
-                chunkCount: 1,
-              }),
-            }));
-            frames.dispatchEvent(new MessageEvent("message", { data: png.slice(0) }));
-          });
-        });
-        this.channels.set(label, channel);
-        return channel as unknown as RTCDataChannel;
-      }
+        } else if (pathname.endsWith("/rfb")) {
+          if (data instanceof ArrayBuffer) rfbClientMessages.push(Array.from(new Uint8Array(data)));
+          else if (ArrayBuffer.isView(data)) {
+            rfbClientMessages.push(Array.from(new Uint8Array(data.buffer, data.byteOffset, data.byteLength)));
+          }
+        }
+        nativeSend.call(this, data);
+      };
+    };
+    window.addEventListener("DOMContentLoaded", observeSockets, { once: true });
 
-      addTransceiver(): RTCRtpTransceiver {
-        return { setCodecPreferences() {} } as unknown as RTCRtpTransceiver;
-      }
-
-      async createOffer(): Promise<RTCSessionDescriptionInit> {
-        return { type: "offer", sdp: fakeOffer };
-      }
-
-      async setLocalDescription(description?: RTCLocalSessionDescriptionInit): Promise<void> {
-        this.localDescription = { type: description?.type ?? "offer", sdp: description?.sdp ?? fakeOffer, toJSON() { return this; } };
-      }
-
-      async setRemoteDescription(description: RTCSessionDescriptionInit): Promise<void> {
-        this.surfaceId = description.sdp?.replace(/^fake-answer:/, "") ?? "";
-        this.remoteDescription = { type: description.type, sdp: description.sdp ?? "", toJSON() { return this; } };
-      }
-
-      async addIceCandidate(): Promise<void> {}
-
-      close(): void {
-        this.connectionState = "closed";
-        for (const channel of this.channels.values()) channel.close();
-        this.dispatchEvent(new Event("connectionstatechange"));
-      }
-    }
-
-    const peers: FakePeerConnection[] = [];
+    let authorityAvailable = inputAuthorityAvailable;
     const testControl = {
-      inputAuthorityAvailable,
-      frameAvailable,
       inputAuthorityActive: false,
+      get inputAuthorityAvailable(): boolean {
+        return authorityAvailable;
+      },
+      set inputAuthorityAvailable(value: boolean) {
+        authorityAvailable = value;
+        void fetch(`/__e2e/projection-control?action=authority&available=${value ? "1" : "0"}`);
+      },
       revokeInput(): void {
-        testControl.inputAuthorityAvailable = false;
-        peers.at(-1)?.dispatchInputAuthority(false);
+        authorityAvailable = false;
+        void fetch("/__e2e/projection-control?action=revoke");
       },
       disconnect(): void {
-        const peer = peers.at(-1);
-        if (peer === undefined) return;
-        peer.connectionState = "disconnected";
-        peer.dispatchEvent(new Event("connectionstatechange"));
+        void fetch("/__e2e/projection-control?action=disconnect");
       },
-      failDecode(): void {
-        document.querySelector<HTMLVideoElement>(
-          'video[data-testid="computer-expanded-video"]',
-        )?.dispatchEvent(new Event("error"));
+      failView(): void {
+        void fetch("/__e2e/projection-control?action=fail-view");
       },
     };
     Object.defineProperty(window, "__screenProjectionControl", { configurable: true, value: testControl });
-    Object.defineProperty(window, "RTCPeerConnection", { configurable: true, value: FakePeerConnection });
-  }, {
-    pngBase64: PNG.toString("base64"),
-    inputAuthorityAvailable: options.inputAuthorityAvailable ?? true,
-    frameAvailable: options.frameAvailable ?? true,
+  }, { inputAuthorityAvailable: options.inputAuthorityAvailable ?? true });
+
+  let latest: ProjectionFixtureState | undefined;
+  const states = new Map<string, ProjectionFixtureState>();
+
+  const setAuthorityActive = async (active: boolean): Promise<void> => {
+    await page.evaluate((value) => {
+      (window as typeof window & {
+        __screenProjectionControl: { inputAuthorityActive: boolean };
+      }).__screenProjectionControl.inputAuthorityActive = value;
+    }, active).catch(() => {});
+  };
+
+  const identity = (state: ProjectionFixtureState, type: string): Record<string, unknown> => ({
+    version: 3,
+    type,
+    sessionId: state.sessionId,
+    surfaceId: state.surfaceId,
+    runtimeGeneration: state.runtimeGeneration,
+  });
+
+  const sendAuthority = (state: ProjectionFixtureState, active: boolean): void => {
+    if (state.control === undefined) return;
+    state.inputAuthorityActive = active;
+    state.control.send(JSON.stringify({
+      ...identity(state, "input-authority"),
+      active,
+      geometryGeneration: state.geometryGeneration,
+      controllerEpoch: state.controllerEpoch,
+      logicalWidth: 1000,
+      logicalHeight: 500,
+      videoWidth: 2000,
+      videoHeight: 1000,
+      scale: 2,
+    }));
+    void setAuthorityActive(active);
+  };
+
+  await page.route("**/__e2e/projection-control**", async (route) => {
+    const actionUrl = new URL(route.request().url());
+    const state = latest;
+    if (state !== undefined) {
+      switch (actionUrl.searchParams.get("action")) {
+        case "authority":
+          state.inputAuthorityAvailable = actionUrl.searchParams.get("available") === "1";
+          if (state.mode === "expanded") sendAuthority(state, state.inputAuthorityAvailable);
+          break;
+        case "revoke":
+          state.inputAuthorityAvailable = false;
+          sendAuthority(state, false);
+          break;
+        case "disconnect":
+          await state.control?.close({ code: 1011, reason: "fixture disconnect" });
+          break;
+        case "fail-view":
+          state.control?.send(JSON.stringify({
+            ...identity(state, "projection-failure"),
+            reason: "view-client-failed",
+            snapshotFallback: true,
+          }));
+          break;
+      }
+    }
+    await route.fulfill({ status: 204, body: "" });
+  });
+
+  await page.routeWebSocket(/\/api\/computer\/projection\/control(?:\?|$)/, (socket) => {
+    const url = new URL(socket.url());
+    const sessionId = url.searchParams.get("sessionId") ?? "";
+    const surfaceId = url.searchParams.get("surfaceId") ?? "";
+    const state: ProjectionFixtureState = {
+      control: socket,
+      surfaceId,
+      sessionId,
+      runtimeGeneration: 1,
+      geometryGeneration: 1,
+      sequence: 0,
+      controllerEpoch: 7,
+      mode: "idle",
+      inputAuthorityAvailable: options.inputAuthorityAvailable ?? true,
+      inputAuthorityActive: false,
+      frameAvailable: options.frameAvailable ?? true,
+    };
+    states.set(sessionId, state);
+    latest = state;
+    socket.send(JSON.stringify({ ...identity(state, "view-state"), mode: "idle" }));
+    socket.onMessage((message) => {
+      if (typeof message !== "string") return;
+      let parsed: Record<string, unknown>;
+      try {
+        parsed = JSON.parse(message) as Record<string, unknown>;
+      } catch {
+        return;
+      }
+      if (
+        parsed.version !== 3
+        || parsed.sessionId !== state.sessionId
+        || parsed.surfaceId !== state.surfaceId
+        || parsed.runtimeGeneration !== state.runtimeGeneration
+      ) return;
+      if (parsed.type === "view") {
+        const mode = parsed.mode;
+        if (mode !== "idle" && mode !== "preview" && mode !== "expanded") return;
+        state.mode = mode;
+        socket.send(JSON.stringify({ ...identity(state, "view-state"), mode }));
+        if (mode === "idle") {
+          if (state.inputAuthorityActive) sendAuthority(state, false);
+          return;
+        }
+        if (mode === "expanded") {
+          if (state.inputAuthorityAvailable) sendAuthority(state, true);
+          return;
+        }
+        if (!state.frameAvailable) return;
+        state.sequence += 1;
+        socket.send(JSON.stringify({
+          ...identity(state, "preview-frame"),
+          geometryGeneration: state.geometryGeneration,
+          logicalWidth: 1000,
+          logicalHeight: 500,
+          videoWidth: 2000,
+          videoHeight: 1000,
+          scale: 2,
+          sequence: state.sequence,
+          mediaType: "image/png",
+          capturedAt: new Date().toISOString(),
+          byteLength: PNG.byteLength,
+        }));
+        socket.send(PNG);
+        return;
+      }
+      if (parsed.type === "release-control") {
+        sendAuthority(state, false);
+        state.controllerEpoch += 1;
+      }
+    });
+    socket.onClose(() => {
+      if (state.control === socket) state.control = undefined;
+      state.inputAuthorityActive = false;
+      void setAuthorityActive(false);
+    });
+  });
+
+  await page.routeWebSocket(/\/api\/computer\/projection\/rfb(?:\?|$)/, (socket) => {
+    const url = new URL(socket.url());
+    const sessionId = url.searchParams.get("sessionId") ?? "";
+    const state = states.get(sessionId);
+    if (state === undefined || state.mode !== "expanded") {
+      void socket.close({ code: 1008, reason: "expanded mode required" });
+      return;
+    }
+
+    let stage: "version" | "security" | "client-init" | "ready" = "version";
+    let pending = Buffer.alloc(0);
+    let frameSent = false;
+    let redShift = 16;
+    let greenShift = 8;
+    let bigEndian = false;
+
+    const sendServerInit = (): void => {
+      const name = Buffer.from("Omarchy RFB Fixture", "utf8");
+      const message = Buffer.alloc(24 + name.byteLength);
+      message.writeUInt16BE(2, 0);
+      message.writeUInt16BE(1, 2);
+      message[4] = 32;
+      message[5] = 24;
+      message[6] = 0;
+      message[7] = 1;
+      message.writeUInt16BE(255, 8);
+      message.writeUInt16BE(255, 10);
+      message.writeUInt16BE(255, 12);
+      message[14] = 16;
+      message[15] = 8;
+      message[16] = 0;
+      message.writeUInt32BE(name.byteLength, 20);
+      name.copy(message, 24);
+      socket.send(message);
+    };
+
+    const sendFramebuffer = (): void => {
+      const update = Buffer.alloc(24);
+      update[0] = 0;
+      update.writeUInt16BE(1, 2);
+      update.writeUInt16BE(0, 4);
+      update.writeUInt16BE(0, 6);
+      update.writeUInt16BE(2, 8);
+      update.writeUInt16BE(1, 10);
+      update.writeInt32BE(0, 12);
+      if (bigEndian) {
+        update.writeUInt32BE((255 << redShift) >>> 0, 16);
+        update.writeUInt32BE((255 << greenShift) >>> 0, 20);
+      } else {
+        update.writeUInt32LE((255 << redShift) >>> 0, 16);
+        update.writeUInt32LE((255 << greenShift) >>> 0, 20);
+      }
+      socket.send(update);
+    };
+
+    const readyMessageLength = (bytes: Buffer): number | undefined => {
+      if (bytes.byteLength === 0) return undefined;
+      switch (bytes[0]) {
+        case 0:
+          return 20;
+        case 2:
+          return bytes.byteLength < 4 ? undefined : 4 + bytes.readUInt16BE(2) * 4;
+        case 3:
+          return 10;
+        case 4:
+          return 8;
+        case 5:
+          return 6;
+        case 6:
+          return bytes.byteLength < 8 ? undefined : 8 + bytes.readUInt32BE(4);
+        case 150:
+          return 10;
+        case 248:
+          return bytes.byteLength < 9 ? undefined : 9 + bytes[8]!;
+        case 251:
+          return bytes.byteLength < 8 ? undefined : 8 + bytes[6]! * 16;
+        default:
+          return -1;
+      }
+    };
+
+    const consume = (): void => {
+      while (pending.byteLength > 0) {
+        if (stage === "version") {
+          if (pending.byteLength < 12) return;
+          const version = pending.subarray(0, 12).toString("ascii");
+          pending = pending.subarray(12);
+          if (version !== "RFB 003.008\n") {
+            void socket.close({ code: 1002, reason: "unsupported RFB version" });
+            return;
+          }
+          socket.send(Buffer.from([1, 1]));
+          stage = "security";
+          continue;
+        }
+        if (stage === "security") {
+          if (pending.byteLength < 1) return;
+          const selected = pending[0];
+          pending = pending.subarray(1);
+          if (selected !== 1) {
+            void socket.close({ code: 1002, reason: "unsupported RFB security" });
+            return;
+          }
+          socket.send(Buffer.alloc(4));
+          stage = "client-init";
+          continue;
+        }
+        if (stage === "client-init") {
+          if (pending.byteLength < 1) return;
+          pending = pending.subarray(1);
+          sendServerInit();
+          stage = "ready";
+          continue;
+        }
+        const length = readyMessageLength(pending);
+        if (length === undefined || pending.byteLength < length) return;
+        if (length < 0) {
+          void socket.close({ code: 1002, reason: "unsupported RFB client message" });
+          return;
+        }
+        const type = pending[0];
+        if (type === 0) {
+          if (pending[4] !== 32 || pending[7] !== 1) {
+            void socket.close({ code: 1003, reason: "fixture supports 32-bit true color" });
+            return;
+          }
+          bigEndian = pending[6] !== 0;
+          redShift = pending[14]!;
+          greenShift = pending[15]!;
+        }
+        pending = pending.subarray(length);
+        if (type === 3 && !frameSent) {
+          frameSent = true;
+          sendFramebuffer();
+        }
+      }
+    };
+
+    socket.onMessage((message) => {
+      if (typeof message === "string") {
+        void socket.close({ code: 1003, reason: "RFB must be binary" });
+        return;
+      }
+      pending = Buffer.concat([pending, message]);
+      consume();
+    });
+    socket.onClose(() => {
+      void page.evaluate(() => {
+        const target = window as typeof window & { __screenRfbClosedCount: number };
+        target.__screenRfbClosedCount += 1;
+      }).catch(() => {});
+    });
+    socket.send(Buffer.from("RFB 003.008\n", "ascii"));
   });
 }
 
@@ -272,32 +427,16 @@ async function fulfillProjection(route: Route): Promise<boolean> {
     await route.fulfill({ status: 204, body: "" });
     return true;
   }
-  const offer = route.request().postDataJSON() as {
-    version?: unknown;
-    sdp?: unknown;
-    capabilities?: unknown;
-  };
-  expect(offer).toMatchObject({
-    version: 2,
-    capabilities: {
-      previewImage: { transport: "data-channel", channel: "screen.preview.v2", mediaType: "image/png" },
-      expandedVideo: { transport: "webrtc-video-track", codec: "video/H264", clockRate: 90000 },
-      control: { channel: "screen.control.v2" },
-      input: { channel: "screen.input.v2" },
-      snapshotFallback: { transport: "http", mediaType: "image/png" },
-    },
-  });
-  expect(offer.sdp).toContain("a=recvonly");
-  expect(offer.sdp).toContain("H264/90000");
+  expect(route.request().postDataJSON()).toEqual({ version: 3 });
+  const botId = url.searchParams.get("botId") ?? "";
   const surfaceId = url.searchParams.get("surfaceId") ?? "";
+  const sessionId = `session-${surfaceId}`;
   await route.fulfill({
     status: 201,
     contentType: "application/json",
     body: JSON.stringify({
-      version: 2,
-      type: "answer",
-      sdp: `fake-answer:${surfaceId}`,
-      sessionId: `session-${surfaceId}`,
+      version: 3,
+      sessionId,
       surfaceId,
       runtimeGeneration: 1,
       geometryGeneration: 1,
@@ -307,20 +446,10 @@ async function fulfillProjection(route: Route): Promise<boolean> {
       videoHeight: 1000,
       scale: 2,
       state: "connecting",
-      capabilities: {
-        previewImage: { transport: "data-channel", channel: "screen.preview.v2", mediaType: "image/png" },
-        expandedVideo: {
-          transport: "webrtc-video-track",
-          codec: "video/H264",
-          profileLevelId: "42e01f",
-          clockRate: 90000,
-        },
-        control: { transport: "data-channel", channel: "screen.control.v2" },
-        input: { transport: "data-channel", channel: "screen.input.v2" },
-        snapshotFallback: { transport: "http", mediaType: "image/png" },
-      },
+      controlUrl: `/api/computer/projection/control?botId=${encodeURIComponent(botId)}&surfaceId=${encodeURIComponent(surfaceId)}&sessionId=${encodeURIComponent(sessionId)}`,
+      rfbUrl: `/api/computer/projection/rfb?botId=${encodeURIComponent(botId)}&surfaceId=${encodeURIComponent(surfaceId)}&sessionId=${encodeURIComponent(sessionId)}`,
+      snapshotUrl: `/api/computer/snapshot?botId=${encodeURIComponent(botId)}&surfaceId=${encodeURIComponent(surfaceId)}`,
       security: { authentication: "none", httpsRequired: false },
-      candidates: [],
     }),
   });
   return true;
@@ -502,12 +631,20 @@ test.describe("contextual computer sheet", () => {
     await sheet.getByRole("button", { name: "Open Web Control" }).click();
     const expandedControl = page.getByTestId("expanded-web-control");
     await expect(expandedControl).toBeVisible();
-    const expandedVideo = page.getByTestId("computer-expanded-video");
-    await expect(expandedVideo).toBeVisible();
-    await expect.poll(() => expandedVideo.evaluate((video: HTMLVideoElement) => ({
-      width: video.videoWidth,
-      height: video.videoHeight,
-    }))).toEqual({ width: 2000, height: 1000 });
+    const expandedView = page.getByTestId("computer-expanded-view");
+    await expect(expandedView).toBeVisible();
+    const rfbCanvas = expandedView.locator("canvas");
+    await expect(rfbCanvas).toBeVisible();
+    await expect.poll(() => rfbCanvas.evaluate((canvas) => {
+      const context = (canvas as HTMLCanvasElement).getContext("2d");
+      return context === null ? [] : Array.from(context.getImageData(0, 0, 2, 1).data);
+    })).toEqual([255, 0, 0, 255, 0, 255, 0, 255]);
+    expect(await page.evaluate(() => {
+      const messages = (window as typeof window & {
+        __screenRfbClientMessages: number[][];
+      }).__screenRfbClientMessages;
+      return new TextDecoder().decode(Uint8Array.from(messages[0] ?? []));
+    })).toBe("RFB 003.008\n");
     expect(takeoverCalls).toBe(1);
     await expect.poll(() => page.evaluate(
       () => (window as typeof window & {
@@ -521,10 +658,25 @@ test.describe("contextual computer sheet", () => {
         __screenInputMessages: Array<{ type?: string }>;
       }).__screenInputMessages.filter(({ type }) => type === "key").length,
     )).toBe(2);
+    expect(await page.evaluate(() => {
+      const messages = (window as typeof window & {
+        __screenRfbClientMessages: number[][];
+      }).__screenRfbClientMessages;
+      return messages.filter((message) => message.length > 1).map((message) => message[0]);
+    })).not.toContain(4);
+    expect(await page.evaluate(() => {
+      const messages = (window as typeof window & {
+        __screenRfbClientMessages: number[][];
+      }).__screenRfbClientMessages;
+      return messages.filter((message) => message.length > 1).map((message) => message[0]);
+    })).not.toContain(5);
     await expect(page.getByTestId("expanded-web-control")).toBeVisible();
     await expect(page.getByRole("button", { name: "I'm done" })).toBeVisible();
     await page.getByTestId("expanded-web-control").getByRole("button", { name: "Close Web Control" }).click();
     await expect(page.getByTestId("expanded-web-control")).toBeHidden();
+    await expect.poll(() => page.evaluate(
+      () => (window as typeof window & { __screenRfbClosedCount: number }).__screenRfbClosedCount,
+    )).toBeGreaterThan(0);
     expect(returnCalls).toBe(0);
     await expect(sheet.getByRole("button", { name: "Continue takeover" })).toBeVisible();
     await page.reload();
@@ -631,13 +783,13 @@ test.describe("contextual computer sheet", () => {
     const computer = page.getByRole("complementary", { name: "Workspace capabilities", exact: true });
     await expect(computer.getByAltText("First Screen Bot screen")).toBeVisible();
     await computer.getByRole("button", { name: "Open Web Control" }).click();
-    await expect(page.getByTestId("computer-expanded-video")).toBeVisible();
+    await expect(page.getByTestId("computer-expanded-view")).toBeVisible();
 
     await page.getByRole("button", { name: "Other Bot", exact: true }).dispatchEvent("click");
     await expect.poll(() => closedProjectionCount).toBeGreaterThan(0);
     await expect(computer.getByAltText("First Screen Bot screen")).toHaveCount(0);
     await expect(page.getByTestId("expanded-web-control")).toHaveCount(0);
-    await expect(page.getByTestId("computer-expanded-video")).toHaveCount(0);
+    await expect(page.getByTestId("computer-expanded-view")).toHaveCount(0);
     await expect(computer.getByAltText("Other Bot screen")).toBeVisible();
   });
 
@@ -674,29 +826,28 @@ test.describe("contextual computer sheet", () => {
 
     await expandPreview.click();
     const expandedControl = page.getByTestId("expanded-web-control");
-    const expanded = page.getByTestId("computer-expanded-video");
+    const expanded = page.getByTestId("computer-expanded-view");
     await expect(expanded).toBeVisible();
     await expect(expandedControl).toContainText("Click, scroll, or type to control");
     await expandedControl.evaluate((dialog) => dialog.dispatchEvent(new MouseEvent("click", { bubbles: true })));
     await expect(expandedControl).toBeVisible();
 
     await page.setViewportSize({ width: 900, height: 760 });
-    await expanded.evaluate((video) => {
-      video.style.width = "600px";
-      video.style.height = "500px";
-      video.style.objectFit = "contain";
+    await expanded.evaluate((view) => {
+      view.style.width = "600px";
+      view.style.height = "500px";
     });
-    const videoBox = await expanded.boundingBox();
-    if (videoBox === null) throw new Error("expanded video has no rendered box");
-    const fittedWidth = Math.min(videoBox.width, videoBox.height * 2);
+    const viewBox = await expanded.boundingBox();
+    if (viewBox === null) throw new Error("expanded view has no rendered box");
+    const fittedWidth = Math.min(viewBox.width, viewBox.height * 2);
     const fittedHeight = fittedWidth / 2;
-    const left = videoBox.x + (videoBox.width - fittedWidth) / 2;
-    const top = videoBox.y + (videoBox.height - fittedHeight) / 2;
+    const left = viewBox.x + (viewBox.width - fittedWidth) / 2;
+    const top = viewBox.y + (viewBox.height - fittedHeight) / 2;
     await expanded.dispatchEvent("pointermove", {
       pointerId: 40,
       pointerType: "mouse",
-      clientX: videoBox.x + videoBox.width / 2,
-      clientY: videoBox.y + 1,
+      clientX: viewBox.x + viewBox.width / 2,
+      clientY: viewBox.y + 1,
       bubbles: true,
     });
     expect(await page.evaluate(
@@ -786,13 +937,13 @@ test.describe("contextual computer sheet", () => {
     await page.getByRole("button", { name: "Open Computer Surface", exact: true }).click();
     const sheet = page.getByRole("complementary", { name: "Workspace capabilities", exact: true });
     await sheet.getByRole("button", { name: "Open Web Control" }).click();
-    const expanded = page.getByTestId("computer-expanded-video");
+    const expanded = page.getByTestId("computer-expanded-view");
     await expect(expanded).toBeVisible();
     await settleCapabilityLayout(page);
-    const videoBox = await expanded.boundingBox();
-    if (videoBox === null) throw new Error("expanded video has no rendered box");
-    let x = videoBox.x + videoBox.width / 2;
-    let y = videoBox.y + videoBox.height / 2;
+    const viewBox = await expanded.boundingBox();
+    if (viewBox === null) throw new Error("expanded view has no rendered box");
+    let x = viewBox.x + viewBox.width / 2;
+    let y = viewBox.y + viewBox.height / 2;
 
     await expanded.dispatchEvent("pointerdown", {
       pointerId: 99,
@@ -892,6 +1043,8 @@ test.describe("contextual computer sheet", () => {
         __screenProjectionControl: { revokeInput(): void };
       }).__screenProjectionControl.revokeInput();
     });
+    await expect(page.getByTestId("expanded-web-control"))
+      .not.toContainText("Click, scroll, or type to control");
     await page.mouse.up();
     expect(await page.evaluate(
       () => (window as typeof window & {
@@ -925,6 +1078,7 @@ test.describe("contextual computer sheet", () => {
     await page.getByRole("button", { name: "Open Web Control" }).click();
     const control = page.getByTestId("expanded-web-control");
     await expect(control).toBeVisible();
+    await expect(control).toContainText("Click, scroll, or type to control");
     await control.focus();
     await page.keyboard.down("Control");
     await page.keyboard.press("l");
@@ -939,21 +1093,17 @@ test.describe("contextual computer sheet", () => {
       }));
     });
     await page.evaluate(() => window.dispatchEvent(new Event("blur")));
-    await page.evaluate(async () => {
-      window.dispatchEvent(new Event("focus"));
-      await Promise.resolve();
-      await Promise.resolve();
+    await expect(control).not.toContainText("Click, scroll, or type to control");
+    await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await expect(control).toContainText("Click, scroll, or type to control");
+    await page.evaluate(() => {
       Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
       document.dispatchEvent(new Event("visibilitychange"));
-      Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
-      document.dispatchEvent(new Event("visibilitychange"));
-      await Promise.resolve();
-      await Promise.resolve();
-      await Promise.resolve();
-      await Promise.resolve();
-      await Promise.resolve();
-      window.dispatchEvent(new PageTransitionEvent("pagehide"));
     });
+    await expect.poll(() => page.evaluate(() => (window as typeof window & {
+      __screenInputMessages: Array<{ type?: string }>;
+    }).__screenInputMessages.filter((message) => message.type === "release-control").length)).toBe(2);
+    await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pagehide")));
 
     const messages = await page.evaluate(
       () => (window as typeof window & { __screenInputMessages: Array<Record<string, unknown>> }).__screenInputMessages,
@@ -981,6 +1131,15 @@ test.describe("contextual computer sheet", () => {
     ]);
     expect(messages.slice(0, 6).map(({ sequence }) => sequence)).toEqual([1, 2, 3, 4, 5, 6]);
     expect(messages.slice(6).map(({ sequence }) => sequence)).toEqual([1]);
+    const rfbMessageTypes = await page.evaluate(() => {
+      const rfbMessages = (window as typeof window & {
+        __screenRfbClientMessages: number[][];
+      }).__screenRfbClientMessages;
+      return rfbMessages.filter((message) => message.length > 1).map((message) => message[0]);
+    });
+    expect(rfbMessageTypes).not.toContain(4);
+    expect(rfbMessageTypes).not.toContain(5);
+    expect(rfbMessageTypes).not.toContain(6);
   });
 
 
@@ -1075,7 +1234,7 @@ test.describe("contextual computer sheet", () => {
     await expect(panel.getByRole("button", { name: "Open Web Control" })).toHaveCount(0);
     await expect(panel).not.toContainText("WebRTC");
   });
-  test("labels unsupported H.264 negotiation as a read-only Surface snapshot", async ({ page }) => {
+  test("labels an RFB view failure as a read-only Surface snapshot", async ({ page }) => {
     await installProjectionPeer(page);
     await page.route("**/api/computer/**", async (route) => {
       const url = new URL(route.request().url());
@@ -1084,8 +1243,8 @@ test.describe("contextual computer sheet", () => {
           status: 503,
           contentType: "application/json",
           body: JSON.stringify({
-            error: "Expanded Web Control requires browser-compatible H.264 Baseline video",
-            failure: "unsupported-h264",
+            error: "The Bot Screen view connection failed.",
+            failure: "view-client-failed",
             snapshotFallback: true,
             surfaceId: url.searchParams.get("surfaceId"),
           }),
@@ -1106,17 +1265,16 @@ test.describe("contextual computer sheet", () => {
     });
 
     await page.goto("/");
-    await createBot(page, "Unsupported Codec Bot");
+    await createBot(page, "Unsupported View Bot");
     await page.getByRole("button", { name: "Open Computer Surface", exact: true }).click();
     const panel = page.getByRole("complementary", { name: "Workspace capabilities", exact: true });
-    await expect(panel.getByAltText("Unsupported Codec Bot screen")).toBeVisible();
+    await expect(panel.getByAltText("Unsupported View Bot screen")).toBeVisible();
     await expect(panel).toContainText("Read-only snapshot");
-    await expect(panel).toContainText("H.264 Baseline");
     await expect(panel.getByRole("button", { name: "Open Web Control" })).toHaveCount(0);
     await expect(panel.getByRole("button", { name: "Take control" })).toHaveCount(0);
   });
 
-  test("uses a read-only snapshot after browser video decode failure", async ({ page }) => {
+  test("uses a read-only snapshot after the RFB view fails", async ({ page }) => {
     await installProjectionPeer(page);
     await page.route("**/api/computer/**", async (route) => {
       if (await fulfillProjection(route)) return;
@@ -1142,13 +1300,12 @@ test.describe("contextual computer sheet", () => {
     await expect(page.getByTestId("expanded-web-control")).toBeVisible();
     await page.evaluate(() => {
       (window as typeof window & {
-        __screenProjectionControl: { failDecode(): void };
-      }).__screenProjectionControl.failDecode();
+        __screenProjectionControl: { failView(): void };
+      }).__screenProjectionControl.failView();
     });
 
     await expect(panel.getByAltText("Decode Failure Bot screen")).toBeVisible();
     await expect(panel).toContainText("Read-only snapshot");
-    await expect(panel).toContainText("could not decode");
     await expect(panel.getByRole("button", { name: "Open Web Control" })).toHaveCount(0);
     await expect(page.getByTestId("expanded-web-control")).toHaveCount(0);
   });

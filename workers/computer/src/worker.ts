@@ -184,12 +184,12 @@ function applicationCwd(): string {
   throw new Error("Shared Workspace is unavailable: application working directory was not supplied");
 }
 
-function launchApplication(application: string): void {
+function launchOwnedProcess(command: string[]): void {
   const cwd = applicationCwd();
   if (!existsSync(cwd)) {
     throw new Error(`Shared Workspace is unavailable: ${cwd} does not exist`);
   }
-  const child = Bun.spawn(desktopApplicationCommand(application), {
+  const child = Bun.spawn(command, {
     cwd,
     stdin: "ignore",
     stdout: "ignore",
@@ -198,6 +198,10 @@ function launchApplication(application: string): void {
   });
   launchedApplications.add(child);
   void child.exited.then(() => launchedApplications.delete(child));
+}
+
+function launchApplication(application: string): void {
+  launchOwnedProcess(desktopApplicationCommand(application));
 }
 
 async function performAction(action: { name: string; args: Record<string, unknown> }): Promise<ComputerActPayload> {
@@ -213,7 +217,7 @@ async function performAction(action: { name: string; args: Record<string, unknow
   if (name === "open_url") {
     const url = String(args.url ?? "");
     if (!url) throw new Error("open_url requires args.url");
-    await runNative(["xdg-open", url]);
+    launchOwnedProcess(["xdg-open", url]);
     return { done: true, text: `opened ${url}` };
   }
   if (name === "notify") {
