@@ -22,6 +22,7 @@ https://omarchy.org/news/2026/09/omarchy-org-redesign-launches-with-29-languages
 
 Omarchy Bot adapts the renderer to a native TypeScript lifecycle, adds explicit
 motion controls, and does not include the radio or etch-effect integrations.
+The hero wordmark adds BOT lettering to the original Omarchy artwork.
 
 The upstream repository contained no LICENSE file at the imported revision.
 Upstream authors retain their rights. These source-derived portions are not

@@ -1,11 +1,11 @@
-<!-- Adapted from https://github.com/omacom/omarchy-site/tree/47711270650b9c78c7bfa996cdd0b6050c79566f. Upstream authors retain their rights; no additional license is asserted here. -->
+<!-- Omarchy artwork adapted from https://github.com/omacom/omarchy-site/tree/47711270650b9c78c7bfa996cdd0b6050c79566f; BOT lettering added by Omarchy Bot. See /UPSTREAM-NOTICE.txt. -->
 <svg
   xmlns="http://www.w3.org/2000/svg"
-  viewBox="0 0 4131 950"
-  width="4131"
+  viewBox="0 0 5967 950"
+  width="5967"
   height="950"
 >
-  <g fill="#9ece6a" shape-rendering="crispEdges">
+  <g fill="currentColor" shape-rendering="crispEdges">
     <rect x="867" y="0" width="153" height="50" />
     <rect x="102" y="50" width="255" height="50" />
     <rect x="663" y="50" width="561" height="50" />
@@ -16,6 +16,9 @@
     <rect x="3417" y="50" width="51" height="50" />
     <rect x="3774" y="50" width="51" height="50" />
     <rect x="3978" y="50" width="51" height="50" />
+    <rect x="4386" y="50" width="357" height="50" />
+    <rect x="5049" y="50" width="255" height="50" />
+    <rect x="5508" y="50" width="459" height="50" />
     <rect x="51" y="100" width="357" height="50" />
     <rect x="612" y="100" width="663" height="50" />
     <rect x="1479" y="100" width="408" height="50" />
@@ -25,6 +28,9 @@
     <rect x="3417" y="100" width="102" height="50" />
     <rect x="3723" y="100" width="102" height="50" />
     <rect x="3978" y="100" width="102" height="50" />
+    <rect x="4386" y="100" width="408" height="50" />
+    <rect x="4998" y="100" width="357" height="50" />
+    <rect x="5508" y="100" width="459" height="50" />
     <rect x="0" y="150" width="153" height="50" />
     <rect x="306" y="150" width="153" height="50" />
     <rect x="561" y="150" width="153" height="50" />
@@ -40,6 +46,11 @@
     <rect x="3417" y="150" width="153" height="50" />
     <rect x="3672" y="150" width="153" height="50" />
     <rect x="3978" y="150" width="153" height="50" />
+    <rect x="4386" y="150" width="153" height="50" />
+    <rect x="4692" y="150" width="153" height="50" />
+    <rect x="4947" y="150" width="153" height="50" />
+    <rect x="5253" y="150" width="153" height="50" />
+    <rect x="5508" y="150" width="459" height="50" />
     <rect x="0" y="200" width="153" height="50" />
     <rect x="306" y="200" width="153" height="50" />
     <rect x="561" y="200" width="153" height="50" />
@@ -55,6 +66,11 @@
     <rect x="3417" y="200" width="153" height="50" />
     <rect x="3672" y="200" width="153" height="50" />
     <rect x="3978" y="200" width="153" height="50" />
+    <rect x="4386" y="200" width="153" height="50" />
+    <rect x="4692" y="200" width="153" height="50" />
+    <rect x="4947" y="200" width="153" height="50" />
+    <rect x="5253" y="200" width="153" height="50" />
+    <rect x="5661" y="200" width="153" height="50" />
     <rect x="0" y="250" width="153" height="50" />
     <rect x="306" y="250" width="153" height="50" />
     <rect x="561" y="250" width="153" height="50" />
@@ -70,6 +86,11 @@
     <rect x="3417" y="250" width="153" height="50" />
     <rect x="3672" y="250" width="153" height="50" />
     <rect x="3978" y="250" width="153" height="50" />
+    <rect x="4386" y="250" width="153" height="50" />
+    <rect x="4692" y="250" width="153" height="50" />
+    <rect x="4947" y="250" width="153" height="50" />
+    <rect x="5253" y="250" width="153" height="50" />
+    <rect x="5661" y="250" width="153" height="50" />
     <rect x="0" y="300" width="153" height="50" />
     <rect x="306" y="300" width="153" height="50" />
     <rect x="561" y="300" width="153" height="50" />
@@ -85,6 +106,11 @@
     <rect x="3417" y="300" width="153" height="50" />
     <rect x="3672" y="300" width="153" height="50" />
     <rect x="3978" y="300" width="153" height="50" />
+    <rect x="4386" y="300" width="153" height="50" />
+    <rect x="4692" y="300" width="153" height="50" />
+    <rect x="4947" y="300" width="153" height="50" />
+    <rect x="5253" y="300" width="153" height="50" />
+    <rect x="5661" y="300" width="153" height="50" />
     <rect x="0" y="350" width="153" height="50" />
     <rect x="306" y="350" width="153" height="50" />
     <rect x="561" y="350" width="153" height="50" />
@@ -99,6 +125,11 @@
     <rect x="3417" y="350" width="153" height="50" />
     <rect x="3672" y="350" width="153" height="50" />
     <rect x="3978" y="350" width="153" height="50" />
+    <rect x="4386" y="350" width="153" height="50" />
+    <rect x="4692" y="350" width="153" height="50" />
+    <rect x="4947" y="350" width="153" height="50" />
+    <rect x="5253" y="350" width="153" height="50" />
+    <rect x="5661" y="350" width="153" height="50" />
     <rect x="0" y="400" width="153" height="50" />
     <rect x="306" y="400" width="153" height="50" />
     <rect x="561" y="400" width="153" height="50" />
@@ -109,6 +140,10 @@
     <rect x="2550" y="400" width="153" height="50" />
     <rect x="3060" y="400" width="561" height="50" />
     <rect x="3672" y="400" width="459" height="50" />
+    <rect x="4386" y="400" width="408" height="50" />
+    <rect x="4947" y="400" width="153" height="50" />
+    <rect x="5253" y="400" width="153" height="50" />
+    <rect x="5661" y="400" width="153" height="50" />
     <rect x="0" y="450" width="153" height="50" />
     <rect x="306" y="450" width="153" height="50" />
     <rect x="561" y="450" width="153" height="50" />
@@ -119,6 +154,10 @@
     <rect x="2550" y="450" width="153" height="50" />
     <rect x="3009" y="450" width="561" height="50" />
     <rect x="3672" y="450" width="459" height="50" />
+    <rect x="4386" y="450" width="357" height="50" />
+    <rect x="4947" y="450" width="153" height="50" />
+    <rect x="5253" y="450" width="153" height="50" />
+    <rect x="5661" y="450" width="153" height="50" />
     <rect x="0" y="500" width="153" height="50" />
     <rect x="306" y="500" width="153" height="50" />
     <rect x="561" y="500" width="153" height="50" />
@@ -131,6 +170,10 @@
     <rect x="3111" y="500" width="153" height="50" />
     <rect x="3417" y="500" width="153" height="50" />
     <rect x="3978" y="500" width="153" height="50" />
+    <rect x="4386" y="500" width="408" height="50" />
+    <rect x="4947" y="500" width="153" height="50" />
+    <rect x="5253" y="500" width="153" height="50" />
+    <rect x="5661" y="500" width="153" height="50" />
     <rect x="0" y="550" width="153" height="50" />
     <rect x="306" y="550" width="153" height="50" />
     <rect x="561" y="550" width="153" height="50" />
@@ -145,6 +188,11 @@
     <rect x="3417" y="550" width="153" height="50" />
     <rect x="3723" y="550" width="102" height="50" />
     <rect x="3978" y="550" width="153" height="50" />
+    <rect x="4386" y="550" width="153" height="50" />
+    <rect x="4692" y="550" width="153" height="50" />
+    <rect x="4947" y="550" width="153" height="50" />
+    <rect x="5253" y="550" width="153" height="50" />
+    <rect x="5661" y="550" width="153" height="50" />
     <rect x="0" y="600" width="153" height="50" />
     <rect x="306" y="600" width="153" height="50" />
     <rect x="561" y="600" width="153" height="50" />
@@ -159,6 +207,11 @@
     <rect x="3417" y="600" width="153" height="50" />
     <rect x="3672" y="600" width="153" height="50" />
     <rect x="3978" y="600" width="153" height="50" />
+    <rect x="4386" y="600" width="153" height="50" />
+    <rect x="4692" y="600" width="153" height="50" />
+    <rect x="4947" y="600" width="153" height="50" />
+    <rect x="5253" y="600" width="153" height="50" />
+    <rect x="5661" y="600" width="153" height="50" />
     <rect x="0" y="650" width="153" height="50" />
     <rect x="306" y="650" width="153" height="50" />
     <rect x="561" y="650" width="153" height="50" />
@@ -174,6 +227,11 @@
     <rect x="3417" y="650" width="153" height="50" />
     <rect x="3672" y="650" width="153" height="50" />
     <rect x="3978" y="650" width="153" height="50" />
+    <rect x="4386" y="650" width="153" height="50" />
+    <rect x="4692" y="650" width="153" height="50" />
+    <rect x="4947" y="650" width="153" height="50" />
+    <rect x="5253" y="650" width="153" height="50" />
+    <rect x="5661" y="650" width="153" height="50" />
     <rect x="0" y="700" width="153" height="50" />
     <rect x="306" y="700" width="153" height="50" />
     <rect x="561" y="700" width="153" height="50" />
@@ -189,6 +247,11 @@
     <rect x="3417" y="700" width="153" height="50" />
     <rect x="3672" y="700" width="153" height="50" />
     <rect x="3978" y="700" width="153" height="50" />
+    <rect x="4386" y="700" width="153" height="50" />
+    <rect x="4692" y="700" width="153" height="50" />
+    <rect x="4947" y="700" width="153" height="50" />
+    <rect x="5253" y="700" width="153" height="50" />
+    <rect x="5661" y="700" width="153" height="50" />
     <rect x="51" y="750" width="357" height="50" />
     <rect x="612" y="750" width="102" height="50" />
     <rect x="867" y="750" width="153" height="50" />
@@ -201,6 +264,9 @@
     <rect x="3111" y="750" width="153" height="50" />
     <rect x="3417" y="750" width="102" height="50" />
     <rect x="3723" y="750" width="357" height="50" />
+    <rect x="4386" y="750" width="408" height="50" />
+    <rect x="4998" y="750" width="357" height="50" />
+    <rect x="5661" y="750" width="153" height="50" />
     <rect x="102" y="800" width="255" height="50" />
     <rect x="663" y="800" width="51" height="50" />
     <rect x="867" y="800" width="153" height="50" />
@@ -213,6 +279,9 @@
     <rect x="3111" y="800" width="153" height="50" />
     <rect x="3417" y="800" width="51" height="50" />
     <rect x="3774" y="800" width="255" height="50" />
+    <rect x="4386" y="800" width="357" height="50" />
+    <rect x="5049" y="800" width="255" height="50" />
+    <rect x="5712" y="800" width="51" height="50" />
     <rect x="1989" y="850" width="153" height="50" />
     <rect x="2295" y="850" width="102" height="50" />
     <rect x="1989" y="900" width="153" height="50" />

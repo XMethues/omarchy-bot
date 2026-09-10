@@ -109,12 +109,14 @@ Open **<http://127.0.0.1:7322>**. The daemon listens on `127.0.0.1:7321`; Vite p
 
 The public product site lives in `apps/site`, separate from the local Bot Client.
 It remains a Vite + TypeScript frontend with native CSS. The full-viewport pixel
-field, original 81-by-19 wordmark, and 22 named palettes are adapted from
+field, Omarchy wordmark artwork, and 22 named palettes are adapted from
 [the Omarchy website](https://github.com/omacom/omarchy-site/tree/47711270650b9c78c7bfa996cdd0b6050c79566f),
 with Matte Black as the default. The Canvas renderer shares the wordmark's grid,
 supports pointer glow and click stamps, pauses when offscreen or hidden, and
 honors reduced motion and an explicit pause control. Product screenshots remain
 below the first screen. Radio and etch-effect integrations are not included.
+The hero extends the original 81-by-19 artwork with matching BOT lettering on a
+117-by-19 grid, shared by Canvas and the no-JavaScript SVG fallback.
 Upstream-derived portions are attributed separately in
 [`apps/site/public/UPSTREAM-NOTICE.txt`](apps/site/public/UPSTREAM-NOTICE.txt)
 and are not relicensed under this project's MIT license. JetBrains Mono and
