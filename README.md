@@ -108,6 +108,11 @@ Open **<http://127.0.0.1:7322>**. The daemon listens on `127.0.0.1:7321`; Vite p
 ### Official website
 
 The public product site lives in `apps/site`, separate from the local Bot Client.
+It remains a Vite + TypeScript frontend with native CSS. Its Omarchy-inspired
+presentation uses JetBrains Mono and Geist, a product-specific pixel wordmark,
+square controls, and Nord-based light/dark colors. Fonts and their licenses are
+self-hosted in `apps/site/public/fonts`.
+
 The public pages make no daemon connections or model calls. Product screenshots
 use illustrative data. The same Vercel project includes server-side plugin OAuth
 and Skills catalog routes. Default Skills access is ready to use; service
