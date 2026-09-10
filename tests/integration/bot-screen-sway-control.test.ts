@@ -16,6 +16,7 @@ import {
 } from "./helpers/fakeSwayIpc.ts";
 
 const SURFACE_ID = "surf_33333333333333333333333333333333" as SurfaceId;
+const SURFACE_B = "surf_44444444444444444444444444444444" as SurfaceId;
 
 const SCREEN_PNG = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAYAAAD0In+KAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAADklEQVQImWMQMgn7D8IAC5MDN627upEAAAAASUVORK5CYII=",
@@ -35,7 +36,7 @@ const TWO_TOPLEVEL_TREE = {
         {
           id: 3,
           type: "workspace",
-          name: "1",
+          name: `bot-${SURFACE_ID}`,
           nodes: [
             {
               id: 4,
@@ -82,7 +83,7 @@ const EXPECTED_WINDOWS = [
     pid: 1001,
     focused: false,
     bounds: { x: 0, y: 0, width: 800, height: 600 },
-    workspace: "1",
+    workspace: `bot-${SURFACE_ID}`,
     clientType: "wayland" as const,
   },
   {
@@ -91,7 +92,7 @@ const EXPECTED_WINDOWS = [
     pid: 2002,
     focused: true,
     bounds: { x: 100, y: 80, width: 400, height: 300 },
-    workspace: "1",
+    workspace: `bot-${SURFACE_ID}`,
     clientType: "x11" as const,
   },
 ];
@@ -124,6 +125,42 @@ test("native window data includes available XWayland application identity", () =
   }]);
 });
 
+test("native window data excludes the Bot Desktop infrastructure surface", () => {
+  expect(listApplicationToplevels({
+    id: 1,
+    type: "root",
+    nodes: [{
+      id: 2,
+      type: "workspace",
+      name: "1",
+      nodes: [
+        {
+          id: 5,
+          type: "con",
+          name: "Bot Desktop",
+          app_id: "dev.omarchy.BotDesktop",
+          focused: true,
+          shell: "xdg_shell",
+          rect: { x: 0, y: 0, width: 1920, height: 1080 },
+        },
+        {
+          id: 10,
+          type: "con",
+          name: "Brave",
+          app_id: "brave-browser",
+          focused: false,
+          shell: "xdg_shell",
+          rect: { x: 0, y: 0, width: 0, height: 0 },
+        },
+      ],
+      floating_nodes: [],
+    }],
+  })).toMatchObject([{
+    id: "10",
+    appId: "brave-browser",
+  }]);
+});
+
 let root: string | undefined;
 
 afterEach(() => {
@@ -151,12 +188,15 @@ async function startControlRuntime(options?: {
   failPastePath?: string;
 }): Promise<{
   runtime: BotScreenRuntime;
+  adapter: SwayBotScreenRuntimeAdapter;
   controlDir: string;
   inputLog: string;
   failPastePath: string;
   workerActions: ComputerAction[];
   workerScope: ComputerWorkerScope | undefined;
   expandedViewCalls: number;
+  application: string;
+  applicationMarker: string;
   unlinkIpc: () => void;
 }> {
   root = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-sway-control-"));
@@ -164,9 +204,12 @@ async function startControlRuntime(options?: {
   const controlDir = path.join(root, "ipc-control");
   const inputLog = path.join(root, "input.log");
   const failPastePath = options?.failPastePath ?? path.join(root, "fail-paste");
+  const applicationCwd = path.join(root, "workspace");
+  const applicationMarker = path.join(root, "application.env");
   const png = path.join(root, "screen.png");
   mkdirSync(bin);
   mkdirSync(controlDir);
+  mkdirSync(applicationCwd);
   writeFileSync(png, SCREEN_PNG);
   writeFakeSwayTree(controlDir, options?.tree ?? TWO_TOPLEVEL_TREE);
   writeFakeSwayIpcMode(controlDir, "ok");
@@ -209,12 +252,54 @@ for await (const chunk of Bun.stdin.stream()) {
   }
 }
 `);
+  const application = executable(bin, "fixture-app", `#!/usr/bin/env bun
+import { readFileSync, writeFileSync } from "node:fs";
+const treePath = ${JSON.stringify(path.join(controlDir, "tree.json"))};
+const tree = JSON.parse(readFileSync(treePath, "utf8"));
+tree.nodes[0].nodes[0].nodes.push({
+  id: 30,
+  type: "con",
+  name: "Shared App",
+  app_id: "fixture-app",
+  pid: process.pid,
+  focused: true,
+  shell: "xdg_shell",
+  rect: { x: 0, y: 0, width: 640, height: 480 },
+  nodes: [],
+  floating_nodes: [],
+});
+writeFileSync(treePath, JSON.stringify(tree));
+writeFileSync(${JSON.stringify(applicationMarker)}, [
+  process.env.HOME,
+  process.env.XDG_CONFIG_HOME,
+  process.cwd(),
+].join("|"));
+await Promise.withResolvers<void>().promise;
+`);
+  const browserApplications = path.join(
+    root,
+    "profiles",
+    "computer",
+    "data",
+    "applications",
+  );
+  mkdirSync(browserApplications, { recursive: true });
+  writeFileSync(
+    path.join(browserApplications, "brave-browser.desktop"),
+    [
+      "[Desktop Entry]",
+      "Type=Application",
+      `Exec="${application}" %U`,
+      "",
+    ].join("\n"),
+  );
 
   const workerActions: ComputerAction[] = [];
   let workerScope: ComputerWorkerScope | undefined;
   const adapter = new SwayBotScreenRuntimeAdapter({
     runtimeRoot: path.join(root, "runtime"),
     profileRoot: path.join(root, "profiles"),
+    applicationCwd,
     swayBin: sway,
     wlrRandrBin: executable(bin, "wlr-randr", "#!/bin/sh\nexit 0\n"),
     grimBin: executable(bin, "grim", `#!/bin/sh\ncat ${JSON.stringify(png)}\n`),
@@ -262,18 +347,22 @@ for await (const chunk of Bun.stdin.stream()) {
     expandedViewCalls += 1;
     return originalExpanded();
   };
-  const swaySock = path.join(root, "runtime", SURFACE_ID, "1", "sway-ipc.sock");
+  writeFileSync(path.join(controlDir, "commands.log"), "");
+  const swaySock = workerScope?.env.SWAYSOCK;
   return {
+    adapter,
     runtime,
     controlDir,
     inputLog,
     failPastePath,
     workerActions,
+    application,
+    applicationMarker,
     workerScope,
     get expandedViewCalls() {
       return expandedViewCalls;
     },
-    unlinkIpc: () => rmSync(swaySock, { force: true }),
+    unlinkIpc: () => rmSync(swaySock!, { force: true }),
   };
 }
 
@@ -318,7 +407,10 @@ test("focus_window sends a private focus command and succeeds only after the tre
   const fixture = await startControlRuntime();
   try {
     await fixture.runtime.act({ name: "focus_window", args: { id: "10" } }, authority());
-    expect(readFakeSwayCommands(fixture.controlDir)).toEqual(["[con_id=10] focus"]);
+    expect(readFakeSwayCommands(fixture.controlDir)).toEqual([
+      `workspace bot-${SURFACE_ID}`,
+      "[con_id=10] focus",
+    ]);
     const listed = await fixture.runtime.act({ name: "list_windows", args: {} });
     expect(listed.windowList).toEqual([
       { ...EXPECTED_WINDOWS[0], focused: true },
@@ -365,12 +457,18 @@ test("focus_window throws for stale ids, ambiguous titles, refusals, unconfirmed
     writeFakeSwayIpcMode(fixture.controlDir, "refuse");
     await expect(fixture.runtime.act({ name: "focus_window", args: { id: "10" } }, authority()))
       .rejects.toThrow(/refused/);
-    expect(readFakeSwayCommands(fixture.controlDir)).toEqual(["[con_id=10] focus"]);
+    expect(readFakeSwayCommands(fixture.controlDir)).toEqual([
+      `workspace bot-${SURFACE_ID}`,
+    ]);
 
     writeFakeSwayIpcMode(fixture.controlDir, "ack");
     await expect(fixture.runtime.act({ name: "focus_window", args: { id: "10" } }, authority()))
       .rejects.toThrow(/not confirmed/);
-    expect(readFakeSwayCommands(fixture.controlDir)).toEqual(["[con_id=10] focus", "[con_id=10] focus"]);
+    expect(readFakeSwayCommands(fixture.controlDir)).toEqual([
+      `workspace bot-${SURFACE_ID}`,
+      `workspace bot-${SURFACE_ID}`,
+      "[con_id=10] focus",
+    ]);
 
     writeFakeSwayIpcMode(fixture.controlDir, "hang");
     await expect(fixture.runtime.act({ name: "focus_window", args: { id: "10" } }, authority()))
@@ -434,6 +532,71 @@ test("authorized click, scroll, key, and type drive the private virtual-input he
   }
 });
 
+test("human input authority serializes the shared seat across Screen workspaces", async () => {
+  const fixture = await startControlRuntime();
+  const second = await fixture.adapter.start({
+    surfaceId: SURFACE_B,
+    generation: 2,
+    geometryGeneration: 7,
+    logicalWidth: 2,
+    logicalHeight: 1,
+    scale: 1,
+    refreshRate: 15,
+  });
+  writeFileSync(path.join(fixture.controlDir, "commands.log"), "");
+  writeFakeSwayTree(fixture.controlDir, {
+    id: 1,
+    type: "root",
+    name: "root",
+    nodes: [{
+      id: 2,
+      type: "workspace",
+      name: `bot-${SURFACE_B}`,
+      nodes: [{
+        id: 30,
+        type: "con",
+        name: "Second Screen",
+        app_id: "fixture",
+        focused: true,
+        shell: "xdg_shell",
+        rect: { x: 8_292, y: 80, width: 400, height: 300 },
+      }],
+      floating_nodes: [],
+    }],
+    floating_nodes: [],
+  });
+  let firstEpoch: number | undefined;
+  let secondEpoch: number | undefined;
+  try {
+    await expect(second.act({ name: "list_windows", args: {} })).resolves.toMatchObject({
+      windowList: [{
+        title: "Second Screen",
+        bounds: { x: 100, y: 80, width: 400, height: 300 },
+      }],
+    });
+    firstEpoch = await fixture.runtime.setInputAuthority(1);
+    const secondAuthority = second.setInputAuthority(1).then((epoch) => {
+      secondEpoch = epoch;
+      return "acquired";
+    });
+    expect(await Promise.race([
+      secondAuthority,
+      Bun.sleep(30).then(() => "waiting"),
+    ])).toBe("waiting");
+    await fixture.runtime.releaseInput(firstEpoch);
+    firstEpoch = undefined;
+    expect(await secondAuthority).toBe("acquired");
+    expect(readFakeSwayCommands(fixture.controlDir)).toEqual([
+      `workspace bot-${SURFACE_ID}`,
+      `workspace bot-${SURFACE_B}`,
+    ]);
+  } finally {
+    if (firstEpoch !== undefined) await fixture.runtime.releaseInput(firstEpoch).catch(() => {});
+    if (secondEpoch !== undefined) await second.releaseInput(secondEpoch).catch(() => {});
+    await Promise.allSettled([fixture.runtime.stop(), second.stop()]);
+  }
+});
+
 test("Agent key chords press in order and release in reverse order", async () => {
   const fixture = await startControlRuntime();
   try {
@@ -464,26 +627,58 @@ test("type throws when the private helper cannot paste exact Unicode", async () 
   }
 });
 
-test("open_app and open_url stay on the worker while screenshots avoid Screen Projection", async () => {
+test("shared runtime launches applications into the requesting Screen workspace", async () => {
   const fixture = await startControlRuntime();
   try {
-    await expect(fixture.runtime.act({ name: "open_app", args: { app: "firefox.desktop" } }, authority()))
-      .resolves.toEqual({ text: "worker-open_app" });
-    await expect(fixture.runtime.act({ name: "open_url", args: { url: "https://example.com" } }, authority()))
-      .resolves.toEqual({ text: "worker-open_url" });
-    expect(fixture.workerActions).toEqual([
-      { name: "open_app", args: { app: "firefox.desktop" } },
-      { name: "open_url", args: { url: "https://example.com" } },
-    ]);
-    expect(fixture.workerScope?.env.WAYLAND_DISPLAY).toBe("wayland-0");
-    expect(fixture.workerScope?.env.SWAYSOCK).toBe(path.join(root!, "runtime", SURFACE_ID, "1", "sway-ipc.sock"));
     const shot = await fixture.runtime.act({ name: "screenshot", args: {} });
-    expect(shot.image?.bytes.slice(0, 8)).toEqual(new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+    expect(shot.image?.bytes.slice(0, 8)).toEqual(
+      new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    );
     const observed = await fixture.runtime.act({ name: "observe", args: {} });
     expect(observed.windowList).toEqual(EXPECTED_WINDOWS);
     const listed = await fixture.runtime.act({ name: "list_windows", args: {} });
     expect(listed.windowList).toEqual(EXPECTED_WINDOWS);
+
+    await expect(
+      fixture.runtime.act({ name: "open_app", args: { app: fixture.application } }, authority()),
+    ).resolves.toEqual({ text: `launched ${fixture.application}` });
+    expect(fixture.workerActions).toEqual([]);
+    expect(readFakeSwayCommands(fixture.controlDir)).toEqual([
+      `workspace bot-${SURFACE_ID}`,
+      "[con_id=30] move container to workspace bot-surf_33333333333333333333333333333333",
+      `workspace bot-${SURFACE_ID}`,
+      `[app_id="^dev[.]omarchy[.]BotDesktop$" workspace="^bot-${SURFACE_ID}$"] move scratchpad`,
+    ]);
+    expect(await Bun.file(fixture.applicationMarker).text()).toBe([
+      path.join(root!, "profiles", "computer", "home"),
+      path.join(root!, "profiles", "computer", "config"),
+      path.join(root!, "workspace"),
+    ].join("|"));
+    expect(fixture.workerScope?.env.WAYLAND_DISPLAY).toBe("wayland-0");
+    expect(fixture.workerScope?.env.SWAYSOCK).toContain(path.join(root!, "runtime", "computer"));
     expect(fixture.expandedViewCalls).toBe(0);
+  } finally {
+    await fixture.runtime.stop();
+  }
+});
+
+test("open_url reuses the shared browser profile and routes its new window", async () => {
+  const fixture = await startControlRuntime();
+  const url = "https://example.com/shared";
+  try {
+    await expect(
+      fixture.runtime.act({ name: "open_url", args: { url } }, authority()),
+    ).resolves.toEqual({ text: `opened ${url}` });
+    expect(fixture.workerActions).toEqual([]);
+    expect(readFakeSwayCommands(fixture.controlDir)).toEqual([
+      `workspace bot-${SURFACE_ID}`,
+      "[con_id=30] move container to workspace bot-surf_33333333333333333333333333333333",
+      `workspace bot-${SURFACE_ID}`,
+      `[app_id="^dev[.]omarchy[.]BotDesktop$" workspace="^bot-${SURFACE_ID}$"] move scratchpad`,
+    ]);
+    expect(await Bun.file(fixture.applicationMarker).text()).toContain(
+      path.join(root!, "profiles", "computer"),
+    );
   } finally {
     await fixture.runtime.stop();
   }

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { ComputerSurfaceOwner } from "../../apps/daemon/src/modules/computer/broker.ts";
+import type { ProjectionWebSocket } from "../../apps/daemon/src/modules/computer/screenProjection.ts";
 import { FakeBotScreenRuntimeAdapter } from "../../apps/daemon/src/modules/computer/fakeBotScreenRuntime.ts";
 import { api, makeBot, startDaemon, type Harness } from "./helpers/harness.ts";
 
@@ -87,6 +88,24 @@ class SocketInbox {
 
   binary(description = "binary WebSocket message"): Promise<Uint8Array> {
     return this.next((message) => message instanceof Uint8Array, description).then((message) => message as Uint8Array);
+  }
+}
+
+class BackpressuredSocket implements ProjectionWebSocket {
+  readonly messages: Array<string | Uint8Array> = [];
+  closed = false;
+
+  send(data: string | Uint8Array): number {
+    this.messages.push(typeof data === "string" ? data : data.slice());
+    return -1;
+  }
+
+  close(): void {
+    this.closed = true;
+  }
+
+  getBufferedAmount(): number {
+    return 0;
   }
 }
 
@@ -314,6 +333,47 @@ describe("WebSocket Screen Projection", () => {
     }));
     await adapter.waitForInputEvents(1);
     expect(adapter.inputEvents[0]?.event).toMatchObject({ type: "button", x: 40, y: 50 });
+  });
+
+  test("keeps queued Bun WebSocket sends alive under backpressure", async () => {
+    const owner = await ownerFor(h, await makeBot(h, "Backpressured projection"));
+    const session = await createSession(h, owner);
+    const controlReservation = h.svc.projections.reserveSocket(owner, session.sessionId, "control");
+    expect(controlReservation).toBeDefined();
+    const control = new BackpressuredSocket();
+    expect(h.svc.projections.openSocket(controlReservation!, control)).toBeTrue();
+
+    h.svc.projections.socketMessage(
+      controlReservation!,
+      JSON.stringify({ ...envelope(session), type: "view", mode: "preview" }),
+    );
+    await until(
+      () => (h.svc.projections.loadMetrics(owner, session.sessionId)?.captureAttempts ?? 0) > 0,
+      "preview capture did not run",
+    );
+    expect(h.svc.projections.loadMetrics(owner, session.sessionId)).toMatchObject({
+      previewFrames: 1,
+      sendFailures: 0,
+    });
+
+    h.svc.projections.socketMessage(
+      controlReservation!,
+      JSON.stringify({ ...envelope(session), type: "view", mode: "expanded" }),
+    );
+    const rfbReservation = h.svc.projections.reserveSocket(owner, session.sessionId, "rfb");
+    expect(rfbReservation).toBeDefined();
+    const rfb = new BackpressuredSocket();
+    expect(h.svc.projections.openSocket(rfbReservation!, rfb)).toBeTrue();
+    await until(
+      () => rfb.messages.some((message) => message instanceof Uint8Array),
+      "RFB banner was not queued",
+    );
+    expect(h.svc.projections.failureDiagnostic(owner, session.sessionId)).toBeUndefined();
+    expect(h.svc.projections.status(owner, session.sessionId)).toMatchObject({ state: "expanded" });
+    expect(h.svc.projections.loadMetrics(owner, session.sessionId)).toMatchObject({
+      rfbBytesSent: RFB_BANNER.byteLength,
+      sendFailures: 0,
+    });
   });
 
   test("rejects stale input without forwarding it and releases held authority", async () => {

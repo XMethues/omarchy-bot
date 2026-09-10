@@ -11,5 +11,6 @@ declare module "@novnc/novnc" {
     viewOnly: boolean;
     scaleViewport: boolean;
     clipViewport: boolean;
+    showDotCursor: boolean;
   }
 }

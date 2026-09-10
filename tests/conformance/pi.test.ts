@@ -342,10 +342,11 @@ describe("pi conformance (10 steps, real model)", () => {
       }
       const capabilities = probePayload.capabilities;
       expect(capabilities).toMatchObject({
-        version: 3,
+        version: 4,
         steering: true,
         abort: true,
         botMail: true,
+        plugins: true,
         nativeThreadActions: ["resume", "history", "close"],
         attachments: { text: true, maxTextBytes: 64 * 1024 },
         nativeEventFamilies: [],

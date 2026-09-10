@@ -110,7 +110,7 @@ The opt-in final-stack harness is reproducible with:
 OMARCHY_BOT_REAL_SCREEN_LOAD=1 bun test tests/integration/bot-screen-capacity.load.test.ts
 ```
 
-On the target Ryzen 9 7900X, RTX 2080 Ti, Hyprland 0.56.2/Aquamarine 0.14.0 workstation, the schema-v2 gate used Brave 152.1.94.119, a 16 FPS capture rate, and 15-second phases. The built production web client connected through `https://192.168.10.25:<ephemeral-port>` rather than loopback; each displayed sample was counted only after WebRTC receipt, image decode, a browser paint task, and canvas readback. Projection-session counters independently measured source, encoded and sent frames plus every backpressure, invalid-frame, transport-unavailable and send-failure category.
+On the target Ryzen 9 7900X, RTX 2080 Ti, Hyprland 0.56.2/Aquamarine 0.14.0 workstation, the schema-v2 gate used Brave 152.1.94.119, a 16 FPS capture rate, and 15-second phases. The built production web client connected through a non-loopback HTTPS LAN endpoint (address redacted for publication) rather than loopback; each displayed sample was counted only after WebRTC receipt, image decode, a browser paint task, and canvas readback. Projection-session counters independently measured source, encoded and sent frames plus every backpressure, invalid-frame, transport-unavailable and send-failure category.
 
 | Profile | Screens | Source / encoded FPS | Browser-displayed FPS | Input-to-visible p50 / p95 | Capture-to-browser p50 / p95 | Active PSS / RSS | CPU | Result |
 |---|---:|---:|---:|---:|---:|---:|---:|---|

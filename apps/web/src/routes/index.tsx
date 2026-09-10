@@ -11,7 +11,7 @@ import { MobileNav } from "@astryxdesign/core/MobileNav";
 import { VStack } from "@astryxdesign/core/VStack";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { createFileRoute } from "@tanstack/react-router";
 import type { BotViewDto } from "@omarchy-bot/protocol";
 import { api, apiErrorMessage, randomUuid } from "../lib/api.ts";
 import { requestDesktopNotificationPermission, startEventPump, type QueryTag } from "../lib/events.ts";
@@ -23,6 +23,7 @@ import { CreateBotDialog } from "../components/CreateBotDialog.tsx";
 import { HistoryDialog } from "../components/HistoryDialog.tsx";
 import { BotSettingsPanel } from "../components/BotSettingsPanel.tsx";
 import { SettingsDialog } from "../components/SettingsDialog.tsx";
+import { PluginsDialog } from "../components/PluginsDialog.tsx";
 import { CapabilityPanel } from "../components/CapabilityPanel.tsx";
 import { useVoiceAutoSendSetting } from "../components/VoiceSettingsControl.tsx";
 import { TranscriptAttention } from "../components/TranscriptAttention.tsx";
@@ -69,8 +70,9 @@ function ConversationWorkspace({ children, panelOpen }: ConversationWorkspacePro
 
 function HomeScreen(): JSX.Element {
   const qc = useQueryClient();
-  const navigate = useNavigate();
+  const navigate = Route.useNavigate();
   const { bot: selectedBotId, thread: selectedThreadId } = Route.useSearch();
+  const [pluginsOpen, setPluginsOpen] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [rightRegion, setRightRegion] = useState<RightRegionState>({ mode: "closed" });
@@ -92,6 +94,7 @@ function HomeScreen(): JSX.Element {
   const computerTriggerRef = useRef<HTMLButtonElement>(null);
   const botSettingsTriggerRef = useRef<HTMLButtonElement>(null);
   selectedBotRef.current = selectedBotId;
+
 
   const invalidate = useCallback(
     (tag: QueryTag, threadId?: string) => {
@@ -232,7 +235,7 @@ function HomeScreen(): JSX.Element {
     (threadId: string): void => {
       invalidate("threads");
       invalidate("bots");
-      if (bot !== undefined && threadId !== selectedThreadId) {
+      if (bot !== undefined && selectedBotRef.current === bot.id && threadId !== selectedThreadId) {
         void navigate({ search: { bot: bot.id, thread: threadId } });
       }
     },
@@ -492,6 +495,8 @@ function HomeScreen(): JSX.Element {
     <Sidebar
       bots={bots.data ?? []}
       {...(selectedBotId !== undefined ? { selectedBotId } : {})}
+      pluginsOpen={pluginsOpen}
+      onOpenPlugins={() => setPluginsOpen(true)}
       onSelectBot={selectBot}
       onOpenBotSettings={(botId) => {
         setRightRegion({ mode: "closed" });
@@ -605,6 +610,11 @@ function HomeScreen(): JSX.Element {
             )
           ) : undefined
         }
+      />
+      <PluginsDialog
+        open={pluginsOpen}
+        onClose={() => setPluginsOpen(false)}
+        mobileReturnFocusRef={mobileNavigationTriggerRef}
       />
       <CreateBotDialog
         isOpen={createOpen}

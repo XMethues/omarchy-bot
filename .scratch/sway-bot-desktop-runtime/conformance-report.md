@@ -2,7 +2,7 @@
 
 Status: complete
 Cutover: go
-Generated: 2026-09-07T16:49:44.024Z
+Generated: 2026-09-08T15:22:25.883Z
 
 This is ticket 09 evidence. Historical Cage, Sway, and Xvnc rows are **not** used for numeric comparison: workload and accounting are not matched to those artifacts.
 
@@ -16,7 +16,7 @@ OMARCHY_BOT_REAL_SWAY=1 bun test tests/integration/bot-screen-sway-conformance.t
 
 - kernel: Linux 7.1.9-arch1-2 x64
 - gpu: ["01:00.0 VGA compatible controller [0300]: NVIDIA Corporation TU102 [GeForce RTX 2080 Ti] [10de:1e04] (rev a1)","0c:00.0 VGA compatible controller [0300]: Advanced Micro Devices, Inc. [AMD/ATI] Raphael [1002:164e] (rev c2)"]
-- hostname: omarchy
+- hostname: [redacted]
 - hostHyprlandRunning: true
 - hostCompositorPid: 1470
 - hostWAYLAND_DISPLAY: wayland-1
@@ -44,16 +44,16 @@ OMARCHY_BOT_REAL_SWAY=1 bun test tests/integration/bot-screen-sway-conformance.t
 
 ## Correctness
 
-- [x] two-real-sway-sessions: both Screens ready in 104.82ms, 102.82ms
-- [x] distinct-apps-and-private-state: distinct pixels=true; private markers=true; A windows=Bot Desktop|BOT-A-TERM|BOT-A; B windows=Bot Desktop|BOT-B-TERM|BOT-B; markers=/tmp/omarchy-bot-sway-home-a8JIo2/screens/surf_912035d2bc2c4e728c386d53a7c60fa4/config|/tmp/omarchy-bot-sway-home-a8JIo2/r/surf_912035d2bc2c4e728c386d53a7c60fa4/1|wayland-1 || /tmp/omarchy-bot-sway-home-a8JIo2/screens/surf_11e761d566e140658e3463f5c1407a56/config|/tmp/omarchy-bot-sway-home-a8JIo2/r/surf_11e761d566e140658e3463f5c1407a56/1|wayland-1
-- [x] agent-without-viewer: observe/list/focus/click/scroll/chord passed; sibling focus and title preserved; exact browser and terminal Unicode=你好, world
-- [x] preview-no-wayvnc: preview sequence=1 bytes=34966; wayvnc processes=0
+- [x] two-real-sway-sessions: both Screens ready in 128.38ms, 82.15ms
+- [x] distinct-apps-and-shared-state: distinct pixels=true; shared markers=true; A windows=BOT-A-TERM|BOT-A; B windows=BOT-B-TERM|BOT-B; markers=/tmp/omarchy-bot-sway-home-E9ZMDK/screens/computer/config|/tmp/omarchy-bot-sway-home-E9ZMDK/r/computer/1788880947642|wayland-1 || /tmp/omarchy-bot-sway-home-E9ZMDK/screens/computer/config|/tmp/omarchy-bot-sway-home-E9ZMDK/r/computer/1788880947642|wayland-1
+- [x] agent-without-viewer: observe/list/focus/click/scroll/chord passed; sibling title preserved under the shared seat; exact browser and terminal Unicode=你好, world
+- [x] preview-no-wayvnc: preview sequence=1 bytes=20450; wayvnc processes=0
 - [x] rfb-view-only-and-broker: RFB negotiated=true bytes=3686464; RFB mutation rejected=true; Broker mutated=true; titles=BOT-A click:1 -> BOT-A click:1 -> BOT-A click:2
 - [x] multiple-viewers: second viewer negotiated=true; wayvnc processes=1; first viewer preserved=true
 - [x] bot-switching: Bot B RFB negotiated=true; Bot A and Bot B screenshots stayed distinct
-- [x] component-failure-fallback: projection failure=rfb-bridge-failed; snapshotFallback=true; desktop=ready; wayvncPid=1041838
-- [x] real-browser-projection: actual noVNC painted Bot A and Broker-driven marker change; first paint 353.13ms, input-to-paint 94.19ms
-- [x] background-and-unsaved: same window/generation and exact unsaved field retained; counter 18 -> 20
+- [x] component-failure-fallback: projection failure=rfb-bridge-failed; snapshotFallback=true; desktop=ready; wayvncPid=2173180
+- [x] real-browser-projection: actual noVNC painted Bot A and Broker-driven marker change; first paint 359.35ms, input-to-paint 100.21ms
+- [x] background-and-unsaved: same window/generation and exact unsaved field retained; counter 17 -> 19
 - [x] agent-open-url: open_url displayed the requested local page in Bot A without adding a Bot B window
 - [x] delete-reprovision-cleanup: deleted A; sibling ready=true; replacement ready; runtime gone=true
 - [x] complete-cleanup: no leftover surface-scoped processes
@@ -67,86 +67,86 @@ OMARCHY_BOT_REAL_SWAY=1 bun test tests/integration/bot-screen-sway-conformance.t
 - Sway infra PSS: 0 MiB / SwapPSS 0 MiB / CPU 0%
 - WayVNC/projection PSS: 0 MiB / CPU 0%
 - Apps+Agent PSS: 0 MiB / CPU 0%
-- Daemon+harness PSS: 95.67 MiB / CPU 2.66% (daemon and test harness share this process; daemon bucket is the combined measurement)
-- Whole-scenario PSS: 95.67 MiB / SwapPSS 0 MiB / CPU 2.66%
-- Host /proc/net/dev delta: {"rxBytes":2542645,"txBytes":3847843}
+- Daemon+harness PSS: 98.4 MiB / CPU 1.99% (daemon and test harness share this process; daemon bucket is the combined measurement)
+- Whole-scenario PSS: 98.4 MiB / SwapPSS 0 MiB / CPU 1.99%
+- Host /proc/net/dev delta: {"rxBytes":255191,"txBytes":9279}
 - Bots not yet created; daemon/harness only.
 
 ### retainedUnviewedDesktops
 
 - Ran: true
-- Latency: {"coldRequestToReadyMs":{"samples":[104.82,102.82],"min":102.82,"p50":102.82,"p95":104.82,"max":104.82}}
-- Sway infra PSS: 29.98 MiB / SwapPSS 0 MiB / CPU 0%
+- Latency: {"coldRequestToReadyMs":{"samples":[128.38,82.15],"min":82.15,"p50":82.15,"p95":128.38,"max":128.38}}
+- Sway infra PSS: 1.21 MiB / SwapPSS 0 MiB / CPU 0%
 - WayVNC/projection PSS: 0 MiB / CPU 0%
-- Apps+Agent PSS: 14.46 MiB / CPU 0%
-- Daemon+harness PSS: 96.08 MiB / CPU 3.33% (daemon and test harness share this process; daemon bucket is the combined measurement)
-- Whole-scenario PSS: 140.52 MiB / SwapPSS 0 MiB / CPU 3.33%
-- Host /proc/net/dev delta: {"rxBytes":6035859,"txBytes":6027785}
+- Apps+Agent PSS: 13.75 MiB / CPU 0%
+- Daemon+harness PSS: 104 MiB / CPU 3.33% (daemon and test harness share this process; daemon bucket is the combined measurement)
+- Whole-scenario PSS: 118.96 MiB / SwapPSS 0 MiB / CPU 3.33%
+- Host /proc/net/dev delta: {"rxBytes":263365,"txBytes":15257}
 - Two Sway sessions ready, no Computer Preview or expanded viewer.
 
 ### previewOnly
 
 - Ran: true
-- Latency: {"firstPreviewMs":{"samples":[30.39],"min":30.39,"p50":30.39,"p95":30.39,"max":30.39}}
-- Sway infra PSS: 36.18 MiB / SwapPSS 0 MiB / CPU 0%
+- Latency: {"firstPreviewMs":{"samples":[30.37],"min":30.37,"p50":30.37,"p95":30.37,"max":30.37}}
+- Sway infra PSS: 1.27 MiB / SwapPSS 0 MiB / CPU 0%
 - WayVNC/projection PSS: 0 MiB / CPU 0%
-- Apps+Agent PSS: 330.7 MiB / CPU 5%
-- Daemon+harness PSS: 101.16 MiB / CPU 64.96% (daemon and test harness share this process; daemon bucket is the combined measurement)
-- Whole-scenario PSS: 717 MiB / SwapPSS 0 MiB / CPU 69.96%
-- Host /proc/net/dev delta: {"rxBytes":64328,"txBytes":9622}
+- Apps+Agent PSS: 13.81 MiB / CPU 0%
+- Daemon+harness PSS: 114.82 MiB / CPU 14.99% (daemon and test harness share this process; daemon bucket is the combined measurement)
+- Whole-scenario PSS: 129.9 MiB / SwapPSS 0 MiB / CPU 14.99%
+- Host /proc/net/dev delta: {"rxBytes":168289,"txBytes":11327}
 - Compact preview PNG delivered on the control WebSocket; WayVNC stayed down.
 
 ### oneExpandedProjection
 
 - Ran: true
-- Latency: {"firstExpandedMs":{"samples":[102.99],"min":102.99,"p50":102.99,"p95":102.99,"max":102.99}}
-- Sway infra PSS: 43.68 MiB / SwapPSS 0 MiB / CPU 0%
-- WayVNC/projection PSS: 25.18 MiB / CPU 0%
-- Apps+Agent PSS: 332.89 MiB / CPU 1.34%
-- Daemon+harness PSS: 113.19 MiB / CPU 9.33% (daemon and test harness share this process; daemon bucket is the combined measurement)
-- Whole-scenario PSS: 770.77 MiB / SwapPSS 0 MiB / CPU 13.34%
-- Host /proc/net/dev delta: {"rxBytes":3286152,"txBytes":50121}
+- Latency: {"firstExpandedMs":{"samples":[103.68],"min":103.68,"p50":103.68,"p95":103.68,"max":103.68}}
+- Sway infra PSS: 1.27 MiB / SwapPSS 0 MiB / CPU 0%
+- WayVNC/projection PSS: 25.21 MiB / CPU 0%
+- Apps+Agent PSS: 13.83 MiB / CPU 0%
+- Daemon+harness PSS: 121.25 MiB / CPU 3.33% (daemon and test harness share this process; daemon bucket is the combined measurement)
+- Whole-scenario PSS: 161.56 MiB / SwapPSS 0 MiB / CPU 3.33%
+- Host /proc/net/dev delta: {"rxBytes":9869497,"txBytes":90875}
 - Bot A negotiated bidirectional RFB, Bot B retained unviewed.
 
 ### backgroundWork
 
 - Ran: true
-- Sway infra PSS: 43.71 MiB / SwapPSS 0 MiB / CPU 0%
+- Sway infra PSS: 1.27 MiB / SwapPSS 0 MiB / CPU 0%
 - WayVNC/projection PSS: 0 MiB / CPU 0%
-- Apps+Agent PSS: 333.67 MiB / CPU 3.34%
-- Daemon+harness PSS: 113.79 MiB / CPU 9.99% (daemon and test harness share this process; daemon bucket is the combined measurement)
-- Whole-scenario PSS: 755.42 MiB / SwapPSS 0 MiB / CPU 17.33%
-- Host /proc/net/dev delta: {"rxBytes":4886778,"txBytes":60983}
+- Apps+Agent PSS: 13.86 MiB / CPU 0%
+- Daemon+harness PSS: 122.71 MiB / CPU 3.33% (daemon and test harness share this process; daemon bucket is the combined measurement)
+- Whole-scenario PSS: 137.84 MiB / SwapPSS 0 MiB / CPU 3.33%
+- Host /proc/net/dev delta: {"rxBytes":2680565,"txBytes":44705}
 - Bot B received Agent input while both desktops stayed alive.
 
 ### repeatedSwitching
 
 - Ran: true
-- Latency: {"reconnectMs":{"samples":[30.21,30.23,30.19,30.2],"min":30.19,"p50":30.2,"p95":30.23,"max":30.23}}
-- Sway infra PSS: 43.71 MiB / SwapPSS 0 MiB / CPU 8.11%
+- Latency: {"reconnectMs":{"samples":[30.26,30.31,30.23,30.2],"min":30.2,"p50":30.23,"p95":30.31,"max":30.31}}
+- Sway infra PSS: 1.27 MiB / SwapPSS 0 MiB / CPU 0%
 - WayVNC/projection PSS: 0 MiB / CPU 0%
-- Apps+Agent PSS: 333.67 MiB / CPU 0%
-- Daemon+harness PSS: 123.57 MiB / CPU 105.39% (daemon and test harness share this process; daemon bucket is the combined measurement)
-- Whole-scenario PSS: 764.41 MiB / SwapPSS 0 MiB / CPU 113.5%
-- Host /proc/net/dev delta: {"rxBytes":192607,"txBytes":184977}
+- Apps+Agent PSS: 13.86 MiB / CPU 0%
+- Daemon+harness PSS: 131.74 MiB / CPU 40.05% (daemon and test harness share this process; daemon bucket is the combined measurement)
+- Whole-scenario PSS: 146.87 MiB / SwapPSS 0 MiB / CPU 40.05%
+- Host /proc/net/dev delta: {"rxBytes":148199,"txBytes":109344}
 - Four preview attach/detach cycles across the two Bots.
 
 ### severalRetainedOneSelected
 
 - Ran: true
-- Latency: {"inputToVisibleMs":{"samples":[103.59,204.92],"min":103.59,"p50":103.59,"p95":204.92,"max":204.92}}
-- Sway infra PSS: 43.71 MiB / SwapPSS 0 MiB / CPU 0%
+- Latency: {"inputToVisibleMs":{"samples":[230.91,211.58],"min":211.58,"p50":211.58,"p95":230.91,"max":230.91}}
+- Sway infra PSS: 1.27 MiB / SwapPSS 0 MiB / CPU 0%
 - WayVNC/projection PSS: 0 MiB / CPU 0%
-- Apps+Agent PSS: 333.67 MiB / CPU 3.34%
-- Daemon+harness PSS: 113.79 MiB / CPU 9.99% (daemon and test harness share this process; daemon bucket is the combined measurement)
-- Whole-scenario PSS: 755.42 MiB / SwapPSS 0 MiB / CPU 17.33%
-- Host /proc/net/dev delta: {"rxBytes":4886778,"txBytes":60983}
+- Apps+Agent PSS: 13.86 MiB / CPU 0%
+- Daemon+harness PSS: 122.71 MiB / CPU 3.33% (daemon and test harness share this process; daemon bucket is the combined measurement)
+- Whole-scenario PSS: 137.84 MiB / SwapPSS 0 MiB / CPU 3.33%
+- Host /proc/net/dev delta: {"rxBytes":2680565,"txBytes":44705}
 - Two retained Sway sessions; measurements taken while one had been expanded earlier.
 
 ### cleanup
 
 - Ran: true
-- Latency: {"cleanupMs":{"samples":[176.78,3146.81],"min":176.78,"p50":176.78,"p95":3146.81,"max":3146.81}}
+- Latency: {"cleanupMs":{"samples":[137.77,3165.47],"min":137.77,"p50":137.77,"p95":3165.47,"max":3165.47}}
 - Delete/reprovision and final stop.
 
 ## Cited Fake / scripted proofs (not re-run here)

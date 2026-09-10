@@ -49,7 +49,7 @@ const COMMAND = `${REAL_SWAY_ENV}=1 bun test tests/integration/bot-screen-sway-c
 const RESOURCE_WINDOW_MS = 1_500;
 const REQUIRED_CHECKS = [
   "two-real-sway-sessions",
-  "distinct-apps-and-private-state",
+  "distinct-apps-and-shared-state",
   "agent-without-viewer",
   "agent-open-url",
   "real-browser-projection",
@@ -267,12 +267,15 @@ realTest("two real Sway Bot Screens prove isolation, Agent control, RFB Web Cont
 
     fixtureRoot = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-sway-conformance-"));
     const daemonHome = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-sway-home-"));
+    const applicationCwd = path.join(daemonHome, "workspace");
+    mkdirSync(applicationCwd, { recursive: true, mode: 0o700 });
     const previousProfile = process.env.OMARCHY_BOT_SCREEN_PROFILE;
     process.env.OMARCHY_BOT_SCREEN_PROFILE = process.env.OMARCHY_BOT_SCREEN_PROFILE ?? "720p";
     let supervisor: Pick<Supervisor, "startComputerWorker"> | undefined;
     const adapter = new SwayBotScreenRuntimeAdapter({
       runtimeRoot: path.join(daemonHome, "r"),
       profileRoot: path.join(daemonHome, "screens"),
+      applicationCwd,
       swayBin: binaries.swayBin,
       swaymsgBin: binaries.swaymsgBin,
       wayvncBin: binaries.wayvncBin,
@@ -316,7 +319,6 @@ realTest("two real Sway Bot Screens prove isolation, Agent control, RFB Web Cont
     const pageA = createIsolationPage(fixtureRoot, "BOT-A", "#8b1e3f");
     const pageB = createIsolationPage(fixtureRoot, "BOT-B", "#14532d");
     const braveFlags = [
-      "--user-data-dir=\"$XDG_STATE_HOME/brave\"",
       "--no-first-run",
       "--no-default-browser-check",
       "--disable-background-networking",
@@ -328,8 +330,8 @@ realTest("two real Sway Bot Screens prove isolation, Agent control, RFB Web Cont
     ].join(" ");
     const waylandAppEnv = "export LIBGL_ALWAYS_SOFTWARE=1 WINIT_UNIX_BACKEND=wayland GDK_BACKEND=wayland HISTFILE=/dev/null";
     const launchers = [
-      createAppLauncher(fixtureRoot, "bot-a-term", `${waylandAppEnv}; printf '%s|%s|%s' "$XDG_CONFIG_HOME" "$XDG_RUNTIME_DIR" "$WAYLAND_DISPLAY" > "$XDG_CONFIG_HOME/isolation-profile"; exec ${JSON.stringify(terminal)} -t BOT-A-TERM -o colors.primary.background="'#8b1e3f'" -e bash --noprofile --norc`),
-      createAppLauncher(fixtureRoot, "bot-b-term", `${waylandAppEnv}; printf '%s|%s|%s' "$XDG_CONFIG_HOME" "$XDG_RUNTIME_DIR" "$WAYLAND_DISPLAY" > "$XDG_CONFIG_HOME/isolation-profile"; exec ${JSON.stringify(terminal)} -t BOT-B-TERM -o colors.primary.background="'#14532d'" -e bash --noprofile --norc`),
+      createAppLauncher(fixtureRoot, "bot-a-term", `${waylandAppEnv}; printf '%s|%s|%s' "$XDG_CONFIG_HOME" "$XDG_RUNTIME_DIR" "$WAYLAND_DISPLAY" > "$XDG_CONFIG_HOME/isolation-profile-a"; exec ${JSON.stringify(terminal)} -t BOT-A-TERM -o colors.primary.background="'#8b1e3f'" -e bash --noprofile --norc`),
+      createAppLauncher(fixtureRoot, "bot-b-term", `${waylandAppEnv}; printf '%s|%s|%s' "$XDG_CONFIG_HOME" "$XDG_RUNTIME_DIR" "$WAYLAND_DISPLAY" > "$XDG_CONFIG_HOME/isolation-profile-b"; exec ${JSON.stringify(terminal)} -t BOT-B-TERM -o colors.primary.background="'#14532d'" -e bash --noprofile --norc`),
       createAppLauncher(fixtureRoot, "bot-a-browser", `${waylandAppEnv}; exec ${JSON.stringify(browser)} ${braveFlags} --app="file://${pageA}"`),
       createAppLauncher(fixtureRoot, "bot-b-browser", `${waylandAppEnv}; exec ${JSON.stringify(browser)} ${braveFlags} --app="file://${pageB}"`),
     ];
@@ -387,30 +389,27 @@ realTest("two real Sway Bot Screens prove isolation, Agent control, RFB Web Cont
     const listedB = await listedWindows(owners[1]!);
     const titlesA = listedA.map((window) => window.title);
     const titlesB = listedB.map((window) => window.title);
-    const profileA = path.join(harness.svc.cfg.botScreenProfileDir, owners[0]!.surfaceId, "config", "isolation-profile");
-    const profileB = path.join(harness.svc.cfg.botScreenProfileDir, owners[1]!.surfaceId, "config", "isolation-profile");
-    await until(() => existsSync(profileA) && existsSync(profileB) ? true : undefined, 15_000, "private profile markers");
+    const sharedConfigDir = path.join(harness.svc.cfg.botScreenProfileDir, "computer", "config");
+    const profileA = path.join(sharedConfigDir, "isolation-profile-a");
+    const profileB = path.join(sharedConfigDir, "isolation-profile-b");
+    await until(() => existsSync(profileA) && existsSync(profileB) ? true : undefined, 15_000, "shared profile markers");
     const markerA = readFileSync(profileA, "utf8");
     const markerB = readFileSync(profileB, "utf8");
-    const sessionRuntimeA = path.join(harness.svc.cfg.botScreenRuntimeDir, owners[0]!.surfaceId);
-    const sessionRuntimeB = path.join(harness.svc.cfg.botScreenRuntimeDir, owners[1]!.surfaceId);
-    const privatePaths = markerA !== markerB
-      && markerA.includes(path.join(harness.svc.cfg.botScreenProfileDir, owners[0]!.surfaceId))
-      && markerB.includes(path.join(harness.svc.cfg.botScreenProfileDir, owners[1]!.surfaceId))
-      && markerA.includes(sessionRuntimeA)
-      && markerB.includes(sessionRuntimeB);
+    const computerRuntime = path.join(harness.svc.cfg.botScreenRuntimeDir, "computer");
+    const sharedPaths = markerA === markerB
+      && markerA.includes(sharedConfigDir)
+      && markerA.includes(computerRuntime);
     record(check(
-      "distinct-apps-and-private-state",
-      digest(pixelsA) !== digest(pixelsB) && privatePaths && titlesA.some((title) => /BOT-A-TERM/i.test(title)) && titlesB.some((title) => /BOT-B-TERM/i.test(title)),
-      `distinct pixels=${digest(pixelsA) !== digest(pixelsB)}; private markers=${privatePaths}; A windows=${titlesA.join("|")}; B windows=${titlesB.join("|")}; markers=${markerA} || ${markerB}`,
-      digest(pixelsA) !== digest(pixelsB) && privatePaths ? undefined : "pixels or private profile markers were not distinct",
+      "distinct-apps-and-shared-state",
+      digest(pixelsA) !== digest(pixelsB) && sharedPaths && titlesA.some((title) => /BOT-A-TERM/i.test(title)) && titlesB.some((title) => /BOT-B-TERM/i.test(title)),
+      `distinct pixels=${digest(pixelsA) !== digest(pixelsB)}; shared markers=${sharedPaths}; A windows=${titlesA.join("|")}; B windows=${titlesB.join("|")}; markers=${markerA} || ${markerB}`,
+      digest(pixelsA) !== digest(pixelsB) && sharedPaths ? undefined : "pixels were not distinct or application environments were not shared",
     ));
 
     const observeA = await act(owners[0]!, { name: "observe", args: {} }, "observe-a");
     const observeB = await act(owners[1]!, { name: "observe", args: {} }, "observe-b");
     const observedA = Array.isArray(observeA.windowList) ? observeA.windowList as ComputerWindowListItem[] : [];
     const observedB = Array.isArray(observeB.windowList) ? observeB.windowList as ComputerWindowListItem[] : [];
-    const siblingFocusBefore = observedB.find((window) => window.focused)?.id;
     const browserA = isolationWindow(observedA, "BOT-A");
     const browserB = isolationWindow(observedB, "BOT-B");
     if (browserA?.bounds === undefined || browserB === undefined) throw new Error("real browser windows are unavailable");
@@ -428,8 +427,6 @@ realTest("two real Sway Bot Screens prove isolation, Agent control, RFB Web Cont
     await waitPixels(owners[0]!, beforeClick, "Bot A click pixels");
     latencies.inputToVisibleMs.push(Number((performance.now() - clickStarted).toFixed(2)));
     const siblingAfterClick = await listedWindows(owners[1]!);
-    const siblingFocusHeld = siblingFocusBefore !== undefined
-      && siblingAfterClick.find((window) => window.focused)?.id === siblingFocusBefore;
     const siblingStableAfterClick = isolationWindow(siblingAfterClick, "BOT-B")?.title === browserB.title;
     await act(owners[0]!, { name: "scroll", args: { x: browserA.bounds.x + 120, y: browserA.bounds.y + 200, deltaX: 0, deltaY: -720 } }, "scroll-a");
 
@@ -450,9 +447,9 @@ realTest("two real Sway Bot Screens prove isolation, Agent control, RFB Web Cont
     }, 8_000, "literal browser Unicode");
     record(check(
       "agent-without-viewer",
-      observeA.image !== undefined && observeB.image !== undefined && siblingFocusHeld && siblingStableAfterClick
+      observeA.image !== undefined && observeB.image !== undefined && siblingStableAfterClick
         && terminalExact && browserExact.value === UNICODE_SAMPLE,
-      `observe/list/focus/click/scroll/chord passed; sibling focus and title preserved; exact browser and terminal Unicode=${UNICODE_SAMPLE}`,
+      `observe/list/focus/click/scroll/chord passed; sibling title preserved under the shared seat; exact browser and terminal Unicode=${UNICODE_SAMPLE}`,
     ));
 
     const viewer = await ProjectionClient.connect(harness.baseUrl, owners[0]!, "sway-conformance-viewer");
@@ -754,7 +751,7 @@ realTest("two real Sway Bot Screens prove isolation, Agent control, RFB Web Cont
     const deleteStarted = performance.now();
     const deleted = await api<{ status: string }>(harness, "DELETE", `/api/bots/${owners[0]!.botId}`, {});
     const runtimeA = path.join(harness.svc.cfg.botScreenRuntimeDir, owners[0]!.surfaceId);
-    const profileADir = path.join(harness.svc.cfg.botScreenProfileDir, owners[0]!.surfaceId);
+    const sharedProfileDir = path.join(harness.svc.cfg.botScreenProfileDir, "computer");
     const siblingStillReady = harness.svc.screens.status(owners[1]!).state === "ready";
     const replacementId = await makeBot(harness, "Sway conformance replacement");
     const replacement = await api<{ surfaceId: SurfaceId }>(harness, "GET", `/api/bots/${replacementId}`);
@@ -765,7 +762,7 @@ realTest("two real Sway Bot Screens prove isolation, Agent control, RFB Web Cont
       "delete-reprovision-cleanup",
       deleted.status === "deleted"
         && !existsSync(runtimeA)
-        && !existsSync(profileADir)
+        && existsSync(sharedProfileDir)
         && siblingStillReady
         && harness.svc.screens.status(replacementOwner).state === "ready",
       `deleted A; sibling ready=${siblingStillReady}; replacement ready; runtime gone=${!existsSync(runtimeA)}`,

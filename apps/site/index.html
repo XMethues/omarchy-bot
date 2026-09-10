@@ -1,0 +1,452 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Omarchy Bot | Your AI teammates, on your desktop</title>
+    <meta
+      name="description"
+      content="Create named AI teammates on Omarchy. Share work files, follow conversations, and watch desktop work in Bot Screens. Open source, with Pi support today."
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Omarchy Bot" />
+    <meta
+      property="og:title"
+      content="Your own AI teammates. Built for Omarchy."
+    />
+    <meta
+      property="og:description"
+      content="Named Bots, shared work files, and a desktop you can see. An open-source plugin for Omarchy."
+    />
+    <meta
+      property="og:image:alt"
+      content="The Omarchy Bot conversation interface with an illustrative workspace"
+    />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link
+      rel="preload"
+      href="/fonts/geist-latin.woff2"
+      as="font"
+      type="font/woff2"
+      crossorigin
+    />
+    <link rel="stylesheet" href="/src/style.css" />
+    <script>
+      try {
+        const theme = localStorage.getItem("omarchy-site-theme");
+        if (theme === "light" || theme === "dark")
+          document.documentElement.dataset.theme = theme;
+      } catch {}
+    </script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <header class="site-header" id="top">
+      <div class="container header-inner">
+        <a class="wordmark" href="#top" aria-label="Omarchy Bot home"
+          >omarchy <span>bot</span></a
+        >
+        <nav class="desktop-nav" aria-label="Main navigation">
+          <a href="#workspace">The workspace</a>
+          <a href="#extensions">What's next</a>
+          <a href="#questions">FAQ</a>
+        </nav>
+        <div class="header-actions">
+          <label class="theme-control"
+            ><span class="sr-only">Color theme</span
+            ><select id="theme-select" aria-label="Color theme">
+              <option value="system">System</option>
+              <option value="light">Light</option>
+              <option value="dark">Dark</option>
+            </select></label
+          >
+          <a
+            class="text-link source-link"
+            href="https://github.com/XMethues/omarchy-bot"
+            >GitHub <span aria-hidden="true">↗</span></a
+          >
+          <button
+            class="menu-toggle"
+            id="menu-toggle"
+            aria-expanded="false"
+            aria-controls="mobile-nav"
+            hidden
+          >
+            Menu
+          </button>
+        </div>
+      </div>
+      <nav
+        id="mobile-nav"
+        class="mobile-nav container"
+        aria-label="Mobile navigation"
+        hidden
+      >
+        <a href="#workspace">The workspace</a
+        ><a href="#extensions">What's next</a><a href="#questions">FAQ</a
+        ><a href="https://github.com/XMethues/omarchy-bot">GitHub ↗</a>
+      </nav>
+    </header>
+
+    <main id="main">
+      <section class="hero container" aria-labelledby="hero-title">
+        <div class="hero-copy">
+          <p class="eyebrow">Built for Omarchy</p>
+          <h1 id="hero-title">Your own<br /><span>AI teammates.</span></h1>
+          <p class="hero-description">
+            Give your agents a name, a shared workspace, and a desktop you can
+            see.
+          </p>
+          <div class="hero-actions">
+            <a class="button primary" href="#install"
+              >Install on Omarchy <span aria-hidden="true">↗</span></a
+            ><a class="text-link" href="#workspace"
+              >Take a look <span aria-hidden="true">↓</span></a
+            >
+          </div>
+        </div>
+        <figure class="hero-visual">
+          <a
+            class="screenshot-link"
+            href="/images/workspace.webp"
+            target="_blank"
+            rel="noopener"
+            aria-label="Open the full-size workspace screenshot"
+          >
+            <img
+              class="product-shot"
+              src="/images/workspace.webp"
+              width="1440"
+              height="960"
+              fetchpriority="high"
+              alt="Omarchy Bot showing a teammate sidebar and a conversation in a sample workspace"
+            />
+          </a>
+          <figcaption>
+            The real client, with an illustrative workspace.
+          </figcaption>
+        </figure>
+      </section>
+
+      <div class="platform-band">
+        <div class="container platform-inner">
+          <p>
+            A workspace for agents.<br /><strong>Not another chat tab.</strong>
+          </p>
+          <dl>
+            <div>
+              <dt>Platform</dt>
+              <dd>Omarchy x86_64</dd>
+            </div>
+            <div>
+              <dt>Agent today</dt>
+              <dd>Pi</dd>
+            </div>
+            <div>
+              <dt>Source</dt>
+              <dd>Open source / MIT</dd>
+            </div>
+          </dl>
+        </div>
+      </div>
+
+      <section
+        class="section container workspace-section"
+        id="workspace"
+        aria-labelledby="workspace-title"
+      >
+        <div class="section-heading">
+          <h2 id="workspace-title">A team you make your own.</h2>
+          <p>
+            Keep a research partner, a builder, or a reviewer close. Each Bot
+            has its own identity and conversations.
+          </p>
+        </div>
+        <div class="workspace-grid">
+          <figure class="profile-visual">
+            <img
+              src="/images/bot-profile.webp"
+              width="550"
+              height="650"
+              loading="lazy"
+              alt="The actual Bot Settings panel with a sample teammate's name, job instructions, and pixel avatar"
+            />
+            <figcaption>
+              Set the role. Keep the same teammate across Threads.
+            </figcaption>
+          </figure>
+          <div class="feature-story">
+            <article>
+              <span class="feature-label">A role, not just a model</span>
+              <h3>Name your teammates.</h3>
+              <p>
+                Give each Bot instructions and an avatar. Several Bots can use
+                the same Agent without becoming the same teammate.
+              </p>
+            </article>
+            <article>
+              <span class="feature-label">Context you can follow</span>
+              <h3>Keep the work in Threads.</h3>
+              <p>
+                Responses, Thinking, and Tool Calls stay in order. Choose what
+                to display without discarding the conversation.
+              </p>
+            </article>
+            <article>
+              <span class="feature-label">Work that connects</span>
+              <h3>Let your Bots talk.</h3>
+              <p>
+                Bot-to-Bot mail hands a message to another teammate in its own
+                Thread, without copying the source conversation.
+              </p>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section class="section desktop-section" aria-labelledby="desktop-title">
+        <div class="container desktop-content">
+          <div class="section-heading">
+            <h2 id="desktop-title">
+              Shared files.<br />A screen for each Bot.
+            </h2>
+            <p>
+              Work in one common directory. Follow desktop activity through the
+              client, and take control when you need to.
+            </p>
+          </div>
+          <div class="desktop-facts">
+            <article>
+              <h3>Your work stays yours.</h3>
+              <p>
+                Bots default to <code>~/.omarchy-bot/workspace</code>. Deleting
+                a teammate doesn't delete your shared work files.
+              </p>
+            </article>
+            <article>
+              <h3>Execution stays on Omarchy.</h3>
+              <p>
+                Bot Screens run inside a private Bot Computer, separate from
+                your Host Session. Closing the viewer doesn't stop its
+                applications.
+              </p>
+            </article>
+            <a
+              class="text-link"
+              href="https://github.com/XMethues/omarchy-bot#product-model"
+              >Read the architecture <span aria-hidden="true">↗</span></a
+            >
+          </div>
+        </div>
+        <div class="container">
+          <aside class="acceptance-note">
+            <strong>Still being verified.</strong> Automated desktop conformance
+            is in place. Normal-use Host Session acceptance, including physical
+            input and shortcuts, remains open.
+          </aside>
+        </div>
+      </section>
+
+      <section
+        class="section container extensions-section"
+        id="extensions"
+        aria-labelledby="extensions-title"
+      >
+        <div class="section-heading">
+          <p class="eyebrow">On the roadmap</p>
+          <h2 id="extensions-title">More tools. Familiar accounts.</h2>
+          <p>
+            We're planning a place for service connections and Skills, with the
+            same simple experience across your Bots.
+          </p>
+        </div>
+        <div class="roadmap-grid">
+          <article class="roadmap-card">
+            <div class="roadmap-status">Planned, not available yet</div>
+            <h3>Connect your services.</h3>
+            <p>
+              Choose a service, connect an account, and let your Agent use its
+              tools. Multiple accounts, without hardcoded task routing.
+            </p>
+            <div class="service-names" aria-label="Planned service examples">
+              <span>Google Drive</span><span>Gmail</span><span>Outlook</span
+              ><span>Notion</span><span>GitHub</span>
+            </div>
+          </article>
+          <article class="roadmap-card skills-card">
+            <div class="roadmap-status">Planned, not available yet</div>
+            <h3>Find the right skill.</h3>
+            <p>
+              Browse skills.sh, install a skill, and keep it up to date. Let
+              your Agent discover it, or choose it from a slash menu.
+            </p>
+            <a
+              class="text-link"
+              href="https://skills.sh"
+              target="_blank"
+              rel="noopener"
+              >Explore skills.sh <span aria-hidden="true">↗</span></a
+            >
+          </article>
+        </div>
+        <p class="roadmap-footnote">
+          Managed services and Skills catalog access require publisher setup and
+          are not publicly available yet. The Tauri desktop client remains
+          planned.
+        </p>
+      </section>
+
+      <section
+        class="section install-section"
+        id="install"
+        aria-labelledby="install-title"
+      >
+        <div class="container install-grid">
+          <div class="section-heading">
+            <h2 id="install-title">Make room for<br />a new teammate.</h2>
+            <p>
+              Already on Omarchy? Install the plugin with its official plugin
+              manager.
+            </p>
+            <a
+              class="text-link"
+              href="https://github.com/XMethues/omarchy-bot#installation"
+              >Installation guide <span aria-hidden="true">↗</span></a
+            >
+          </div>
+          <div class="install-panel">
+            <div class="command-heading">
+              <span>Run in your Omarchy terminal</span
+              ><button
+                id="copy-install"
+                class="copy-button"
+                type="button"
+                hidden
+              >
+                Copy command
+              </button>
+            </div>
+            <pre
+              tabindex="0"
+              aria-label="Plugin installation command"
+            ><code id="install-command">omarchy plugin add https://github.com/XMethues/omarchy-bot.git --enable</code></pre>
+            <p
+              id="copy-status"
+              class="copy-status"
+              role="status"
+              aria-live="polite"
+            >
+              Use the command above to install and enable the plugin.
+            </p>
+            <div class="install-requirements">
+              <span>Omarchy on x86_64</span
+              ><span>A configured Pi installation</span>
+            </div>
+            <p class="install-caution">
+              Other Linux distributions are not currently supported.
+              Model-provider usage is billed separately by your provider.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section
+        class="section container faq-section"
+        id="questions"
+        aria-labelledby="faq-title"
+      >
+        <h2 id="faq-title">Before you get started.</h2>
+        <div class="faq-list">
+          <details>
+            <summary>
+              Is this a cloud agent service?<span aria-hidden="true">+</span>
+            </summary>
+            <p>
+              No. The daemon, Agent workers, and Bot Computer run on your
+              Omarchy machine. Your Agent may still use cloud model providers,
+              so local execution does not mean all data stays offline.
+            </p>
+          </details>
+          <details>
+            <summary>
+              Which Agents can I use today?<span aria-hidden="true">+</span>
+            </summary>
+            <p>
+              Pi is the currently implemented backend. Other Agents need their
+              own adapter and verified capability support before they become
+              selectable. The future Tauri client is not a separate execution
+              backend.
+            </p>
+          </details>
+          <details>
+            <summary>
+              Can I connect Google or install Skills here?<span
+                aria-hidden="true"
+                >+</span
+              >
+            </summary>
+            <p>
+              Not on these public pages. Connections and Skills are managed in
+              the Bot client and require publisher setup. The configured OAuth
+              broker exchanges authorization codes and tokens without storing
+              accounts. These public pages never connect to your local daemon.
+            </p>
+          </details>
+          <details>
+            <summary>
+              Can I expose the client to the internet?<span aria-hidden="true"
+                >+</span
+              >
+            </summary>
+            <p>
+              The current daemon has no application authentication. Anyone who
+              can reach it may control Bots and their screens. Do not treat it
+              as a secure remote-access service; client authentication is
+              required before public release.
+            </p>
+          </details>
+          <details>
+            <summary>
+              What happens when I delete a Bot?<span aria-hidden="true">+</span>
+            </summary>
+            <p>
+              Its plugin-owned records and targeted Screen runtime are removed.
+              Shared Workspace files, Agent-owned Native Sessions, and shared
+              Bot Computer application state are preserved.
+            </p>
+          </details>
+          <details>
+            <summary>
+              Is Omarchy Bot free?<span aria-hidden="true">+</span>
+            </summary>
+            <p>
+              The source is available under the MIT license. Your model provider
+              and any third-party services you use may charge separately. There
+              is no hosted subscription checkout on this website.
+            </p>
+          </details>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <div class="container footer-inner">
+        <div>
+          <a class="wordmark" href="#top">omarchy <span>bot</span></a>
+          <p>Your AI teammates. Your work files.</p>
+        </div>
+        <nav aria-label="Project links">
+          <a href="https://github.com/XMethues/omarchy-bot">Source code ↗</a
+          ><a href="https://github.com/XMethues/omarchy-bot/issues"
+            >Report an issue ↗</a
+          ><a href="https://github.com/XMethues/omarchy-bot/blob/main/LICENSE"
+            >MIT license ↗</a
+          >
+        </nav>
+      </div>
+    </footer>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

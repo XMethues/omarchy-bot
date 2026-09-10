@@ -14,7 +14,7 @@ Each adapter maintains a versioned **Agent Capability Inventory**. The inventory
 - treats Native Sessions as Agent-owned, so Bot deletion removes local mappings without invoking an Agent worker or deleting native data;
 - marks an Agent unavailable when its installed version fails its adapter conformance suite.
 
-Working-directory and desktop bindings follow the [Shared Workspace and plugin boundary](workspace-redesign.md#shared-workspace-and-plugin-boundary). A Native Session, a Bot Desktop Session, and a Screen Projection are different lifetimes: changing the viewed Bot does not end its Agent work. The shared default cwd is `~/.omarchy-bot/workspace` under the user home, not the plugin checkout, and the plugin does not add work-file locks or browser-internal state management.
+Working-directory and desktop bindings follow the [Shared Workspace and plugin boundary](workspace-redesign.md#shared-workspace-and-plugin-boundary). A Native Session, the shared Bot Computer, a routed Bot Screen, and a Screen Projection are different lifetimes: changing the viewed Bot does not end its Agent or graphical work. The shared default cwd is `~/.omarchy-bot/workspace`; application/browser profile state is shared inside the private Bot Computer; the plugin does not add work-file locks or application-internal synchronization.
 
 ## Adapter baseline
 
@@ -52,10 +52,11 @@ Every adapter owns a machine-readable record tied to the exact Agent version:
 
 ```ts
 interface AgentCapabilityInventory {
-  version: 3;
+  version: 4;
   steering: boolean;
   abort: boolean;
   botMail: boolean;
+  plugins: boolean;
   thinking: {
     supported: boolean;
     streaming: boolean;
@@ -99,6 +100,21 @@ type AgentCommand =
 
 The exact accepted commands are versioned. An adapter may report an operation unavailable; it may not silently route it through a weaker headless or PTY transport.
 
+### Managed plugin snapshots
+
+`plugins: true` means the adapter accepts managed Skills and tool definitions on
+session open/resume, discovers native Skills through `resources.list`, and
+implements the correlated plugin-call/result boundary. Pi supports this contract.
+Other adapters must report `false` until their native integration is exercised.
+
+The daemon acquires one global configuration snapshot per Turn. MCP connections
+and installed Skill revisions remain leased until that Turn ends; edits apply
+to the next Turn. The worker loads Skills through its native resource loader
+without rewriting native configuration. Tool execution returns through the
+daemon only for the active Turn's matching native Tool Call, with cancellation
+and error propagation. OAuth tokens and MCP credentials never enter the worker
+snapshot or the Client DTOs.
+
 Adapters assign a stable common block ID at each native Response or Thinking block start and reuse it for every delta and end event. They preserve occurrence order and expose only Thinking content or provider-authored summaries officially supplied by the backend.
 
 Tool Call events contain required identity, name, and status plus only reliably available Adapter-authored safe summaries such as target, duration, diff statistics, and a bounded redacted error. Full tool input and output are not transcript history.
@@ -113,9 +129,9 @@ Use `createAgentSession`, `DefaultResourceLoader`, `SessionManager.create/open`,
 
 Pi Native Sessions are Agent-owned continuation state. Omarchy Bot does not advertise or invoke Native Session deletion; deleting a Bot leaves that native state intact.
 
-The Pi `computer` tool's native prompt guidance distinguishes the independent, on-demand Sway Bot Desktop Session from the user's Omarchy/Hyprland Host Session, other Bot Screens, the Agent's Native Session, and the client's Screen Projection. A gray or blank image describes only the owning Bot Screen, not the Host Session. The tool uses Omarchy's private `WAYLAND_DISPLAY`; native shell tools do not automatically inherit that desktop binding. Native capabilities and Shared Workspace access remain unchanged.
+The shared `@omarchy-bot/agent-contract` computer tool definition owns mandatory graphical guidance for every Agent adapter exposing `computer`. It distinguishes the shared private Sway Bot Computer, the owning Bot's routed Screen workspace, the user's Omarchy/Hyprland Host Session, the Agent's Native Session, and client Screen Projections. Unqualified graphical requests target the owning Bot Screen; adapters must not fall back to native shell commands, Host compositor IPC, global display variables, or host process inspection. Input may wait for the shared Bot Computer seat.
 
-Every successful computer result includes `desktopSession` with `botId`, `surfaceId`, and `runtimeGeneration` in both model-visible text and structured tool details. The Screen manager stamps that identity within the serialized action, including the fresh observation returned after Takeover. Desktop recreation changes the generation without changing the Bot's Surface or conversation; session creation and restoration load the same tool guidance without provisioning a desktop. Socket paths remain runtime-internal, and context metadata neither selects a target nor grants input authority.
+Pi maps that shared definition into its SDK-native tool description, prompt snippet, and prompt guidelines. Future adapters must map the same definition into their official tool and system-prompt surfaces rather than copying policy text. Every successful computer result includes `desktopSession` with `botId`, `surfaceId`, and `runtimeGeneration` in both model-visible text and structured tool details. The Screen manager stamps that identity within the serialized action, including the fresh observation returned after Takeover. Desktop recreation changes the generation without changing the Bot's Surface or conversation; session creation and restoration load the same shared guidance without provisioning a desktop. Socket paths remain runtime-internal, and context metadata neither selects a target nor grants input authority.
 
 ### Codex
 

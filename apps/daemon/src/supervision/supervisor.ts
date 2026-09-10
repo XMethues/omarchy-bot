@@ -7,9 +7,10 @@ import type {
   AgentEvent,
   ComputerActPayload,
   ComputerCommand,
+  AgentPluginToolRequest,
+  AgentPluginToolOutput,
 } from "@omarchy-bot/agent-contract";
 import { isSurfaceId, type AgentId, type SurfaceId } from "@omarchy-bot/domain";
-import { prepareSharedWorkspace } from "../modules/workspace/sharedWorkspace.ts";
 import { WorkerClient, sanitizedEnv } from "./workerClient.ts";
 
 export interface SupervisorHooks {
@@ -25,6 +26,11 @@ export interface SupervisorHooks {
     request: AgentBotMessageToolRequest,
     signal: AbortSignal,
   ) => Promise<AgentBotMessageToolOutput>;
+  onAgentPluginRequest: (
+    agentId: AgentId,
+    request: AgentPluginToolRequest,
+    signal: AbortSignal,
+  ) => Promise<AgentPluginToolOutput>;
 }
 
 type ComputerActCommand = Extract<ComputerCommand, { type: "act" }>;
@@ -87,6 +93,8 @@ export class Supervisor {
         this.hooks.onAgentComputerRequest(agentId, request, signal),
       onBotMessageRequest: (request, signal) =>
         this.hooks.onAgentBotMessageRequest(agentId, request, signal),
+      onPluginRequest: (request, signal) =>
+        this.hooks.onAgentPluginRequest(agentId, request, signal),
       onExit: (code) => {
         this.hooks.onWorkerCrash(
           agentId,
@@ -138,7 +146,6 @@ export class Supervisor {
       ...scope.env,
       OMARCHY_BOT_SURFACE_ID: scope.surfaceId,
       OMARCHY_BOT_RUNTIME_GENERATION: String(scope.runtimeGeneration),
-      OMARCHY_BOT_APPLICATION_CWD: prepareSharedWorkspace(),
     };
     const wrappedCommand = scope.wrapCommand?.(workerEnvironment);
     const client = new WorkerClient({

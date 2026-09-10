@@ -147,6 +147,7 @@ function capabilitiesFor(control: FakeProbeControl): AgentCapabilityInventory {
     steering: control.fakeCapabilities?.steering ?? true,
     abort: control.fakeCapabilities?.abort ?? true,
     botMail: control.fakeCapabilities?.botMail ?? true,
+    plugins: false,
     nativeThreadActions: control.fakeCapabilities?.nativeThreadActions ?? ["resume", "history", "close"],
     thinking: {
       supported: thinkingSupported,

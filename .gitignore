@@ -4,3 +4,35 @@ dist-runtime/
 *.tsbuildinfo
 .DS_Store
 *.log
+
+# Local credentials and deployment state
+.env
+.env.*
+!.env.example
+!.env.sample
+!.env.template
+.vercel/
+.netrc
+.pypirc
+.auth/
+auth.json
+credentials.json
+*.key
+*.pem
+*.p12
+*.pfx
+id_rsa
+id_ed25519
+
+# Local databases and browser/test artifacts
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.har
+test-results/
+playwright-report/
+blob-report/
+coverage/

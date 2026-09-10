@@ -1,12 +1,12 @@
 #!/usr/bin/env bun
 /**
  * Computer worker (ADR-0001): MCP client over @agent-sh/computer-use-linux
- * plus native extras (open_app/open_url/notify). Speaks the Bot Screen worker
- * protocol (LF-JSONL over stdio, hello first) and rejects input without
- * authoritative Bot/Surface context.
+ * plus native notifications. Application launch belongs to the shared
+ * Bot Computer runtime so Surface worker shutdown cannot kill shared apps.
+ * Speaks the Bot Screen worker protocol (LF-JSONL over stdio, hello first)
+ * and rejects input without authoritative Bot/Surface context.
  */
-import { existsSync, readFileSync } from "node:fs";
-import path from "node:path";
+import { existsSync } from "node:fs";
 import {
   HEARTBEAT_MS,
   PROTOCOL_VERSION,
@@ -82,31 +82,6 @@ async function getClient(): Promise<McpClient> {
   await client.initialize();
   return client;
 }
-type LaunchedApplication = Bun.Subprocess<"ignore", "ignore", "ignore">;
-const launchedApplications = new Set<LaunchedApplication>();
-
-async function stopLaunchedApplications(): Promise<void> {
-  await Promise.all([...launchedApplications].map(async (application) => {
-    if (application.exitCode !== null) return;
-    try {
-      process.kill(-application.pid, "SIGTERM");
-    } catch {
-      application.kill("SIGTERM");
-    }
-    const stopped = await Promise.race([
-      application.exited.then(() => true),
-      Bun.sleep(1_000).then(() => false),
-    ]);
-    if (stopped) return;
-    try {
-      process.kill(-application.pid, "SIGKILL");
-    } catch {
-      application.kill("SIGKILL");
-    }
-    await application.exited;
-  }));
-  launchedApplications.clear();
-}
 
 
 async function runNative(command: string[]): Promise<string> {
@@ -117,109 +92,11 @@ async function runNative(command: string[]): Promise<string> {
   return out.trim();
 }
 
-function parseDesktopExec(value: string): string[] {
-  const argv: string[] = [];
-  let argument = "";
-  let quoted = false;
-  let escaped = false;
-  const finishArgument = (): void => {
-    if (argument !== "") argv.push(argument);
-    argument = "";
-  };
-  for (const character of value.trim()) {
-    if (escaped) {
-      argument += character;
-      escaped = false;
-    } else if (character === "\\") {
-      escaped = true;
-    } else if (character === "\"") {
-      quoted = !quoted;
-    } else if (!quoted && /\s/.test(character)) {
-      finishArgument();
-    } else {
-      argument += character;
-    }
-  }
-  if (escaped || quoted) throw new Error("application desktop entry has an invalid Exec command");
-  finishArgument();
-  return argv
-    .filter((argument) => !/^%[fFuUick]$/.test(argument))
-    .map((argument) => argument.replaceAll("%%", "%"));
-}
-
-function desktopApplicationCommand(application: string): string[] {
-  if (!application.endsWith(".desktop")) return [application];
-  const dataHomes = [
-    process.env.XDG_DATA_HOME ?? path.join(process.env.HOME ?? "", ".local", "share"),
-    ...(process.env.XDG_DATA_DIRS ?? "/usr/local/share:/usr/share").split(":"),
-  ];
-  const entryPath = dataHomes
-    .map((directory) => path.join(directory, "applications", application))
-    .find((candidate) => existsSync(candidate));
-  if (entryPath === undefined) throw new Error(`application desktop entry not found: ${application}`);
-  const lines = readFileSync(entryPath, "utf8").split(/\r?\n/);
-  let inDesktopEntry = false;
-  let type: string | undefined;
-  let command: string | undefined;
-  for (const line of lines) {
-    if (line.startsWith("[")) {
-      inDesktopEntry = line === "[Desktop Entry]";
-    } else if (inDesktopEntry && line.startsWith("Type=")) {
-      type = line.slice("Type=".length);
-    } else if (inDesktopEntry && line.startsWith("Exec=")) {
-      command = line.slice("Exec=".length);
-    }
-  }
-  if (type !== "Application" || command === undefined) {
-    throw new Error(`invalid application desktop entry: ${application}`);
-  }
-  const argv = parseDesktopExec(command);
-  if (argv.length === 0) throw new Error(`application desktop entry has no executable: ${application}`);
-  return argv;
-}
-
-function applicationCwd(): string {
-  const fromSupervisor = process.env.OMARCHY_BOT_APPLICATION_CWD;
-  if (fromSupervisor !== undefined && fromSupervisor !== "") return fromSupervisor;
-  throw new Error("Shared Workspace is unavailable: application working directory was not supplied");
-}
-
-function launchOwnedProcess(command: string[]): void {
-  const cwd = applicationCwd();
-  if (!existsSync(cwd)) {
-    throw new Error(`Shared Workspace is unavailable: ${cwd} does not exist`);
-  }
-  const child = Bun.spawn(command, {
-    cwd,
-    stdin: "ignore",
-    stdout: "ignore",
-    stderr: "ignore",
-    detached: true,
-  });
-  launchedApplications.add(child);
-  void child.exited.then(() => launchedApplications.delete(child));
-}
-
-function launchApplication(application: string): void {
-  launchOwnedProcess(desktopApplicationCommand(application));
-}
 
 async function performAction(action: { name: string; args: Record<string, unknown> }): Promise<ComputerActPayload> {
   const { name, args } = action;
 
   // Native extras handled without MCP (ADR-0001).
-  if (name === "open_app") {
-    const app = String(args.app ?? "");
-    if (!app) throw new Error("open_app requires args.app");
-    launchApplication(app);
-    return { done: true, text: `launched ${app}` };
-  }
-  if (name === "open_url") {
-    const url = String(args.url ?? "");
-    if (!url) throw new Error("open_url requires args.url");
-    launchOwnedProcess(["xdg-open", url]);
-    return { done: true, text: `opened ${url}` };
-  }
   if (name === "notify") {
     const title = String(args.title ?? "omarchy-bot");
     const body = String(args.body ?? "");
@@ -311,7 +188,6 @@ async function handle(cmd: ComputerCommand): Promise<ComputerResult> {
         await client.close();
         client = undefined;
       }
-      await stopLaunchedApplications();
       return { requestId: cmd.requestId, ok: true, payload: { done: true } };
     }
     default: {
@@ -341,7 +217,5 @@ await readJsonl(
       });
     }
   },
-  () => {
-    void stopLaunchedApplications().finally(() => process.exit(0));
-  },
+  () => process.exit(0),
 );

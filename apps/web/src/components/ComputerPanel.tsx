@@ -41,6 +41,33 @@ export interface ComputerSurfaceProps {
   onReturnToBot: () => Promise<boolean>;
 }
 
+const MAX_EXPANDED_RECONNECTS = 3;
+const EXPANDED_CONNECTION_STABILITY_MS = 10_000;
+
+function noVncDisconnectMessage(event: Event): string {
+  const clean = event instanceof CustomEvent
+    && event.detail !== null
+    && typeof event.detail === "object"
+    && "clean" in event.detail
+    && event.detail.clean === true;
+  return clean
+    ? "The Bot Screen RFB server closed the view connection."
+    : "The browser’s Bot Screen RFB decoder disconnected unexpectedly.";
+}
+
+function noVncSecurityMessage(event: Event): string {
+  if (
+    event instanceof CustomEvent
+    && event.detail !== null
+    && typeof event.detail === "object"
+    && "reason" in event.detail
+    && typeof event.detail.reason === "string"
+  ) {
+    return `The Bot Screen RFB security handshake failed: ${event.detail.reason}`;
+  }
+  return "The Bot Screen RFB security handshake failed.";
+}
+
 
 function expandedViewport(dialog: HTMLDialogElement): Element | null {
   return dialog.querySelector("[data-testid='computer-expanded-view']");
@@ -326,6 +353,8 @@ export function ComputerSurface({
   const expandedViewRef = useRef<HTMLDivElement | null>(null);
   const pressedPointersRef = useRef(new Map<number, number>());
   const browserPasteKeysRef = useRef(new Set<string>());
+  const expandedReconnectCountRef = useRef(0);
+  const expandedStableTimerRef = useRef<number | undefined>(undefined);
 
   const replaceFrame = useCallback((surfaceId: string, frame: Blob | undefined): void => {
     const current = frameUrlRef.current;
@@ -354,9 +383,17 @@ export function ComputerSurface({
     browserPasteKeysRef.current.clear();
   }, []);
   useLayoutEffect(() => {
+    clearTimeout(expandedStableTimerRef.current);
+    expandedStableTimerRef.current = undefined;
+    expandedReconnectCountRef.current = 0;
     setPreviewExpanded(false);
     setControlReady(false);
     clearBrowserHeldInput();
+    return () => {
+      clearTimeout(expandedStableTimerRef.current);
+      expandedStableTimerRef.current = undefined;
+      expandedReconnectCountRef.current = 0;
+    };
   }, [clearBrowserHeldInput, view.surfaceId]);
   const requestClose = useCallback((): void => {
     setPreviewExpanded(false);
@@ -439,7 +476,12 @@ export function ComputerSurface({
 
   useEffect(() => {
     if (isSmallScreen && previewExpanded) setPreviewExpanded(false);
-    if (!previewExpanded || isSmallScreen) clearBrowserHeldInput();
+    if (!previewExpanded || isSmallScreen) {
+      clearTimeout(expandedStableTimerRef.current);
+      expandedStableTimerRef.current = undefined;
+      expandedReconnectCountRef.current = 0;
+      clearBrowserHeldInput();
+    }
     connectionRef.current?.setMode(previewExpanded && !isSmallScreen ? "expanded" : "preview");
   }, [clearBrowserHeldInput, isSmallScreen, previewExpanded]);
 
@@ -463,20 +505,45 @@ export function ComputerSurface({
       connection.expandedFailed(rfbView);
       return;
     }
-    const connected = (): void => connection.expandedConnected(rfbView);
-    const failed = (): void => {
-      if (!disposed) connection.expandedFailed(rfbView);
+    const connected = (): void => {
+      connection.expandedConnected(rfbView);
+      clearTimeout(expandedStableTimerRef.current);
+      expandedStableTimerRef.current = window.setTimeout(() => {
+        expandedStableTimerRef.current = undefined;
+        expandedReconnectCountRef.current = 0;
+      }, EXPANDED_CONNECTION_STABILITY_MS);
+    };
+    const disconnected = (event: Event): void => {
+      if (disposed) return;
+      clearTimeout(expandedStableTimerRef.current);
+      expandedStableTimerRef.current = undefined;
+      const message = noVncDisconnectMessage(event);
+      const attempt = expandedReconnectCountRef.current + 1;
+      if (attempt <= MAX_EXPANDED_RECONNECTS) {
+        expandedReconnectCountRef.current = attempt;
+        console.warn(`${message} Reconnecting (${attempt}/${MAX_EXPANDED_RECONNECTS}).`);
+        connection.expandedDisconnected(rfbView);
+        return;
+      }
+      connection.expandedFailed(
+        rfbView,
+        `${message} Automatic reconnects were exhausted.`,
+      );
+    };
+    const securityFailed = (event: Event): void => {
+      if (!disposed) connection.expandedFailed(rfbView, noVncSecurityMessage(event));
     };
     client.addEventListener("connect", connected);
-    client.addEventListener("disconnect", failed);
-    client.addEventListener("securityfailure", failed);
+    client.addEventListener("disconnect", disconnected);
+    client.addEventListener("securityfailure", securityFailed);
     client.viewOnly = true;
+    client.showDotCursor = true;
     client.scaleViewport = true;
     return () => {
       disposed = true;
       client.removeEventListener("connect", connected);
-      client.removeEventListener("disconnect", failed);
-      client.removeEventListener("securityfailure", failed);
+      client.removeEventListener("disconnect", disconnected);
+      client.removeEventListener("securityfailure", securityFailed);
       client.disconnect();
     };
   }, [previewExpanded, rfbView]);
@@ -545,6 +612,7 @@ export function ComputerSurface({
     if (event.target instanceof Element && event.target.closest("button") !== null) return;
     const viewport = expandedViewport(event.currentTarget);
     if (viewport === null || event.button < 0 || event.button > 2) return;
+    event.currentTarget.focus();
     const sent = connectionRef.current?.pointerButton(
       event.clientX,
       event.clientY,

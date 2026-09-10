@@ -35,6 +35,7 @@ async function settleCapabilityLayout(page: Page): Promise<void> {
 
 interface ProjectionFixtureState {
   control: import("@playwright/test").WebSocketRoute | undefined;
+  rfb: import("@playwright/test").WebSocketRoute | undefined;
   surfaceId: string;
   sessionId: string;
   runtimeGeneration: number;
@@ -116,6 +117,9 @@ async function installProjectionPeer(
       disconnect(): void {
         void fetch("/__e2e/projection-control?action=disconnect");
       },
+      disconnectView(): void {
+        void fetch("/__e2e/projection-control?action=disconnect-rfb");
+      },
       failView(): void {
         void fetch("/__e2e/projection-control?action=fail-view");
       },
@@ -175,6 +179,9 @@ async function installProjectionPeer(
         case "disconnect":
           await state.control?.close({ code: 1011, reason: "fixture disconnect" });
           break;
+        case "disconnect-rfb":
+          await state.rfb?.close({ code: 1011, reason: "fixture RFB disconnect" });
+          break;
         case "fail-view":
           state.control?.send(JSON.stringify({
             ...identity(state, "projection-failure"),
@@ -193,6 +200,7 @@ async function installProjectionPeer(
     const surfaceId = url.searchParams.get("surfaceId") ?? "";
     const state: ProjectionFixtureState = {
       control: socket,
+      rfb: undefined,
       surfaceId,
       sessionId,
       runtimeGeneration: 1,
@@ -272,6 +280,7 @@ async function installProjectionPeer(
       void socket.close({ code: 1008, reason: "expanded mode required" });
       return;
     }
+    state.rfb = socket;
 
     let stage: "version" | "security" | "client-init" | "ready" = "version";
     let pending = Buffer.alloc(0);
@@ -411,6 +420,7 @@ async function installProjectionPeer(
       consume();
     });
     socket.onClose(() => {
+      if (state.rfb === socket) state.rfb = undefined;
       void page.evaluate(() => {
         const target = window as typeof window & { __screenRfbClosedCount: number };
         target.__screenRfbClosedCount += 1;
@@ -1053,6 +1063,47 @@ test.describe("contextual computer sheet", () => {
     )).toEqual(["pressed", "released", "pressed"]);
   });
 
+  test("shows a pointer and directs typing to the expanded screen after a click", async ({ page }) => {
+    await installProjectionPeer(page);
+    await page.route("**/api/computer/**", async (route) => {
+      if (await fulfillProjection(route)) return;
+      const url = new URL(route.request().url());
+      await fulfillJson(route, {
+        botId: url.searchParams.get("botId"),
+        surfaceId: url.searchParams.get("surfaceId"),
+        state: "ready",
+        takeover: "unavailable",
+        activity: "Screen ready.",
+      });
+    });
+    await page.setViewportSize({ width: 1280, height: 760 });
+    await page.goto("/");
+    await createBot(page, "Focused Input Bot");
+    await page.getByRole("button", { name: "Open Computer Surface", exact: true }).click();
+    await page.getByRole("button", { name: "Open Web Control" }).click();
+
+    const control = page.getByTestId("expanded-web-control");
+    const expanded = page.getByTestId("computer-expanded-view");
+    await expect(control).toContainText("Click, scroll, or type to control");
+    const canvas = expanded.locator("canvas");
+    await expect(canvas).toBeVisible();
+    await expect(canvas).not.toHaveCSS("cursor", "none");
+
+    const close = control.getByRole("button", { name: "Close Web Control" });
+    await close.focus();
+    await expect(close).toBeFocused();
+    const box = await expanded.boundingBox();
+    if (box === null) throw new Error("expanded view has no rendered box");
+    await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+    await expect(control).toBeFocused();
+    await page.keyboard.press("a");
+    await expect.poll(() => page.evaluate(
+      () => (window as typeof window & {
+        __screenInputMessages: Array<{ type?: string }>;
+      }).__screenInputMessages.filter(({ type }) => type === "key").length,
+    )).toBe(2);
+  });
+
   test("sends shortcuts and plain-text paste only from expanded desktop control and releases on blur", async ({ page }) => {
     await installProjectionPeer(page);
     await page.route("**/api/computer/**", async (route) => {
@@ -1308,6 +1359,43 @@ test.describe("contextual computer sheet", () => {
     await expect(panel).toContainText("Read-only snapshot");
     await expect(panel.getByRole("button", { name: "Open Web Control" })).toHaveCount(0);
     await expect(page.getByTestId("expanded-web-control")).toHaveCount(0);
+  });
+
+  test("reconnects Web Control after the RFB socket drops", async ({ page }) => {
+    await installProjectionPeer(page);
+    let projectionAttempts = 0;
+    await page.route("**/api/computer/**", async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname === "/api/computer/projection" && route.request().method() === "POST") {
+        projectionAttempts += 1;
+      }
+      if (await fulfillProjection(route)) return;
+      await fulfillJson(route, {
+        botId: url.searchParams.get("botId"),
+        surfaceId: url.searchParams.get("surfaceId"),
+        state: "ready",
+        takeover: "unavailable",
+        activity: "Screen ready.",
+      });
+    });
+
+    await page.goto("/");
+    await createBot(page, "RFB Reconnect Bot");
+    await page.getByRole("button", { name: "Open Computer Surface", exact: true }).click();
+    const panel = page.getByRole("complementary", { name: "Workspace capabilities", exact: true });
+    await panel.getByRole("button", { name: "Open Web Control" }).click();
+    await expect(page.getByTestId("expanded-web-control")).toBeVisible();
+
+    await page.evaluate(() => {
+      (window as typeof window & {
+        __screenProjectionControl: { disconnectView(): void };
+      }).__screenProjectionControl.disconnectView();
+    });
+
+    await expect.poll(() => projectionAttempts).toBe(2);
+    await expect(page.getByTestId("expanded-web-control")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Close Web Control" })).toBeVisible();
+    await expect(panel).not.toContainText("Read-only snapshot");
   });
 
   test("reconnects the selected Surface with fresh media and controller state", async ({ page }) => {

@@ -693,7 +693,7 @@ export class ScreenProjectionService {
       byteLength: bytes.byteLength,
     });
     try {
-      if (control.send(header) <= 0 || control.send(bytes) <= 0) {
+      if (control.send(header) === 0 || control.send(bytes) === 0) {
         session.sendFailures += 1;
         return;
       }
@@ -1144,7 +1144,7 @@ export class ScreenProjectionService {
         throw new Error("RFB client disconnected");
       }
       if (socket.getBufferedAmount() + bytes.byteLength <= MAX_BUFFERED_BYTES) {
-        if (socket.send(bytes) <= 0) throw new Error("RFB WebSocket send failed");
+        if (socket.send(bytes) === 0) throw new Error("RFB WebSocket send failed");
         session.rfbBytesSent += bytes.byteLength;
         return;
       }
@@ -1246,6 +1246,10 @@ export class ScreenProjectionService {
     session.state = "failed";
     session.mode = "idle";
     this.#recordFailure(session, reason, technicalError);
+    const detail = technicalError instanceof Error ? technicalError.message : String(technicalError ?? "no technical detail");
+    console.error(
+      `Screen Projection ${reason} for ${session.source.surfaceId} session ${session.id}: ${detail}`,
+    );
     session.inputSuspended = true;
     if (session.timer !== undefined) clearTimeout(session.timer);
     session.timer = undefined;

@@ -28,11 +28,12 @@ describe("Pi SDK Omarchy computer tool", () => {
 
     expect(instructions).toContain("Host Session");
     expect(instructions).toContain("Native Session");
-    expect(instructions).toContain("Bot Desktop Session");
+    expect(instructions).toContain("Bot Computer");
     expect(instructions).toContain("WAYLAND_DISPLAY");
     expect(instructions).toContain("Hyprland");
     expect(instructions).toMatch(/gray|blank/);
     expect(instructions).not.toMatch(/\bCage\b/);
+    expect(instructions).toContain("serialized across Bot Screens");
   });
 
   test("exposes current desktop identity in model content, not just tool details", async () => {

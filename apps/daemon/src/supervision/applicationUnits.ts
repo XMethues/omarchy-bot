@@ -10,6 +10,11 @@ export type ApplicationUnitRole =
   | `capture-${string}`
   | "wayvnc";
 
+export type BotComputerUnitRole =
+  | "compositor"
+  | "session-bus"
+  | `application-${string}`;
+
 
 function socketExists(candidate: string): boolean {
   try {
@@ -34,6 +39,13 @@ export function applicationUnitName(
   role: ApplicationUnitRole,
 ): string {
   return `omarchy-bot-screen-${surfaceId.slice("surf_".length)}-g${generation}-${role}.service`;
+}
+
+export function botComputerUnitName(
+  generation: number,
+  role: BotComputerUnitRole,
+): string {
+  return `omarchy-bot-computer-g${generation}-${role}.service`;
 }
 
 /**
@@ -65,31 +77,20 @@ export class ApplicationUnits {
     role: ApplicationUnitRole,
     targetEnvironment: Record<string, string>,
   ): string[] {
-    if (!this.enabled) return [];
-    const systemdRun = this.#systemdRun;
-    const env = this.#env;
-    if (systemdRun === undefined || env === undefined) {
-      throw new Error("Bot Screen application units are enabled without their required executables");
-    }
-    const explicitEnvironment = Object.entries(targetEnvironment)
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([key, value]) => `${key}=${value}`);
-    return [
-      systemdRun,
-      "--user",
-      "--quiet",
-      "--collect",
-      "--wait",
-      "--pipe",
-      "--service-type=exec",
-      `--unit=${applicationUnitName(surfaceId, generation, role).slice(0, -".service".length)}`,
-      "--slice=app.slice",
-      "--property=KillMode=control-group",
-      "--",
-      env,
-      "-i",
-      ...explicitEnvironment,
-    ];
+    return this.#command(applicationUnitName(surfaceId, generation, role), targetEnvironment);
+  }
+
+  computerCommand(
+    generation: number,
+    role: BotComputerUnitRole,
+    targetEnvironment: Record<string, string>,
+    workingDirectory?: string,
+  ): string[] {
+    return this.#command(
+      botComputerUnitName(generation, role),
+      targetEnvironment,
+      workingDirectory,
+    );
   }
 
   launcherEnvironment(targetEnvironment: Record<string, string>): Record<string, string> {
@@ -113,32 +114,82 @@ export class ApplicationUnits {
   }
 
   async stop(surfaceId: SurfaceId, generation?: number): Promise<void> {
+    const prefix = this.#prefix(surfaceId);
+    const pattern = generation === undefined ? `${prefix}-g*` : `${prefix}-g${generation}-*`;
+    await this.#stopPattern(`${pattern}.service`, "Bot Screen");
+  }
+
+  async stopRole(
+    surfaceId: SurfaceId,
+    generation: number,
+    role: ApplicationUnitRole,
+  ): Promise<void> {
+    await this.#stopPattern(applicationUnitName(surfaceId, generation, role), "Bot Screen");
+  }
+
+  async stopComputer(generation?: number): Promise<void> {
+    const pattern = generation === undefined
+      ? "omarchy-bot-computer-g*-*.service"
+      : `omarchy-bot-computer-g${generation}-*.service`;
+    await this.#stopPattern(pattern, "Bot Computer");
+  }
+
+  #command(
+    unitName: string,
+    targetEnvironment: Record<string, string>,
+    workingDirectory?: string,
+  ): string[] {
+    if (!this.enabled) return [];
+    const systemdRun = this.#systemdRun;
+    const env = this.#env;
+    if (systemdRun === undefined || env === undefined) {
+      throw new Error("Bot application units are enabled without their required executables");
+    }
+    const explicitEnvironment = Object.entries(targetEnvironment)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, value]) => `${key}=${value}`);
+    return [
+      systemdRun,
+      "--user",
+      "--quiet",
+      "--collect",
+      "--wait",
+      "--pipe",
+      "--service-type=exec",
+      `--unit=${unitName.slice(0, -".service".length)}`,
+      "--slice=app.slice",
+      "--property=KillMode=control-group",
+      ...(workingDirectory === undefined ? [] : [`--working-directory=${workingDirectory}`]),
+      "--",
+      env,
+      "-i",
+      ...explicitEnvironment,
+    ];
+  }
+
+  async #stopPattern(unitPattern: string, owner: string): Promise<void> {
     if (!this.enabled) return;
     const systemctl = this.#systemctl;
     if (systemctl === undefined) {
-      throw new Error("Bot Screen application units are enabled without systemctl");
+      throw new Error("Bot application units are enabled without systemctl");
     }
-    const prefix = this.#prefix(surfaceId);
-    const pattern = generation === undefined ? `${prefix}-g*` : `${prefix}-g${generation}-*`;
-    const unitPattern = `${pattern}.service`;
     const stopped = await run([systemctl, "--user", "stop", unitPattern]);
-    if (stopped.status !== 0) {
-      const remaining = await run([
-        systemctl,
-        "--user",
-        "list-units",
-        "--all",
-        "--full",
-        "--plain",
-        "--no-legend",
-        unitPattern,
-      ]);
-      const hasRemainingUnits = remaining.stdout
-        .split("\n")
-        .some((line) => line.trim().split(/\s+/, 1)[0]?.endsWith(".service") === true);
-      if (remaining.status === 0 && !hasRemainingUnits) return;
-      throw new Error(`could not stop Bot Screen application units: ${stopped.stderr.trim() || `status ${stopped.status}`}`);
-    }
+    if (stopped.status === 0) return;
+    const remaining = await run([
+      systemctl,
+      "--user",
+      "list-units",
+      "--all",
+      "--full",
+      "--plain",
+      "--no-legend",
+      unitPattern,
+    ]);
+    const hasRemainingUnits = remaining.stdout
+      .split("\n")
+      .some((line) => line.trim().split(/\s+/, 1)[0]?.endsWith(".service") === true);
+    if (remaining.status === 0 && !hasRemainingUnits) return;
+    throw new Error(`could not stop ${owner} application units: ${stopped.stderr.trim() || `status ${stopped.status}`}`);
   }
 
   #prefix(surfaceId: SurfaceId): string {

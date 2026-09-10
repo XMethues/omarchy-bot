@@ -10,4 +10,4 @@ Bots have no archived or disabled lifecycle state. Delete is available directly 
 
 This decision supersedes the session-deletion portion of [Agent Integration ADR 0003](../contexts/agent-integration/adr/0003-preserve-native-agent-capabilities.md) and the archive prerequisite and native-cleanup requirements recorded in `.scratch/ai-teammate-workspace/issues/08-archive-and-restore-bots.md` and `.scratch/ai-teammate-workspace/issues/11-permanent-bot-deletion.md`.
 
-[ADR 0009](./0009-share-work-files-isolate-bot-screens.md) clarifies shared work-file and application ownership. Bot Screen teardown remains targeted to plugin-owned runtime; it is not permission to erase shared work or migrate, synchronize, or remove application-internal data.
+[ADR 0009](./0009-share-work-files-isolate-bot-screens.md) clarifies shared work-file and application ownership. Bot deletion removes the targeted Screen runtime/workspace but preserves the shared Bot Computer profile. It is not permission to erase shared work, terminate unrelated Screen applications, or migrate, synchronize, or remove application-internal data.

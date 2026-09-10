@@ -222,10 +222,11 @@ async function seedWorkspaceApi(page: Page, options: SeedOptions = {}): Promise<
         version: "fixture",
         status: "ready",
         capabilities: {
-          version: 3,
+          version: 4,
           steering: true,
           abort: true,
           botMail: true,
+          plugins: true,
           nativeThreadActions: ["resume", "history", "close"],
           thinking: { supported: true, streaming: true },
           attachments: { text: true, image: false, maxTextBytes: 64 * 1024 },

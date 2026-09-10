@@ -1,5 +1,6 @@
 import type { ChangeEvent, CSSProperties, DragEvent, JSX, ReactNode } from "react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import * as stylex from "@stylexjs/stylex";
 import { Paperclip } from "lucide-react";
 import { AspectRatio } from "@astryxdesign/core/AspectRatio";
@@ -16,6 +17,7 @@ import {
   ChatSystemMessage,
   ChatToolCalls,
   type ChatToolCallItem,
+  type ChatComposerTrigger,
 } from "@astryxdesign/core/Chat";
 import { EmptyState } from "@astryxdesign/core/EmptyState";
 import { Collapsible } from "@astryxdesign/core/Collapsible";
@@ -23,6 +25,7 @@ import { HStack } from "@astryxdesign/core/HStack";
 import { Icon } from "@astryxdesign/core/Icon";
 import { Markdown, type MarkdownComponents } from "@astryxdesign/core/Markdown";
 import { Item } from "@astryxdesign/core/Item";
+import type { SearchSource } from "@astryxdesign/core/Typeahead";
 import { Token } from "@astryxdesign/core/Token";
 import { Text } from "@astryxdesign/core/Text";
 import { VStack } from "@astryxdesign/core/VStack";
@@ -1180,6 +1183,45 @@ export function ChatPanel({
     />
   );
 
+  const queryClient = useQueryClient();
+  const [skillMenuError, setSkillMenuError] = useState<string>();
+  const skillSearch = useMemo<SearchSource>(() => {
+    const search: SearchSource["search"] = async (query) => {
+      try {
+        const commands = await queryClient.fetchQuery({
+          queryKey: ["plugin-commands"],
+          queryFn: () => api.pluginCommands(),
+          staleTime: 30_000,
+          retry: false,
+        });
+        setSkillMenuError(undefined);
+        const filter = query.replace(/^skill:/, "").toLowerCase();
+        return commands.filter((skill) => skill.name.toLowerCase().includes(filter) || skill.command.toLowerCase().includes(filter)).map((skill) => ({
+          id: skill.command,
+          label: skill.name,
+          element: <VStack gap={1}>
+            <Text>{skill.name}</Text>
+            <Text color="secondary">{skill.description} · {skill.source === "native" ? "Native · read-only" : "Global"}</Text>
+          </VStack>,
+        }));
+      } catch (error) {
+        setSkillMenuError(apiErrorMessage(error, "Skill commands could not load."));
+        return [];
+      }
+    };
+    return { search, bootstrap: () => search("") };
+  }, [queryClient]);
+  const skillTriggers = useMemo<ChatComposerTrigger[]>(() => [{
+    character: "/",
+    searchSource: skillSearch,
+    onSelect: (item) => `${item.id} `,
+    renderItem: (item) => item.element ?? item.label,
+    menuLabel: "Skill commands",
+    emptySearchResultsText: "No matching skills. Open Plugins in the sidebar to manage Skills.",
+    loadingText: "Loading skills…",
+  }], [skillSearch]);
+  const canChooseSkill = !composerIsDisabled && !selectedThreadIsActive && /^\/?[^\s]*$/.test(draft.text);
+
   const composer = (
     <div {...stylex.props(styles.composerWrap)}>
       {visibleContextualError !== undefined ? (
@@ -1230,6 +1272,7 @@ export function ChatPanel({
           data-testid="attachment-input"
           tabIndex={-1}
         />
+        {canChooseSkill && draft.text.startsWith("/") && skillMenuError ? <Text role="alert">{skillMenuError}</Text> : null}
         <ChatComposer
           value={draft.text}
           onChange={onDraftChange}
@@ -1237,6 +1280,7 @@ export function ChatPanel({
           input={
             <ChatComposerInput
               ref={composerInputRef}
+              {...(canChooseSkill ? { triggers: skillTriggers } : {})}
               onKeyUp={rememberCursor}
               onMouseUp={rememberCursor}
               isDisabled={composerIsDisabled}

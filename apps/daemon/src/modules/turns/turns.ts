@@ -9,6 +9,8 @@ import {
   type AgentComputerToolRequest,
   type AgentEvent,
   type WorkerUserMessage,
+  type AgentPluginToolRequest,
+  type AgentPluginToolOutput,
 } from "@omarchy-bot/agent-contract";
 import type { SendResultDto, TurnDto } from "@omarchy-bot/protocol";
 import type { AgentId, SurfaceId, TurnStatus } from "@omarchy-bot/domain";
@@ -23,6 +25,7 @@ import { HttpError } from "../bots/bots.ts";
 import type { ComputerBroker } from "../computer/broker.ts";
 import type { MailboxService } from "../mailbox/mailbox.ts";
 import { resolveWorkCwd } from "../workspace/sharedWorkspace.ts";
+import type { PluginsService, PluginLease } from "../plugins/plugins.ts";
 
 interface TurnContext {
   turnId: string;
@@ -33,6 +36,10 @@ interface TurnContext {
   computerToolSurfaces: Map<string, SurfaceId>;
   startedComputerToolCalls: Set<string>;
   startedBotMessageToolCalls: Set<string>;
+  pluginLease?: PluginLease;
+  startedPluginToolCalls: Map<string, string>;
+  dispatchedPluginToolCalls: Set<string>;
+  closeSession(): void;
   turnTimeout: ReturnType<typeof setTimeout>;
   /** Present only when cancellation came from the explicit abort path. */
   abortReason?: string;
@@ -80,6 +87,7 @@ export class TurnService {
     private readonly attachments: AttachmentsService,
     private readonly supervisor: Supervisor,
     private readonly cfg: { turnTimeoutMs: number },
+    private readonly plugins: PluginsService,
   ) {}
 
   #turnDto(id: string): TurnDto | undefined {
@@ -284,11 +292,14 @@ export class TurnService {
   ): Promise<TurnContext> {
     const botRow = this.db.query(`SELECT instructions FROM bots WHERE id = ?`).get(botId) as { instructions: string } | undefined;
     const thread = this.threads.getThread(threadId)!;
+    const pluginLease = this.agents.capabilityInventory(agentId)?.plugins ? await this.plugins.acquire() : undefined;
+    let leaseTransferred = false;
+    try {
     const worker = await this.supervisor.agentWorker(agentId);
     const nativeSessionId = startOptions.freshSession
       ? undefined
       : this.threads.getNativeSession(threadId);
-    const options = { cwd: resolveWorkCwd(thread.cwd), instructions: botRow?.instructions ?? "" };
+    const options = { cwd: resolveWorkCwd(thread.cwd), instructions: botRow?.instructions ?? "", ...(pluginLease ? { plugins: pluginLease.snapshot } : {}) };
     if (
       nativeSessionId !== undefined
       && !this.agents.capabilityInventory(agentId)?.nativeThreadActions.includes("resume")
@@ -321,9 +332,18 @@ export class TurnService {
       computerToolSurfaces: new Map(),
       startedComputerToolCalls: new Set(),
       startedBotMessageToolCalls: new Set(),
+      ...(pluginLease ? { pluginLease } : {}),
+      startedPluginToolCalls: new Map(),
+      dispatchedPluginToolCalls: new Set(),
+      closeSession: () => {
+        if (worker.alive) void worker.request({ type: "session.close", sessionId: opened.sessionId }, 5_000).catch(() => {
+          this.events.append("agent", agentId, "agent.error", { agentId, message: "Could not close an idle native session", retryable: false });
+        });
+      },
       turnTimeout,
     };
     this.#turns.set(opened.sessionId, ctx);
+    leaseTransferred = true;
     this.#setTurnStatus(turnId, "working");
 
     // Worker acceptance is separate from terminal Turn output. Conversational
@@ -349,6 +369,7 @@ export class TurnService {
         turnId,
         workerSessionId: opened.sessionId,
       },
+      ...(pluginLease ? { plugins: { botId, turnId, workerSessionId: opened.sessionId } } : {}),
     }, 60_000);
     const failSend = (err: unknown): void => {
       if (this.#turns.get(opened.sessionId) !== ctx) return;
@@ -374,6 +395,9 @@ export class TurnService {
       void acceptance.catch(failSend);
     }
     return ctx;
+    } finally {
+      if (!leaseTransferred) pluginLease?.release();
+    }
   }
 
   async #steer(turn: TurnDto, text: string, agentId: AgentId): Promise<SendResultDto> {
@@ -501,6 +525,17 @@ export class TurnService {
       request.targetBotId,
       request.text,
     );
+  }
+
+  async onAgentPluginRequest(agentId: AgentId, request: AgentPluginToolRequest, signal: AbortSignal): Promise<AgentPluginToolOutput> {
+    const context = request.context;
+    const active = this.#turns.get(context.workerSessionId);
+    if (!active || active.agentId !== agentId || active.botId !== context.botId || active.turnId !== context.turnId
+      || active.workerSessionId !== context.workerSessionId || !active.pluginLease) throw new Error("Plugin tool context is stale or mismatched");
+    if (active.startedPluginToolCalls.get(context.toolCallId) !== request.name) throw new Error("Plugin request does not match an active native tool call");
+    if (active.dispatchedPluginToolCalls.has(context.toolCallId)) throw new Error("Plugin tool call was already dispatched");
+    active.dispatchedPluginToolCalls.add(context.toolCallId);
+    return active.pluginLease.call(request.name, request.arguments, signal);
   }
 
   /** Central agent-event router: worker events become ordered transcript records and Turn transitions. */
@@ -680,6 +715,9 @@ export class TurnService {
         if (event.name === "send_bot_message") {
           ctx.startedBotMessageToolCalls.add(event.id);
         }
+        if (ctx.pluginLease?.snapshot.tools.some((tool) => tool.name === event.name)) {
+          ctx.startedPluginToolCalls.set(event.id, event.name);
+        }
         break;
       }
       case "tool.updated":
@@ -697,6 +735,7 @@ export class TurnService {
         if (event.type === "tool.completed") {
           ctx.startedComputerToolCalls.delete(event.id);
           ctx.startedBotMessageToolCalls.delete(event.id);
+          ctx.startedPluginToolCalls.delete(event.id);
         }
         break;
       }
@@ -739,8 +778,11 @@ export class TurnService {
 
 
   #finishTurn(ctx: TurnContext, outcome: "completed" | "cancelled" | "failed", reason?: string): void {
+    if (this.#turns.get(ctx.workerSessionId) !== ctx) return;
     clearTimeout(ctx.turnTimeout);
     this.#turns.delete(ctx.workerSessionId);
+    ctx.pluginLease?.release();
+    ctx.closeSession();
     const removedIncompleteBlocks = this.threads.removeIncompleteAgentBlocks(ctx.turnId);
     if (removedIncompleteBlocks.responses > 0) {
       this.events.append("thread", ctx.threadId, "response.removed", {

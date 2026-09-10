@@ -434,18 +434,21 @@ export class WaylandCaptureStream implements BotScreenCaptureStream {
 export function explicitEnvironment(input: {
   runtimeDir: string;
   waylandDisplay: string;
+  homeDir?: string;
   configHome: string;
+  dataHome?: string;
   stateHome: string;
   cacheHome: string;
 }): Record<string, string> {
   const env: Record<string, string> = {
-    HOME: process.env.HOME ?? path.dirname(input.configHome),
+    HOME: input.homeDir ?? process.env.HOME ?? path.dirname(input.configHome),
     LANG: process.env.LANG ?? "C.UTF-8",
     LOGNAME: process.env.LOGNAME ?? process.env.USER ?? "",
     PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
     USER: process.env.USER ?? "",
     XDG_CACHE_HOME: input.cacheHome,
     XDG_CONFIG_HOME: input.configHome,
+    ...(input.dataHome === undefined ? {} : { XDG_DATA_HOME: input.dataHome }),
     XDG_RUNTIME_DIR: input.runtimeDir,
     XDG_SESSION_TYPE: "wayland",
     XDG_STATE_HOME: input.stateHome,

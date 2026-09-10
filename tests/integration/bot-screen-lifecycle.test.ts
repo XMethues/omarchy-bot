@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { BotDto, ComputerViewDto, DeleteBotResultDto, ThreadDto } from "../../packages/protocol/src/index.ts";
 import { FakeBotScreenRuntimeAdapter } from "../../apps/daemon/src/modules/computer/fakeBotScreenRuntime.ts";
@@ -185,7 +185,7 @@ describe("Bot Screen lifecycle", () => {
     )).status).toBe(200);
   });
 
-  test("application exit stays ready while Desktop, helper, worker, and compositor failures remain Surface-scoped", async () => {
+  test("application exit stays ready while fatal adapter outcomes fail their reported Surface", async () => {
     const adapter = new FakeBotScreenRuntimeAdapter();
     h = await startDaemon(undefined, { botScreenAdapter: adapter });
     const affected = await bot(h, await makeBot(h, "Component outcomes"));
@@ -220,7 +220,7 @@ describe("Bot Screen lifecycle", () => {
       {
         type: "compositor-exited" as const,
         fail: () => adapter.exitCompositor(affected.surfaceId),
-        message: "Bot Screen compositor failed: fake Bot Screen compositor exited",
+        message: "Bot Computer compositor failed: fake Bot Screen compositor exited",
       },
     ];
 
@@ -1222,7 +1222,7 @@ describe("Sway-injected Bot Screen public lifecycle", () => {
         { botId: owner.id, surfaceId: owner.surfaceId },
         "sway-viewer-close-turn",
         "sway-viewer-close-tool",
-        { name: "open_app", args: { app: "held.desktop" } },
+        { name: "notify", args: { title: "held" } },
         new AbortController().signal,
       );
       void pending.catch(() => {});
@@ -1270,7 +1270,7 @@ describe("Sway-injected Bot Screen public lifecycle", () => {
     }
   });
 
-  test("daemon restart removes a broken Sway tree and reprovisions a fresh generation", async () => {
+  test("daemon restart replaces a broken shared Sway computer for every Screen", async () => {
     const fixture = await createScriptedSwayFixture();
     const previousProfile = process.env.OMARCHY_BOT_SCREEN_PROFILE;
     process.env.OMARCHY_BOT_SCREEN_PROFILE = "1080p";
@@ -1281,7 +1281,10 @@ describe("Sway-injected Bot Screen public lifecycle", () => {
       await Promise.all([activateScreen(h, broken), activateScreen(h, sibling)]);
       const stale = await h.svc.screens.projectionSource({ botId: broken.id, surfaceId: broken.surfaceId });
       expect(stale?.runtimeGeneration).toBe(1);
-      unlinkSync(path.join(fixture.runtimeRoot, broken.surfaceId, "1", "wayland-0"));
+      const computerGeneration = readdirSync(path.join(fixture.runtimeRoot, "computer"))
+        .find((entry) => /^\d+$/.test(entry));
+      expect(computerGeneration).toBeDefined();
+      unlinkSync(path.join(fixture.runtimeRoot, "computer", computerGeneration!, "wayland-0"));
       const home = h.home;
 
       await h.disconnectForRestart();
@@ -1299,8 +1302,10 @@ describe("Sway-injected Bot Screen public lifecycle", () => {
         botId: sibling.id,
         surfaceId: sibling.surfaceId,
       });
-      expect(fixture.starts.filter((start) => start.surfaceId === sibling.surfaceId)).toHaveLength(1);
-      expect(existsSync(path.join(fixture.runtimeRoot, sibling.surfaceId, "1"))).toBeTrue();
+      expect(fixture.starts.filter((start) => start.surfaceId === sibling.surfaceId).map((start) => start.generation))
+        .toEqual([1, 2]);
+      expect(existsSync(path.join(fixture.runtimeRoot, sibling.surfaceId, "1"))).toBeFalse();
+      expect(existsSync(path.join(fixture.runtimeRoot, sibling.surfaceId, "2"))).toBeTrue();
       const replacement = await h.svc.screens.projectionSource({ botId: broken.id, surfaceId: broken.surfaceId });
       expect(replacement).toMatchObject({
         surfaceId: broken.surfaceId,
@@ -1347,7 +1352,7 @@ describe("Sway-injected Bot Screen public lifecycle", () => {
     }
   }, 15_000);
 
-  test("deleting a Sway Bot removes runtime and profile while keeping Shared Workspace files", async () => {
+  test("deleting a Sway Bot removes its runtime while preserving the shared profile and Workspace", async () => {
     const fixture = await createScriptedSwayFixture();
     const previousProfile = process.env.OMARCHY_BOT_SCREEN_PROFILE;
     process.env.OMARCHY_BOT_SCREEN_PROFILE = "1080p";
@@ -1360,16 +1365,18 @@ describe("Sway-injected Bot Screen public lifecycle", () => {
       mkdirSync(workspace, { recursive: true });
       const sentinel = path.join(workspace, "keep-after-sway-delete.txt");
       const leftoverProfile = path.join(h.home, ".omarchy-bot", "legacy-profiles", "keep-me.txt");
+      const sharedProfile = path.join(fixture.profileRoot, "computer", "home", "keep-me.txt");
       mkdirSync(path.dirname(leftoverProfile), { recursive: true });
       writeFileSync(sentinel, "shared work");
       writeFileSync(leftoverProfile, "old profile residue");
+      writeFileSync(sharedProfile, "shared profile");
       await h.svc.screens.projectionSource({ botId: deleted.id, surfaceId: deleted.surfaceId });
 
       const result = await api<DeleteBotResultDto>(h, "DELETE", `/api/bots/${deleted.id}`, {});
 
       expect(result).toMatchObject({ status: "deleted", removed: { surface: true } });
       expect(existsSync(path.join(fixture.runtimeRoot, deleted.surfaceId))).toBeFalse();
-      expect(existsSync(path.join(fixture.profileRoot, deleted.surfaceId))).toBeFalse();
+      expect(readFileSync(sharedProfile, "utf8")).toBe("shared profile");
       expect(existsSync(path.join(fixture.runtimeRoot, sibling.surfaceId, "1"))).toBeTrue();
       expect(h.svc.screens.status({ botId: sibling.id, surfaceId: sibling.surfaceId })).toEqual({ state: "ready" });
       expect(readFileSync(sentinel, "utf8")).toBe("shared work");

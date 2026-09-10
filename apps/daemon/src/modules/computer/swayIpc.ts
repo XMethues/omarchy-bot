@@ -2,10 +2,30 @@ import { createConnection, type Socket } from "node:net";
 import type { ComputerWindowListItem } from "@omarchy-bot/agent-contract";
 
 const MAGIC = Buffer.from("i3-ipc");
+export const BOT_DESKTOP_APP_ID = "dev.omarchy.BotDesktop";
 const HEADER_LENGTH = 14;
 const TYPE_RUN_COMMAND = 0;
 const TYPE_GET_TREE = 4;
 const IPC_TIMEOUT_MS = 1_500;
+function commandSucceeded(entry: unknown): boolean {
+  return entry !== null
+    && typeof entry === "object"
+    && "success" in entry
+    && entry.success === true;
+}
+
+function commandError(entry: unknown): string | undefined {
+  if (
+    entry === null
+    || typeof entry !== "object"
+    || !("error" in entry)
+    || typeof entry.error !== "string"
+  ) {
+    return undefined;
+  }
+  return entry.error;
+}
+
 
 export class SwayIpcClient {
   constructor(private readonly socketPath: string) {}
@@ -27,12 +47,19 @@ export class SwayIpcClient {
     } catch {
       throw new Error("Sway command returned an unreadable reply");
     }
-    if (
-      !Array.isArray(results)
+    const refused = !Array.isArray(results)
       || results.length === 0
-      || results.some((entry) => entry === null || typeof entry !== "object" || (entry as { success?: unknown }).success !== true)
-    ) {
-      throw new Error("Sway command was refused");
+      || results.some((entry) => !commandSucceeded(entry));
+    if (refused) {
+      const detail = Array.isArray(results)
+        ? results.flatMap((entry) => {
+          const error = commandError(entry);
+          return error === undefined ? [] : [error];
+        }).join("; ")
+        : "";
+      throw new Error(
+        `Sway command was refused: ${command}${detail === "" ? "" : ` (${detail})`}`,
+      );
     }
   }
 
@@ -86,6 +113,7 @@ function walk(node: unknown, workspace: string | undefined, windows: ComputerWin
 }
 
 function isApplicationToplevel(node: Record<string, unknown>): boolean {
+  if (node.app_id === BOT_DESKTOP_APP_ID) return false;
   if (node.type !== "con" && node.type !== "floating_con") return false;
   if (typeof node.app_id === "string" && node.app_id !== "") return true;
   if (node.window !== undefined && node.window !== null) return true;

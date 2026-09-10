@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { ComputerSurfaceOwner } from "../../apps/daemon/src/modules/computer/broker.ts";
@@ -12,6 +12,7 @@ import { BOT_DESKTOP_ROLLOUT } from "../../apps/daemon/src/modules/computer/botD
 import { processAlive } from "../../apps/daemon/src/modules/computer/botScreenWaylandHelpers.ts";
 import { currentGeneration, waitScreenReady } from "./helpers/bot-screen-load-observe.ts";
 import { api, makeBot, sendToBot, startDaemon, type Harness } from "./helpers/harness.ts";
+import { writeFakeSwayIpcMode, writeFakeSwayTree } from "./helpers/fakeSwayIpc.ts";
 
 function ownerOf(bot: { id: string; surfaceId: string }): ComputerSurfaceOwner {
   return { botId: bot.id, surfaceId: bot.surfaceId as ComputerSurfaceOwner["surfaceId"] };
@@ -61,6 +62,13 @@ function executable(directory: string, name: string, body: string): string {
   chmodSync(target, 0o700);
   return target;
 }
+function computerRuntimeDir(runtimeRoot: string): string {
+  const computerRoot = path.join(runtimeRoot, "computer");
+  const generation = readdirSync(computerRoot).find((entry) => /^\d+$/.test(entry));
+  if (generation === undefined) throw new Error("shared Bot Computer generation is unavailable");
+  return path.join(computerRoot, generation);
+}
+
 
 async function installFakeSwayBins(directory: string): Promise<{
   sway: string;
@@ -72,6 +80,17 @@ async function installFakeSwayBins(directory: string): Promise<{
   capture: string;
   desktop: string;
 }> {
+  const controlDir = path.join(directory, "ipc-control");
+  mkdirSync(controlDir);
+  writeFakeSwayTree(controlDir, {
+    id: 1,
+    type: "root",
+    name: "root",
+    nodes: [],
+    floating_nodes: [],
+  });
+  writeFakeSwayIpcMode(controlDir, "ok");
+  const helperPath = path.resolve(import.meta.dir, "helpers/fakeSwayIpc.ts");
   const png = path.join(directory, "screen.png");
   const convert = Bun.which("magick") ?? Bun.which("convert");
   if (convert === null) throw new Error("cutover fixture requires ImageMagick convert");
@@ -87,13 +106,16 @@ async function installFakeSwayBins(directory: string): Promise<{
     sway: executable(directory, "sway", `#!/usr/bin/env bun
 import { writeFileSync } from "node:fs";
 import path from "node:path";
+import { serveFakeSwayIpc } from ${JSON.stringify(helperPath)};
 const runtimeDir = process.env.XDG_RUNTIME_DIR ?? "";
 const wayland = path.join(runtimeDir, "wayland-0");
 const swaySock = process.env.SWAYSOCK ?? path.join(runtimeDir, "sway-ipc.sock");
 writeFileSync(path.join(runtimeDir, "sway-started"), runtimeDir);
 Bun.listen({ unix: wayland, socket: { data() {} } });
-Bun.listen({ unix: swaySock, socket: { data() {} } });
-await new Promise(() => {});
+await serveFakeSwayIpc({
+  socketPath: swaySock,
+  controlDir: ${JSON.stringify(controlDir)},
+});
 `),
     swaymsg: executable(directory, "swaymsg", "#!/bin/sh\nexit 0\n"),
     wayvnc: executable(directory, "wayvnc", "#!/bin/sh\nsleep 3600\n"),
@@ -183,9 +205,10 @@ test("live Cage trees block production start unless leftover Cage trees are dest
   const owner = ownerOf(await api<{ id: string; surfaceId: string }>(harness, "GET", `/api/bots/${botId}`));
   await waitScreenReady(harness, owner);
   expect(await currentGeneration(harness, owner)).toBe(1);
-  expect(existsSync(path.join(harness.home, "r", owner.surfaceId, "1", "session.json"))).toBeTrue();
-  expect(existsSync(path.join(harness.home, "r", owner.surfaceId, "1", "sway-ipc.sock"))).toBeTrue();
-  expect(existsSync(path.join(harness.home, "r", owner.surfaceId, "1", "sway-started"))).toBeTrue();
+  expect(existsSync(path.join(harness.home, "r", owner.surfaceId, "1", "surface.json"))).toBeTrue();
+  const computerDir = computerRuntimeDir(path.join(harness.home, "r"));
+  expect(existsSync(path.join(computerDir, "sway-ipc.sock"))).toBeTrue();
+  expect(existsSync(path.join(computerDir, "sway-started"))).toBeTrue();
 }, 20_000);
 
 test("destroying leftover Cage trees leaves a sibling Sway generation on the same surface", async () => {
@@ -240,10 +263,10 @@ test("recovered ready surfaces do not reopen leftover Cage sockets and start a n
   const generation = await currentGeneration(harness, owner);
   expect(generation).toBe(previousGeneration + 1);
   const swayDir = path.join(harness.home, "r", owner.surfaceId, String(generation));
-  expect(existsSync(path.join(swayDir, "session.json"))).toBeTrue();
-  expect(existsSync(path.join(swayDir, "sway-started"))).toBeTrue();
+  expect(existsSync(path.join(swayDir, "surface.json"))).toBeTrue();
+  expect(existsSync(path.join(computerRuntimeDir(path.join(harness.home, "r")), "sway-started"))).toBeTrue();
   expect(existsSync(path.join(leftoverDir, "cage-leftover"))).toBeFalse();
-  expect(readFileSync(path.join(swayDir, "session.json"), "utf8")).toContain("swaySockName");
+  expect(readFileSync(path.join(swayDir, "surface.json"), "utf8")).toContain("computerGeneration");
 
   const shot = await harness.svc.screens.act(owner, { name: "screenshot", args: {} });
   expect(shot.desktopSession?.runtimeGeneration).toBe(generation);
@@ -269,7 +292,7 @@ test("production cutover exercises Computer Surface, Agent-only use, deletion, a
   await waitScreenReady(harness, owner);
   const agentShot = await harness.svc.screens.act(owner, { name: "screenshot", args: {} });
   expect(agentShot.desktopSession?.runtimeGeneration).toBe(1);
-  expect(existsSync(path.join(harness.home, "r", owner.surfaceId, "1", "session.json"))).toBeTrue();
+  expect(existsSync(path.join(harness.home, "r", owner.surfaceId, "1", "surface.json"))).toBeTrue();
 
   const workspaceMarker = path.join(harness.svc.cfg.sharedWorkspaceDir, "cutover-keep.txt");
   mkdirSync(harness.svc.cfg.sharedWorkspaceDir, { recursive: true });

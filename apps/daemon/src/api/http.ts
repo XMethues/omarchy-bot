@@ -25,6 +25,8 @@ import { handleComputerRequest } from "./computerRoutes.ts";
 import { handleProjectionRequest } from "./projectionRoutes.ts";
 import { handleDictationRequest } from "./dictationRoutes.ts";
 import { handleAttachmentRequest } from "./attachmentRoutes.ts";
+import { handlePluginRequest } from "./pluginRoutes.ts";
+import type { PluginsService } from "../modules/plugins/plugins.ts";
 import type { Supervisor } from "../supervision/supervisor.ts";
 import { existsSync } from "node:fs";
 import path from "node:path";
@@ -44,6 +46,7 @@ export interface DaemonServices {
   avatars: AvatarService;
   attachments: AttachmentsService;
   dictation: DictationService;
+  plugins: PluginsService;
   computer: ComputerBroker;
   screens: BotScreenManager;
   projections: ScreenProjectionService;
@@ -129,6 +132,8 @@ export function startHttp(svc: DaemonServices): { stop: () => Promise<void>; por
     }
 
     if (pathname === "/api/health" && req.method === "GET") return json({ ok: true, ts: new Date().toISOString() });
+    const pluginResponse = await handlePluginRequest(req, svc.plugins, pathname);
+    if (pluginResponse !== undefined) return pluginResponse;
 
     if (pathname === "/api/agents" && req.method === "GET") return json(svc.agents.list());
     const agentRecheck = pathname.match(/^\/api\/agents\/([\w-]+)\/recheck$/);

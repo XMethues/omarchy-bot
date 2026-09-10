@@ -2,11 +2,11 @@
   "schemaVersion": 3,
   "sourceReport": {
     "schemaVersion": 3,
-    "path": "/home/colin/Projects/omarchy-bot/.scratch/bot-screen-media-desktop/capacity-report.json"
+    "path": ".scratch/bot-screen-media-desktop/capacity-report.json"
   },
   "measuredAt": "2026-09-04T16:35:05.876Z",
   "machine": {
-    "hostname": "omarchy",
+    "hostname": "[redacted]",
     "platform": "linux 7.1.9-arch1-2 x64",
     "cpu": "AMD Ryzen 9 7900X 12-Core Processor",
     "logicalCpus": 24,
@@ -35,8 +35,8 @@
     },
     "browser": {
       "available": true,
-      "requested": "/home/colin/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome",
-      "path": "/home/colin/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome",
+      "requested": "~/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome",
+      "path": "~/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome",
       "versionArgs": [
         "--version"
       ],
@@ -104,8 +104,8 @@
     "built": true,
     "browser": {
       "available": true,
-      "requested": "/home/colin/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome",
-      "path": "/home/colin/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome",
+      "requested": "~/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome",
+      "path": "~/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome",
       "versionArgs": [
         "--version"
       ],
@@ -116,7 +116,7 @@
     "mode": "headless",
     "transport": "WebRTC H.264 video track",
     "lanInterface": "eno1",
-    "lanEndpoint": "https://192.168.10.25:34545",
+    "lanEndpoint": "https://redacted-lan.invalid:34545",
     "measurement": "daemon source/encode/send counters, browser WebRTC decode, video paint, and canvas readback"
   },
   "observedSourceFps": {

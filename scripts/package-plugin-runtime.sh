@@ -47,6 +47,7 @@ payload=(
   apps
   packages
   workers
+  patches
 )
 existing=()
 for path in "${payload[@]}"; do
@@ -55,7 +56,12 @@ for path in "${payload[@]}"; do
   fi
 done
 
-tar -C "$root" --exclude=node_modules -cf - "${existing[@]}" | tar -C "$staging" -xf -
+# Keep the site workspace manifest, not publisher code, assets, or local secrets.
+tar -C "$root" --exclude=node_modules \
+  --exclude=apps/site/public --exclude=apps/site/src --exclude=apps/site/dist \
+  --exclude=apps/site/api --exclude=apps/site/server --exclude=apps/site/.vercel \
+  --exclude='apps/site/.env*' \
+  -cf - "${existing[@]}" | tar -C "$staging" -xf -
 printf 'Installing frozen production dependencies in runtime staging\n' >&2
 (
   cd "$staging"

@@ -94,6 +94,7 @@ readJsonl(Bun.stdin.stream(), async (raw) => {
           steering: true,
           abort: true,
           botMail: false,
+          plugins: false,
           nativeThreadActions: ["resume", "history", "close"],
           thinking: { supported: true, streaming: true },
           attachments: { text: false, image: false },

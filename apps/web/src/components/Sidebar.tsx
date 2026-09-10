@@ -7,7 +7,7 @@ import {
   SideNavItem,
   SideNavSection,
 } from "@astryxdesign/core/SideNav";
-import { Plus } from "lucide-react";
+import { Plus, Plug } from "lucide-react";
 import { Item } from "@astryxdesign/core/Item";
 import { Badge } from "@astryxdesign/core/Badge";
 import { Icon } from "@astryxdesign/core/Icon";
@@ -24,6 +24,8 @@ import { avatarStatusScope, avatarStatusStyles } from "./avatarStatus.stylex.ts"
 export interface SidebarProps {
   bots: BotViewDto[];
   selectedBotId?: string;
+  pluginsOpen: boolean;
+  onOpenPlugins: () => void;
   onSelectBot: (botId: string) => void;
   onOpenBotSettings: (botId: string) => void;
   onDeleteBot: (bot: BotViewDto) => void;
@@ -58,11 +60,13 @@ export function mostRecentlyActiveBot(bots: BotViewDto[]): BotViewDto | undefine
 /**
  * The global navigation surface (workspace-redesign §2–§3): one row per
  * user-created Bot — never one row per Agent. Bots sort by recent activity;
- * Settings sits fixed at the bottom.
+ * Plugins and Settings sit fixed at the bottom, with Plugins first.
  */
 export function Sidebar({
   bots,
   selectedBotId,
+  pluginsOpen,
+  onOpenPlugins,
   onSelectBot,
   onOpenBotSettings,
   onDeleteBot,
@@ -160,16 +164,30 @@ export function Sidebar({
         aria-label="Bot navigation"
         {...(isMobile ? { "data-testid": "mobile-sidebar" } : {})}
         footer={
-          <SideNavItem
-            label="Settings"
-            aria-label="Settings"
-            icon={<Icon icon="wrench" size="sm" />}
-            onClick={() => {
-              if (isMobile) closeMobileNav();
-              onOpenSettings();
-            }}
-            data-testid="settings-trigger"
-          />
+          <VStack gap={0.5}>
+            <SideNavItem
+              label="Plugins"
+              icon={<Icon icon={Plug} size="sm" />}
+              isSelected={pluginsOpen}
+              aria-haspopup="dialog"
+              aria-expanded={pluginsOpen}
+              onClick={() => {
+                if (isMobile) closeMobileNav();
+                onOpenPlugins();
+              }}
+              data-testid="plugins-trigger"
+            />
+            <SideNavItem
+              label="Settings"
+              aria-label="Settings"
+              icon={<Icon icon="wrench" size="sm" />}
+              onClick={() => {
+                if (isMobile) closeMobileNav();
+                onOpenSettings();
+              }}
+              data-testid="settings-trigger"
+            />
+          </VStack>
         }
         topContent={
           <HStack justify="end">

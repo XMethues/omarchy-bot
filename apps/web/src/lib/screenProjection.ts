@@ -234,6 +234,11 @@ export class ScreenProjectionConnection {
     this.#fail("view-client-failed", message);
   }
 
+  expandedDisconnected(view: ScreenExpandedView): void {
+    if (this.#closed || this.#desiredMode !== "expanded" || this.#expandedView?.url !== view.url) return;
+    this.#requestReconnect();
+  }
+
   pointerMotion(clientX: number, clientY: number, renderedVideo: Element, clampToContent = false): void {
     const position = this.#mapPointer(clientX, clientY, renderedVideo.getBoundingClientRect(), clampToContent);
     if (position !== undefined) this.#sendPointer("pointer-motion", position);

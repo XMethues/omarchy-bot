@@ -11,6 +11,7 @@ import { ProjectionClient } from "./helpers/projection-client.ts";
 import type { ComputerWorkerScope, SurfaceComputerWorker } from "../../apps/daemon/src/supervision/supervisor.ts";
 import type { SurfaceId } from "../../packages/domain/src/ids.ts";
 import { createFakeWayvncBin } from "./helpers/swayBotScreen.ts";
+import { writeFakeSwayIpcMode, writeFakeSwayTree } from "./helpers/fakeSwayIpc.ts";
 
 const SURFACE_A = "surf_11111111111111111111111111111111" as SurfaceId;
 const SURFACE_B = "surf_22222222222222222222222222222222" as SurfaceId;
@@ -59,7 +60,7 @@ function fakeWorker(surfaceId: SurfaceId, generation: number): SurfaceComputerWo
 function installFakeSwayBins(directory: string, options: {
   png: string;
   desktopPid?: string;
-  failSurfaceFile?: string;
+  swayPid?: string;
   waylandDisplay?: string;
 }): {
   sway: string;
@@ -69,29 +70,31 @@ function installFakeSwayBins(directory: string, options: {
   capture: string;
   desktop: string;
 } {
+  const controlDir = path.join(directory, "ipc-control");
+  mkdirSync(controlDir);
+  writeFakeSwayTree(controlDir, {
+    id: 1,
+    type: "root",
+    name: "root",
+    nodes: [],
+    floating_nodes: [],
+  });
+  writeFakeSwayIpcMode(controlDir, "ok");
+  const helperPath = path.resolve(import.meta.dir, "helpers/fakeSwayIpc.ts");
   const sway = executable(directory, "sway", `#!/usr/bin/env bun
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import path from "node:path";
+import { serveFakeSwayIpc } from ${JSON.stringify(helperPath)};
 const runtimeDir = process.env.XDG_RUNTIME_DIR ?? "";
-const failSurfaceFile = ${JSON.stringify(options.failSurfaceFile ?? "")};
-if (failSurfaceFile !== "" && existsSync(failSurfaceFile)) {
-  const failSurface = readFileSync(failSurfaceFile, "utf8").trim();
-  if (failSurface !== "" && runtimeDir.includes(failSurface)) process.exit(1);
-}
 const wayland = path.join(runtimeDir, ${JSON.stringify(options.waylandDisplay ?? "wayland-0")});
 const swaySock = process.env.SWAYSOCK ?? path.join(runtimeDir, "sway-ipc.sock");
-writeFileSync(path.join(runtimeDir, "sway-env"), [
-  process.env.XDG_RUNTIME_DIR,
-  process.env.WAYLAND_DISPLAY,
-  process.env.WLR_BACKENDS,
-  process.env.WLR_RENDERER,
-  process.env.SWAYSOCK,
-  process.env.DBUS_SESSION_BUS_ADDRESS,
-  process.env.XDG_CURRENT_DESKTOP,
-].join("|"));
+const swayPid = ${JSON.stringify(options.swayPid ?? "")};
+if (swayPid !== "") writeFileSync(swayPid, String(process.pid));
 Bun.listen({ unix: wayland, socket: { data() {} } });
-Bun.listen({ unix: swaySock, socket: { data() {} } });
-await new Promise(() => {});
+await serveFakeSwayIpc({
+  socketPath: swaySock,
+  controlDir: ${JSON.stringify(controlDir)},
+});
 `);
   const desktopLines = [
     "#!/bin/sh",
@@ -129,7 +132,7 @@ function provision(surfaceId: SurfaceId, generation = 1) {
   };
 }
 
-test("Sway runtime becomes ready with private sockets, D-Bus, profile dirs, and isolated Surfaces", async () => {
+test("two Screens share one private Bot Computer session and persistent profile", async () => {
   root = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-sway-runtime-"));
   const bin = path.join(root, "bin");
   const runtimeRoot = path.join(root, "runtime");
@@ -200,50 +203,76 @@ test("Sway runtime becomes ready with private sockets, D-Bus, profile dirs, and 
 
   const firstRuntime = path.join(runtimeRoot, SURFACE_A, "1");
   const secondRuntime = path.join(runtimeRoot, SURFACE_B, "2");
-  const firstProfile = path.join(profileRoot, SURFACE_A);
-  const secondProfile = path.join(profileRoot, SURFACE_B);
+  const sharedProfile = path.join(profileRoot, "computer");
   expect(statSync(firstRuntime).mode & 0o777).toBe(0o700);
   expect(statSync(secondRuntime).mode & 0o777).toBe(0o700);
-  for (const directory of ["config", "state", "cache"]) {
-    expect(statSync(path.join(firstProfile, directory)).mode & 0o777).toBe(0o700);
-    expect(statSync(path.join(secondProfile, directory)).mode & 0o777).toBe(0o700);
+  for (const directory of ["home", "config", "data", "state", "cache"]) {
+    expect(statSync(path.join(sharedProfile, directory)).mode & 0o777).toBe(0o700);
   }
-  expect(firstRuntime).not.toBe(secondRuntime);
-  expect(firstProfile).not.toBe(secondProfile);
 
   const firstScope = workerScopes.get(SURFACE_A);
   const secondScope = workerScopes.get(SURFACE_B);
+  const sharedRuntime = firstScope?.env.XDG_RUNTIME_DIR;
+  expect(typeof sharedRuntime).toBe("string");
   expect(firstScope?.env).toMatchObject({
-    XDG_RUNTIME_DIR: firstRuntime,
+    HOME: path.join(sharedProfile, "home"),
+    XDG_RUNTIME_DIR: sharedRuntime,
     WAYLAND_DISPLAY: "wayland-0",
-    SWAYSOCK: path.join(firstRuntime, "sway-ipc.sock"),
-    XDG_CONFIG_HOME: path.join(firstProfile, "config"),
-    XDG_STATE_HOME: path.join(firstProfile, "state"),
-    XDG_CACHE_HOME: path.join(firstProfile, "cache"),
-    DBUS_SESSION_BUS_ADDRESS: `unix:path=${path.join(firstRuntime, "bus")}`,
+    SWAYSOCK: path.join(sharedRuntime!, "sway-ipc.sock"),
+    XDG_CONFIG_HOME: path.join(sharedProfile, "config"),
+    XDG_DATA_HOME: path.join(sharedProfile, "data"),
+    XDG_STATE_HOME: path.join(sharedProfile, "state"),
+    XDG_CACHE_HOME: path.join(sharedProfile, "cache"),
+    DBUS_SESSION_BUS_ADDRESS: `unix:path=${path.join(sharedRuntime!, "bus")}`,
   });
-  expect(secondScope?.env).toMatchObject({
-    XDG_RUNTIME_DIR: secondRuntime,
-    WAYLAND_DISPLAY: "wayland-0",
-    SWAYSOCK: path.join(secondRuntime, "sway-ipc.sock"),
-    XDG_CONFIG_HOME: path.join(secondProfile, "config"),
-    XDG_STATE_HOME: path.join(secondProfile, "state"),
-    XDG_CACHE_HOME: path.join(secondProfile, "cache"),
-    DBUS_SESSION_BUS_ADDRESS: `unix:path=${path.join(secondRuntime, "bus")}`,
-  });
-  expect(firstScope?.env.SWAYSOCK).not.toBe(secondScope?.env.SWAYSOCK);
-  expect(firstScope?.env.DBUS_SESSION_BUS_ADDRESS).not.toBe(secondScope?.env.DBUS_SESSION_BUS_ADDRESS);
-  expect(firstScope?.env.DBUS_SESSION_BUS_ADDRESS).toContain(firstRuntime);
-  expect(secondScope?.env.DBUS_SESSION_BUS_ADDRESS).toContain(secondRuntime);
+  expect(secondScope?.env).toMatchObject(firstScope!.env);
   expect(firstScope?.env).not.toHaveProperty("WLR_BACKENDS");
   expect(secondScope?.env).not.toHaveProperty("WLR_BACKENDS");
   expect(firstScope?.env.SWAYSOCK).not.toBe(process.env.SWAYSOCK);
   expect(firstScope?.env.DBUS_SESSION_BUS_ADDRESS).not.toBe(process.env.DBUS_SESSION_BUS_ADDRESS);
+  expect(firstScope?.env.XDG_RUNTIME_DIR).not.toBe(firstRuntime);
+  expect(secondScope?.env.XDG_RUNTIME_DIR).not.toBe(secondRuntime);
 
   await first.stop();
+  expect((await second.capture()).mediaType).toBe("image/png");
   await second.stop();
+  expect(existsSync(sharedProfile)).toBeTrue();
   await adapter.destroy(SURFACE_A);
   await adapter.destroy(SURFACE_B);
+});
+
+test("shared compositor exit reports the same infrastructure failure to every Screen", async () => {
+  root = mkdtempSync(path.join(os.tmpdir(), "omarchy-bot-sway-shared-exit-"));
+  const bin = path.join(root, "bin");
+  const png = path.join(root, "screen.png");
+  const swayPid = path.join(root, "sway.pid");
+  mkdirSync(bin);
+  writeFileSync(png, SCREEN_PNG);
+  const bins = installFakeSwayBins(bin, { png, swayPid });
+  const adapter = new SwayBotScreenRuntimeAdapter({
+    runtimeRoot: path.join(root, "runtime"),
+    profileRoot: path.join(root, "profiles"),
+    swayBin: bins.sway,
+    wlrRandrBin: bins.wlrRandr,
+    grimBin: bins.grim,
+    inputHelperBin: bins.input,
+    captureHelperBin: bins.capture,
+    botDesktopBin: bins.desktop,
+    computerWorkers: {
+      startComputerWorker: async (scope) => fakeWorker(scope.surfaceId, scope.runtimeGeneration),
+    },
+  });
+  const first = await adapter.start(provision(SURFACE_A));
+  const second = await adapter.start(provision(SURFACE_B, 2));
+  try {
+    process.kill(Number(readFileSync(swayPid, "utf8")), "SIGTERM");
+    await expect(Promise.all([first.outcome, second.outcome])).resolves.toEqual([
+      expect.objectContaining({ type: "compositor-exited" }),
+      expect.objectContaining({ type: "compositor-exited" }),
+    ]);
+  } finally {
+    await Promise.allSettled([first.stop(), second.stop()]);
+  }
 });
 
 test("Sway capture, worker actions, and private input succeed while missing WayVNC rejects expanded view", async () => {
@@ -273,12 +302,8 @@ test("Sway capture, worker actions, and private input succeed while missing WayV
   expect(captureResult.bytes.slice(0, 8)).toEqual(new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
   const stream = await runtime.openCaptureStream();
   await stream.close();
-  await expect(runtime.act({ name: "open_app", args: { app: "fixture.desktop" } }, {
-    surfaceId: SURFACE_A,
-    botId: "bot_11111111111111111111111111111111",
-    turnId: "turn_11111111111111111111111111111111",
-  })).resolves.toEqual({
-    text: "worker-open_app",
+  await expect(runtime.act({ name: "notify", args: { body: "ready" } })).resolves.toEqual({
+    text: "worker-notify",
   });
   await expect(runtime.acquireExpandedView()).rejects.toThrow("WayVNC executable is unavailable");
   await runtime.setInputAuthority(1);
@@ -407,12 +432,12 @@ test("Sway mid-start failure removes the partial tree and a desktop exit reports
     type: "desktop-exited",
     error: expect.objectContaining({ message: expect.stringContaining("Bot Desktop exited") }),
   });
-  const profileDir = path.join(root, "profiles", SURFACE_A);
+  const profileDir = path.join(root, "profiles", "computer");
   await runtime.stop();
   expect(existsSync(path.join(root, "runtime", SURFACE_A))).toBeFalse();
   expect(existsSync(profileDir)).toBeTrue();
   await ready.destroy(SURFACE_A);
-  expect(existsSync(profileDir)).toBeFalse();
+  expect(existsSync(profileDir)).toBeTrue();
 });
 
 test("WayVNC crash does not stop the Sway runtime", async () => {
@@ -495,9 +520,10 @@ test("follows Sway when it binds wayland-1 instead of wayland-0", async () => {
     },
   });
   const runtime = await adapter.start(provision(SURFACE_A));
+  const computerRuntime = workerScopes.get(SURFACE_A)?.env.XDG_RUNTIME_DIR;
   expect(workerScopes.get(SURFACE_A)?.env.WAYLAND_DISPLAY).toBe("wayland-1");
-  expect(existsSync(path.join(root, "runtime", SURFACE_A, "1", "wayland-1"))).toBeTrue();
-  expect(existsSync(path.join(root, "runtime", SURFACE_A, "1", "wayland-0"))).toBeFalse();
+  expect(existsSync(path.join(computerRuntime!, "wayland-1"))).toBeTrue();
+  expect(existsSync(path.join(computerRuntime!, "wayland-0"))).toBeFalse();
   const view = await runtime.acquireExpandedView();
   expect(readFileSync(path.join(root, "wayvnc-env"), "utf8")).toContain("WAYLAND_DISPLAY=wayland-1");
   await view.close();
@@ -551,6 +577,14 @@ test("a fresh adapter reattaches a persisted live Sway tree without spawning a s
   writeFileSync(png, SCREEN_PNG);
   const swayStarts = path.join(root, "sway-starts");
   writeFileSync(swayStarts, "");
+  const wayvncStarts = path.join(root, "wayvnc-starts");
+  writeFileSync(wayvncStarts, "");
+  const wayvnc = createFakeWayvncBin(bin, {
+    startsPath: wayvncStarts,
+    argvPath: path.join(root, "wayvnc-argv"),
+    envPath: path.join(root, "wayvnc-env"),
+    exitPath: path.join(root, "wayvnc-exit"),
+  });
   const bins = installFakeSwayBins(bin, { png });
   const realSway = path.join(bin, "sway.real");
   writeFileSync(realSway, readFileSync(bins.sway));
@@ -570,6 +604,7 @@ exec ${JSON.stringify(realSway)} "$@"
     inputHelperBin: bins.input,
     captureHelperBin: bins.capture,
     botDesktopBin: bins.desktop,
+    wayvncBin: wayvnc,
     computerWorkers: {
       startComputerWorker: async (scope: ComputerWorkerScope) => {
         workerStarts += 1;
@@ -581,9 +616,15 @@ exec ${JSON.stringify(realSway)} "$@"
   const started = await first.start(provision(SURFACE_A));
   expect(readFileSync(swayStarts, "utf8").trim().split("\n")).toHaveLength(1);
   expect((await started.capture()).mediaType).toBe("image/png");
+  const staleView = await started.acquireExpandedView();
+  await expect(staleView.receive()).resolves.toEqual(expect.any(Uint8Array));
+  const staleWayvncSocket = path.join(root, "runtime", SURFACE_A, "1", "wayvnc.sock");
+  expect(existsSync(staleWayvncSocket)).toBeTrue();
   const second = new SwayBotScreenRuntimeAdapter(options);
   const recovered = await second.reconcile(provision(SURFACE_A));
   expect(recovered).toBeDefined();
+  expect(existsSync(staleWayvncSocket)).toBeFalse();
+  await staleView.close();
   expect(recovered!.readiness).toMatchObject({
     compositor: "ready",
     waylandSocket: "private",
@@ -598,7 +639,7 @@ exec ${JSON.stringify(realSway)} "$@"
   expect(existsSync(path.join(root, "runtime", SURFACE_A, "1"))).toBeTrue();
   await recovered!.stop();
   expect(existsSync(path.join(root, "runtime", SURFACE_A))).toBeFalse();
-  expect(existsSync(path.join(root, "profiles", SURFACE_A))).toBeTrue();
+  expect(existsSync(path.join(root, "profiles", "computer"))).toBeTrue();
   await second.destroy(SURFACE_A);
 });
 
@@ -813,33 +854,45 @@ realSway("WebSocket RFB survives preview teardown before expand", async () => {
   }
 }, 40_000);
 
- test("stale persisted PIDs never terminate unrelated private victims", async () => {
+test("invalid shared state removes private orphans without terminating unrelated processes", async () => {
   root = mkdtempSync(path.join(os.tmpdir(), "ob-pid-"));
   const runtimeRoot = path.join(root, "r");
-  const runtimeDir = path.join(runtimeRoot, SURFACE_A, "1");
+  const runtimeComputerDir = path.join(runtimeRoot, "computer");
+  const runtimeDir = path.join(runtimeComputerDir, "123");
   mkdirSync(runtimeDir, { recursive: true });
+  writeFileSync(path.join(runtimeComputerDir, "computer.json"), JSON.stringify({
+    generation: 123,
+  }));
+  const orphan = Bun.spawn(["sleep", "3600"], {
+    env: { PATH: process.env.PATH, XDG_RUNTIME_DIR: runtimeDir },
+    stdin: "ignore", stdout: "ignore", stderr: "ignore", detached: true,
+  });
   const victim = Bun.spawn(["sleep", "3600"], {
     env: { PATH: process.env.PATH, XDG_RUNTIME_DIR: path.join(root, "victim") },
     stdin: "ignore", stdout: "ignore", stderr: "ignore", detached: true,
   });
   const adapter = new SwayBotScreenRuntimeAdapter({
-    runtimeRoot, profileRoot: path.join(root, "profiles"),
-    computerWorkers: { startComputerWorker: async (scope) => fakeWorker(scope.surfaceId, scope.runtimeGeneration) },
+    runtimeRoot,
+    profileRoot: path.join(root, "profiles"),
+    computerWorkers: {
+      startComputerWorker: async (scope) => fakeWorker(scope.surfaceId, scope.runtimeGeneration),
+    },
   });
   try {
-    writeFileSync(path.join(runtimeDir, "session.json"), JSON.stringify({
-      generation: 1, waylandDisplay: "wayland-0", swaySockName: "sway-ipc.sock", outputName: "HEADLESS-1",
-      swayPid: victim.pid, desktopPid: victim.pid,
-    }));
     expect(await adapter.reconcile(provision(SURFACE_A))).toBeUndefined();
+    expect(await Promise.race([
+      orphan.exited.then(() => "exited"),
+      Bun.sleep(1_000).then(() => "alive"),
+    ])).toBe("exited");
     expect(await Promise.race([
       victim.exited.then(() => "exited"),
       Bun.sleep(50).then(() => "alive"),
     ])).toBe("alive");
-    expect(existsSync(runtimeDir)).toBeFalse();
+    expect(existsSync(runtimeComputerDir)).toBeFalse();
   } finally {
+    if (orphan.exitCode === null) orphan.kill("SIGKILL");
     if (victim.exitCode === null) victim.kill("SIGKILL");
-    await victim.exited;
+    await Promise.all([orphan.exited, victim.exited]);
   }
 });
 

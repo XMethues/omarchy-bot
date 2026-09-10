@@ -1,3 +1,4 @@
+import type { AgentPluginToolRequest, AgentPluginTurnContext } from "./plugin-protocol.ts";
 import {
   TOOL_CALL_ERROR_SUMMARY_MAX_LENGTH,
   isToolCallSummary,
@@ -113,6 +114,7 @@ export type AgentEvent =
 /** Sessions are owned by a Bot+Thread pair; steering is a first-class command. */
 export type AgentCommand =
   | { type: "probe"; requestId: string }
+  | { type: "resources.list"; requestId: string; cwd: string }
   | { type: "session.open"; requestId: string; botId: string; threadId: string; options: OpenSessionOptionsLike }
   | { type: "session.resume"; requestId: string; botId: string; threadId: string; nativeSessionId: string; options: OpenSessionOptionsLike }
   | {
@@ -123,6 +125,7 @@ export type AgentCommand =
       message: WorkerUserMessage;
       computer: AgentComputerTurnContext;
       botMessage?: AgentBotMessageTurnContext;
+      plugins?: AgentPluginTurnContext;
     }
   | { type: "message.steer"; requestId: string; sessionId: string; text: string }
   | { type: "turn.abort"; requestId: string; sessionId: string }
@@ -142,7 +145,7 @@ export interface AgentComputerTurnContext {
   surfaceId: SurfaceId;
 }
 
-/** Pi adds its SDK tool-call identity to the immutable turn binding. */
+/** The Agent adapter adds its native tool-call identity to the immutable turn binding. */
 export interface AgentComputerToolContext extends AgentComputerTurnContext {
   toolCallId: string;
 }
@@ -191,9 +194,11 @@ export type WorkerOutbound =
   | AgentComputerToolCancel
   | AgentBotMessageToolRequest
   | AgentBotMessageToolCancel
+  | AgentPluginToolRequest
+  | { type: "plugin.cancel"; requestId: string }
   | AgentResult;
 
-export const AGENT_CAPABILITY_INVENTORY_VERSION = 3 as const;
+export const AGENT_CAPABILITY_INVENTORY_VERSION = 4 as const;
 
 export const NATIVE_THREAD_ACTIONS = ["resume", "history", "close", "rename", "delete", "fork", "compact"] as const;
 export type NativeThreadAction = (typeof NATIVE_THREAD_ACTIONS)[number];
@@ -205,6 +210,8 @@ export interface AgentCapabilityInventory {
   abort: boolean;
   /** Whether the adapter exposes the exact bounded send_bot_message tool contract. */
   botMail: boolean;
+  /** Managed skill snapshots and turn-bound external tool calls. */
+  plugins: boolean;
   nativeThreadActions: NativeThreadAction[];
   thinking: {
     supported: boolean;
@@ -225,6 +232,7 @@ const AGENT_CAPABILITY_INVENTORY_KEYS: Record<string, true> = {
   steering: true,
   abort: true,
   botMail: true,
+  plugins: true,
   nativeThreadActions: true,
   thinking: true,
   attachments: true,
@@ -248,6 +256,7 @@ export function isAgentCapabilityInventory(value: unknown): value is AgentCapabi
     typeof inventory.steering === "boolean" &&
     typeof inventory.abort === "boolean" &&
     typeof inventory.botMail === "boolean" &&
+    typeof inventory.plugins === "boolean" &&
     Array.isArray(inventory.nativeThreadActions) &&
     inventory.nativeThreadActions.every((action) => NATIVE_THREAD_ACTIONS.includes(action)) &&
     new Set(inventory.nativeThreadActions).size === inventory.nativeThreadActions.length &&

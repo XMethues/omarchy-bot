@@ -14,6 +14,10 @@
     "start": "bun src/bootstrap/main.ts"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "tar": "^7.5.0",
+    "yaml": "^2.8.1",
+    "fflate": "^0.8.2",
     "@omarchy-bot/agent-contract": "workspace:*",
     "@omarchy-bot/domain": "workspace:*",
     "@omarchy-bot/protocol": "workspace:*",

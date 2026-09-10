@@ -8,14 +8,14 @@ Definitions only. Rules and acceptance live in [Computer ADR 0009](adr/0009-adop
 
 **Host Session**:
 The user's original Omarchy graphical environment, including its desktop, top bar, shortcuts, and physical input. It is distinct from the graphical work surfaces provided to Bots.
-_Avoid_: Bot Desktop Session, shared Bot desktop
+_Avoid_: Bot Computer, shared Bot desktop
 
 **Shared Screen**:
 The real screen and physical input seat of the Host Session. “Shared” is the historical name for the user's screen, not a screen all Bots should operate together.
 _Avoid_: Bot sandbox, Bot Screen, security boundary
 
 **Screen Projection**:
-A viewing connection that mirrors one Bot Screen into a Computer Surface. It is distinct from the Bot's ongoing work and from the lifetime of its Bot Desktop Session.
+A viewing connection that mirrors one Bot Screen into a Computer Surface. It is distinct from the Bot's ongoing work and from the lifetime of the shared Bot Computer.
 _Avoid_: Shared Screen, desktop clone
 
 **Computer Surface**:
@@ -31,21 +31,21 @@ Human control of a Bot Screen through the Computer Surface, distinct from the ow
 _Avoid_: Bot control, Shared Screen control
 
 **Computer Broker**:
-The internal coordinator that prevents a Bot and the user from interleaving input on one Bot Screen while unrelated Bot Screens operate independently. It is neither an Agent permission authority nor a coordinator for Shared Workspace files.
-_Avoid_: Global input queue, file lock manager, task scheduler, permission manager, visible lease panel
+The public coordinator that prevents a Bot and the user from interleaving input on one Bot Screen. The shared Bot Computer runtime additionally serializes mutations across Screen workspaces because Sway has one effective seat. It is neither an Agent permission authority nor a coordinator for Shared Workspace files.
+_Avoid_: File lock manager, task scheduler, permission manager, visible lease panel
 
 **Takeover**:
 A contextual handoff of one Bot Screen from its Bot to the user, either because the Bot needs human input or the user chooses to intervene. It returns control after that Screen is observed again.
 _Avoid_: Permanent human lease, general approval
 
 **Bot Screen**:
-A Bot-owned visual and input surface with its own windows, focus, pointer, and keyboard state. Different Bot Screens permit parallel desktop operation while their Bots use the same Shared Workspace.
-_Avoid_: Agent Screen, Hyprland workspace, Shared Screen, separate computer, security sandbox
+A Bot-owned visual surface implemented as one output and workspace within the Bot Computer. It owns routed windows, pixels, projection identity, and controller epochs; it does not own a compositor, application profile, or physically independent input seat.
+_Avoid_: Agent Screen, Host workspace, Shared Screen, separate computer, security sandbox
 
-**Bot Desktop Session**:
-The running graphical environment serving one Bot Screen, distinct from an Agent's Native Session and a client's Screen Projection. Its existence is separate from the persistent identity of its owning Bot.
-_Avoid_: Full Omarchy session, chat session, viewer connection
+**Bot Computer**:
+The one private headless Sway environment shared by all active Bot Screens. It owns the Wayland/Sway/D-Bus runtime, application processes, persistent home/XDG profile, browser session, and serialized input seat. It is distinct from the Host Session, Agent Native Sessions, and viewer projections.
+_Avoid_: Full Omarchy session, Host Session, per-Bot computer
 
 **Bot Desktop**:
-The application surface hosted by a Bot Desktop Session. Closing an application leaves this surface available; viewing it does not confer ownership of the application's files or internal state on the plugin.
+The neutral application surface on one Bot Screen workspace. Closing an ordinary application leaves the Screen routable; viewing it does not confer ownership of shared files or application-internal state on the plugin.
 _Avoid_: Full Omarchy session, terminal placeholder, Shared Screen

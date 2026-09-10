@@ -26,11 +26,11 @@
     "schemaVersion": 3,
     "sourceReport": {
       "schemaVersion": 3,
-      "path": "/home/colin/Projects/omarchy-bot/.scratch/bot-screen-media-desktop/capacity-report.json"
+      "path": ".scratch/bot-screen-media-desktop/capacity-report.json"
     },
     "measuredAt": "2026-09-04T16:24:20.735Z",
     "machine": {
-      "hostname": "omarchy",
+      "hostname": "[redacted]",
       "platform": "linux 7.1.9-arch1-2 x64",
       "cpu": "AMD Ryzen 9 7900X 12-Core Processor",
       "logicalCpus": 24,
@@ -59,8 +59,8 @@
       },
       "browser": {
         "available": true,
-        "requested": "/home/colin/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome",
-        "path": "/home/colin/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome",
+        "requested": "~/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome",
+        "path": "~/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome",
         "versionArgs": [
           "--version"
         ],
@@ -128,8 +128,8 @@
       "built": true,
       "browser": {
         "available": true,
-        "requested": "/home/colin/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome",
-        "path": "/home/colin/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome",
+        "requested": "~/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome",
+        "path": "~/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome",
         "versionArgs": [
           "--version"
         ],
@@ -140,7 +140,7 @@
       "mode": "headless",
       "transport": "WebRTC H.264 video track",
       "lanInterface": "eno1",
-      "lanEndpoint": "https://192.168.10.25:46707",
+      "lanEndpoint": "https://redacted-lan.invalid:46707",
       "measurement": "daemon source/encode/send counters, browser WebRTC decode, video paint, and canvas readback"
     },
     "observedSourceFps": {
@@ -279,7 +279,7 @@
     "reproducibleCommand": "OMARCHY_BOT_REAL_SCREEN_LOAD=1 OMARCHY_BOT_LOAD_MATRIX=1,2,4,8 OMARCHY_BOT_LOAD_FALLBACK=1 OMARCHY_BOT_LOAD_LAN_INTERFACE=<lan-interface> OMARCHY_BOT_LOAD_REPORT=<report.json> OMARCHY_BOT_LOAD_APPROVAL=<approval.json> bun test tests/integration/bot-screen-capacity.load.test.ts"
   },
   "machine": {
-    "hostname": "omarchy",
+    "hostname": "[redacted]",
     "platform": "linux 7.1.9-arch1-2 x64",
     "cpu": "AMD Ryzen 9 7900X 12-Core Processor",
     "logicalCpus": 24,
@@ -308,8 +308,8 @@
     },
     "browser": {
       "available": true,
-      "requested": "/home/colin/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome",
-      "path": "/home/colin/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome",
+      "requested": "~/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome",
+      "path": "~/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome",
       "versionArgs": [
         "--version"
       ],
@@ -401,7 +401,7 @@
       "frames": [
         {
           "surfaceId": "surf_9ada028acde34115a1eff11dc48befbd",
-          "lanEndpoint": "https://192.168.10.25:42231",
+          "lanEndpoint": "https://redacted-lan.invalid:42231",
           "finalWebClient": true,
           "durationMs": 15058.95,
           "renderingSequences": [
@@ -771,7 +771,7 @@
         "finalWebClient": true,
         "mode": "headless",
         "secureContext": true,
-        "lanEndpoint": "https://192.168.10.25:42231",
+        "lanEndpoint": "https://redacted-lan.invalid:42231",
         "lanInterface": "eno1",
         "browser": "chrome"
       },
@@ -779,7 +779,7 @@
         "frames": [
           {
             "surfaceId": "surf_9ada028acde34115a1eff11dc48befbd",
-            "lanEndpoint": "https://192.168.10.25:42231",
+            "lanEndpoint": "https://redacted-lan.invalid:42231",
             "finalWebClient": true,
             "durationMs": 15135.2,
             "renderingSequences": [
@@ -1661,7 +1661,7 @@
       "frames": [
         {
           "surfaceId": "surf_496e8475313646d18f3865ead11f2c57",
-          "lanEndpoint": "https://192.168.10.25:37485",
+          "lanEndpoint": "https://redacted-lan.invalid:37485",
           "finalWebClient": true,
           "durationMs": 15059.5,
           "renderingSequences": [
@@ -2032,7 +2032,7 @@
         },
         {
           "surfaceId": "surf_6ef8de761a9849fa9636a34252992580",
-          "lanEndpoint": "https://192.168.10.25:37485",
+          "lanEndpoint": "https://redacted-lan.invalid:37485",
           "finalWebClient": true,
           "durationMs": 15059.5,
           "renderingSequences": [
@@ -2406,7 +2406,7 @@
         "finalWebClient": true,
         "mode": "headless",
         "secureContext": true,
-        "lanEndpoint": "https://192.168.10.25:37485",
+        "lanEndpoint": "https://redacted-lan.invalid:37485",
         "lanInterface": "eno1",
         "browser": "chrome"
       },
@@ -2414,7 +2414,7 @@
         "frames": [
           {
             "surfaceId": "surf_496e8475313646d18f3865ead11f2c57",
-            "lanEndpoint": "https://192.168.10.25:37485",
+            "lanEndpoint": "https://redacted-lan.invalid:37485",
             "finalWebClient": true,
             "durationMs": 15254.2,
             "renderingSequences": [
@@ -2479,7 +2479,7 @@
           },
           {
             "surfaceId": "surf_6ef8de761a9849fa9636a34252992580",
-            "lanEndpoint": "https://192.168.10.25:37485",
+            "lanEndpoint": "https://redacted-lan.invalid:37485",
             "finalWebClient": true,
             "durationMs": 15254.2,
             "renderingSequences": [
@@ -3970,7 +3970,7 @@
       "frames": [
         {
           "surfaceId": "surf_deb25e2dd005467aa02127e9bc022fb0",
-          "lanEndpoint": "https://192.168.10.25:34545",
+          "lanEndpoint": "https://redacted-lan.invalid:34545",
           "finalWebClient": true,
           "durationMs": 15050.5,
           "renderingSequences": [
@@ -4350,7 +4350,7 @@
         },
         {
           "surfaceId": "surf_ec6da71e95ff40349a31f81f026a30a7",
-          "lanEndpoint": "https://192.168.10.25:34545",
+          "lanEndpoint": "https://redacted-lan.invalid:34545",
           "finalWebClient": true,
           "durationMs": 15050.5,
           "renderingSequences": [
@@ -4729,7 +4729,7 @@
         },
         {
           "surfaceId": "surf_cfbd5bc44e1944c0a1b48da14948027c",
-          "lanEndpoint": "https://192.168.10.25:34545",
+          "lanEndpoint": "https://redacted-lan.invalid:34545",
           "finalWebClient": true,
           "durationMs": 15050.5,
           "renderingSequences": [
@@ -5108,7 +5108,7 @@
         },
         {
           "surfaceId": "surf_5e78917959df439783c90f096ee4336f",
-          "lanEndpoint": "https://192.168.10.25:34545",
+          "lanEndpoint": "https://redacted-lan.invalid:34545",
           "finalWebClient": true,
           "durationMs": 15050.5,
           "renderingSequences": [
@@ -5491,7 +5491,7 @@
         "finalWebClient": true,
         "mode": "headless",
         "secureContext": true,
-        "lanEndpoint": "https://192.168.10.25:34545",
+        "lanEndpoint": "https://redacted-lan.invalid:34545",
         "lanInterface": "eno1",
         "browser": "chrome"
       },
@@ -5499,7 +5499,7 @@
         "frames": [
           {
             "surfaceId": "surf_deb25e2dd005467aa02127e9bc022fb0",
-            "lanEndpoint": "https://192.168.10.25:34545",
+            "lanEndpoint": "https://redacted-lan.invalid:34545",
             "finalWebClient": true,
             "durationMs": 15501.8,
             "renderingSequences": [
@@ -5564,7 +5564,7 @@
           },
           {
             "surfaceId": "surf_ec6da71e95ff40349a31f81f026a30a7",
-            "lanEndpoint": "https://192.168.10.25:34545",
+            "lanEndpoint": "https://redacted-lan.invalid:34545",
             "finalWebClient": true,
             "durationMs": 15501.8,
             "renderingSequences": [
@@ -5629,7 +5629,7 @@
           },
           {
             "surfaceId": "surf_cfbd5bc44e1944c0a1b48da14948027c",
-            "lanEndpoint": "https://192.168.10.25:34545",
+            "lanEndpoint": "https://redacted-lan.invalid:34545",
             "finalWebClient": true,
             "durationMs": 15501.7,
             "renderingSequences": [
@@ -5694,7 +5694,7 @@
           },
           {
             "surfaceId": "surf_5e78917959df439783c90f096ee4336f",
-            "lanEndpoint": "https://192.168.10.25:34545",
+            "lanEndpoint": "https://redacted-lan.invalid:34545",
             "finalWebClient": true,
             "durationMs": 15501.8,
             "renderingSequences": [
@@ -8428,7 +8428,7 @@
       "frames": [
         {
           "surfaceId": "surf_21ee766a33414aeb871077f221081697",
-          "lanEndpoint": "https://192.168.10.25:35871",
+          "lanEndpoint": "https://redacted-lan.invalid:35871",
           "finalWebClient": true,
           "durationMs": 15129.34,
           "renderingSequences": [
@@ -8709,7 +8709,7 @@
         },
         {
           "surfaceId": "surf_43f82056ce3449fc932b80e8cca8ad42",
-          "lanEndpoint": "https://192.168.10.25:35871",
+          "lanEndpoint": "https://redacted-lan.invalid:35871",
           "finalWebClient": true,
           "durationMs": 15129.34,
           "renderingSequences": [
@@ -8985,7 +8985,7 @@
         },
         {
           "surfaceId": "surf_d6ed0494280a4789aa8cf91cdcea71b6",
-          "lanEndpoint": "https://192.168.10.25:35871",
+          "lanEndpoint": "https://redacted-lan.invalid:35871",
           "finalWebClient": true,
           "durationMs": 15129.34,
           "renderingSequences": [
@@ -9262,7 +9262,7 @@
         },
         {
           "surfaceId": "surf_0b82688b1a8f42699aef9a50f0cc4f19",
-          "lanEndpoint": "https://192.168.10.25:35871",
+          "lanEndpoint": "https://redacted-lan.invalid:35871",
           "finalWebClient": true,
           "durationMs": 15129.34,
           "renderingSequences": [
@@ -9546,7 +9546,7 @@
         },
         {
           "surfaceId": "surf_1f597ed8a568443ea95fc865ae6af0fb",
-          "lanEndpoint": "https://192.168.10.25:35871",
+          "lanEndpoint": "https://redacted-lan.invalid:35871",
           "finalWebClient": true,
           "durationMs": 15129.34,
           "renderingSequences": [
@@ -9823,7 +9823,7 @@
         },
         {
           "surfaceId": "surf_8290548b53324e26a70dce6e1c3a769c",
-          "lanEndpoint": "https://192.168.10.25:35871",
+          "lanEndpoint": "https://redacted-lan.invalid:35871",
           "finalWebClient": true,
           "durationMs": 15129.34,
           "renderingSequences": [
@@ -10085,7 +10085,7 @@
         },
         {
           "surfaceId": "surf_773dec611db845b3ad153fa40a1f3082",
-          "lanEndpoint": "https://192.168.10.25:35871",
+          "lanEndpoint": "https://redacted-lan.invalid:35871",
           "finalWebClient": true,
           "durationMs": 15129.34,
           "renderingSequences": [
@@ -10350,7 +10350,7 @@
         },
         {
           "surfaceId": "surf_adc247fa2a02421b98e07a6079e6abe2",
-          "lanEndpoint": "https://192.168.10.25:35871",
+          "lanEndpoint": "https://redacted-lan.invalid:35871",
           "finalWebClient": true,
           "durationMs": 15129.34,
           "renderingSequences": [
@@ -10623,7 +10623,7 @@
         "finalWebClient": true,
         "mode": "headless",
         "secureContext": true,
-        "lanEndpoint": "https://192.168.10.25:35871",
+        "lanEndpoint": "https://redacted-lan.invalid:35871",
         "lanInterface": "eno1",
         "browser": "chrome"
       },
@@ -10631,7 +10631,7 @@
         "frames": [
           {
             "surfaceId": "surf_21ee766a33414aeb871077f221081697",
-            "lanEndpoint": "https://192.168.10.25:35871",
+            "lanEndpoint": "https://redacted-lan.invalid:35871",
             "finalWebClient": true,
             "durationMs": 16079.8,
             "renderingSequences": [
@@ -10698,7 +10698,7 @@
           },
           {
             "surfaceId": "surf_43f82056ce3449fc932b80e8cca8ad42",
-            "lanEndpoint": "https://192.168.10.25:35871",
+            "lanEndpoint": "https://redacted-lan.invalid:35871",
             "finalWebClient": true,
             "durationMs": 16079.8,
             "renderingSequences": [
@@ -10765,7 +10765,7 @@
           },
           {
             "surfaceId": "surf_d6ed0494280a4789aa8cf91cdcea71b6",
-            "lanEndpoint": "https://192.168.10.25:35871",
+            "lanEndpoint": "https://redacted-lan.invalid:35871",
             "finalWebClient": true,
             "durationMs": 16079.8,
             "renderingSequences": [
@@ -10832,7 +10832,7 @@
           },
           {
             "surfaceId": "surf_0b82688b1a8f42699aef9a50f0cc4f19",
-            "lanEndpoint": "https://192.168.10.25:35871",
+            "lanEndpoint": "https://redacted-lan.invalid:35871",
             "finalWebClient": true,
             "durationMs": 16079.9,
             "renderingSequences": [
@@ -10899,7 +10899,7 @@
           },
           {
             "surfaceId": "surf_1f597ed8a568443ea95fc865ae6af0fb",
-            "lanEndpoint": "https://192.168.10.25:35871",
+            "lanEndpoint": "https://redacted-lan.invalid:35871",
             "finalWebClient": true,
             "durationMs": 16079.7,
             "renderingSequences": [
@@ -10966,7 +10966,7 @@
           },
           {
             "surfaceId": "surf_8290548b53324e26a70dce6e1c3a769c",
-            "lanEndpoint": "https://192.168.10.25:35871",
+            "lanEndpoint": "https://redacted-lan.invalid:35871",
             "finalWebClient": true,
             "durationMs": 16079.7,
             "renderingSequences": [
@@ -11033,7 +11033,7 @@
           },
           {
             "surfaceId": "surf_773dec611db845b3ad153fa40a1f3082",
-            "lanEndpoint": "https://192.168.10.25:35871",
+            "lanEndpoint": "https://redacted-lan.invalid:35871",
             "finalWebClient": true,
             "durationMs": 16079.8,
             "renderingSequences": [
@@ -11100,7 +11100,7 @@
           },
           {
             "surfaceId": "surf_adc247fa2a02421b98e07a6079e6abe2",
-            "lanEndpoint": "https://192.168.10.25:35871",
+            "lanEndpoint": "https://redacted-lan.invalid:35871",
             "finalWebClient": true,
             "durationMs": 16079.8,
             "renderingSequences": [
@@ -16188,7 +16188,7 @@
       "frames": [
         {
           "surfaceId": "surf_be0129b5429c43c1b59c476828079240",
-          "lanEndpoint": "https://192.168.10.25:42279",
+          "lanEndpoint": "https://redacted-lan.invalid:42279",
           "finalWebClient": true,
           "durationMs": 15056.89,
           "renderingSequences": [
@@ -16587,7 +16587,7 @@
         },
         {
           "surfaceId": "surf_09a3203a30d449e7965944015ab71ace",
-          "lanEndpoint": "https://192.168.10.25:42279",
+          "lanEndpoint": "https://redacted-lan.invalid:42279",
           "finalWebClient": true,
           "durationMs": 15056.89,
           "renderingSequences": [
@@ -16987,7 +16987,7 @@
         },
         {
           "surfaceId": "surf_057bbec7c26e43e5af267819be66ab57",
-          "lanEndpoint": "https://192.168.10.25:42279",
+          "lanEndpoint": "https://redacted-lan.invalid:42279",
           "finalWebClient": true,
           "durationMs": 15056.89,
           "renderingSequences": [
@@ -17386,7 +17386,7 @@
         },
         {
           "surfaceId": "surf_766b5a20e94a44a0b397f5b8ba17a9a3",
-          "lanEndpoint": "https://192.168.10.25:42279",
+          "lanEndpoint": "https://redacted-lan.invalid:42279",
           "finalWebClient": true,
           "durationMs": 15056.89,
           "renderingSequences": [
@@ -17785,7 +17785,7 @@
         },
         {
           "surfaceId": "surf_24587503c6034438a68a1a1dbed94fa9",
-          "lanEndpoint": "https://192.168.10.25:42279",
+          "lanEndpoint": "https://redacted-lan.invalid:42279",
           "finalWebClient": true,
           "durationMs": 15056.89,
           "renderingSequences": [
@@ -18184,7 +18184,7 @@
         },
         {
           "surfaceId": "surf_c4d63f14855f45fea6866f6761914bbd",
-          "lanEndpoint": "https://192.168.10.25:42279",
+          "lanEndpoint": "https://redacted-lan.invalid:42279",
           "finalWebClient": true,
           "durationMs": 15056.89,
           "renderingSequences": [
@@ -18584,7 +18584,7 @@
         },
         {
           "surfaceId": "surf_32ada0201e414a9bb0a331c3641e892d",
-          "lanEndpoint": "https://192.168.10.25:42279",
+          "lanEndpoint": "https://redacted-lan.invalid:42279",
           "finalWebClient": true,
           "durationMs": 15056.89,
           "renderingSequences": [
@@ -18983,7 +18983,7 @@
         },
         {
           "surfaceId": "surf_53e95217a8fc4622bd04c9d20b35ef85",
-          "lanEndpoint": "https://192.168.10.25:42279",
+          "lanEndpoint": "https://redacted-lan.invalid:42279",
           "finalWebClient": true,
           "durationMs": 15056.89,
           "renderingSequences": [
@@ -19385,7 +19385,7 @@
         "finalWebClient": true,
         "mode": "headless",
         "secureContext": true,
-        "lanEndpoint": "https://192.168.10.25:42279",
+        "lanEndpoint": "https://redacted-lan.invalid:42279",
         "lanInterface": "eno1",
         "browser": "chrome"
       },
@@ -19393,7 +19393,7 @@
         "frames": [
           {
             "surfaceId": "surf_be0129b5429c43c1b59c476828079240",
-            "lanEndpoint": "https://192.168.10.25:42279",
+            "lanEndpoint": "https://redacted-lan.invalid:42279",
             "finalWebClient": true,
             "durationMs": 16059.4,
             "renderingSequences": [
@@ -19460,7 +19460,7 @@
           },
           {
             "surfaceId": "surf_09a3203a30d449e7965944015ab71ace",
-            "lanEndpoint": "https://192.168.10.25:42279",
+            "lanEndpoint": "https://redacted-lan.invalid:42279",
             "finalWebClient": true,
             "durationMs": 16059.4,
             "renderingSequences": [
@@ -19527,7 +19527,7 @@
           },
           {
             "surfaceId": "surf_057bbec7c26e43e5af267819be66ab57",
-            "lanEndpoint": "https://192.168.10.25:42279",
+            "lanEndpoint": "https://redacted-lan.invalid:42279",
             "finalWebClient": true,
             "durationMs": 16059.4,
             "renderingSequences": [
@@ -19594,7 +19594,7 @@
           },
           {
             "surfaceId": "surf_766b5a20e94a44a0b397f5b8ba17a9a3",
-            "lanEndpoint": "https://192.168.10.25:42279",
+            "lanEndpoint": "https://redacted-lan.invalid:42279",
             "finalWebClient": true,
             "durationMs": 16059.4,
             "renderingSequences": [
@@ -19661,7 +19661,7 @@
           },
           {
             "surfaceId": "surf_24587503c6034438a68a1a1dbed94fa9",
-            "lanEndpoint": "https://192.168.10.25:42279",
+            "lanEndpoint": "https://redacted-lan.invalid:42279",
             "finalWebClient": true,
             "durationMs": 16059.5,
             "renderingSequences": [
@@ -19728,7 +19728,7 @@
           },
           {
             "surfaceId": "surf_c4d63f14855f45fea6866f6761914bbd",
-            "lanEndpoint": "https://192.168.10.25:42279",
+            "lanEndpoint": "https://redacted-lan.invalid:42279",
             "finalWebClient": true,
             "durationMs": 16059.4,
             "renderingSequences": [
@@ -19795,7 +19795,7 @@
           },
           {
             "surfaceId": "surf_32ada0201e414a9bb0a331c3641e892d",
-            "lanEndpoint": "https://192.168.10.25:42279",
+            "lanEndpoint": "https://redacted-lan.invalid:42279",
             "finalWebClient": true,
             "durationMs": 16059.4,
             "renderingSequences": [
@@ -19862,7 +19862,7 @@
           },
           {
             "surfaceId": "surf_53e95217a8fc4622bd04c9d20b35ef85",
-            "lanEndpoint": "https://192.168.10.25:42279",
+            "lanEndpoint": "https://redacted-lan.invalid:42279",
             "finalWebClient": true,
             "durationMs": 16059.5,
             "renderingSequences": [
@@ -24840,11 +24840,11 @@
     "schemaVersion": 3,
     "sourceReport": {
       "schemaVersion": 3,
-      "path": "/home/colin/Projects/omarchy-bot/.scratch/bot-screen-media-desktop/capacity-report.json"
+      "path": ".scratch/bot-screen-media-desktop/capacity-report.json"
     },
     "measuredAt": "2026-09-04T16:35:05.876Z",
     "machine": {
-      "hostname": "omarchy",
+      "hostname": "[redacted]",
       "platform": "linux 7.1.9-arch1-2 x64",
       "cpu": "AMD Ryzen 9 7900X 12-Core Processor",
       "logicalCpus": 24,
@@ -24873,8 +24873,8 @@
       },
       "browser": {
         "available": true,
-        "requested": "/home/colin/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome",
-        "path": "/home/colin/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome",
+        "requested": "~/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome",
+        "path": "~/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome",
         "versionArgs": [
           "--version"
         ],
@@ -24942,8 +24942,8 @@
       "built": true,
       "browser": {
         "available": true,
-        "requested": "/home/colin/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome",
-        "path": "/home/colin/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome",
+        "requested": "~/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome",
+        "path": "~/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome",
         "versionArgs": [
           "--version"
         ],
@@ -24954,7 +24954,7 @@
       "mode": "headless",
       "transport": "WebRTC H.264 video track",
       "lanInterface": "eno1",
-      "lanEndpoint": "https://192.168.10.25:34545",
+      "lanEndpoint": "https://redacted-lan.invalid:34545",
       "measurement": "daemon source/encode/send counters, browser WebRTC decode, video paint, and canvas readback"
     },
     "observedSourceFps": {
@@ -25121,5 +25121,5 @@
     "activeUnaffected": true,
     "activeEnvelopeMaintained": true
   },
-  "approvalPath": "/home/colin/Projects/omarchy-bot/apps/daemon/src/bootstrap/bot-screen-capacity-approval.json"
+  "approvalPath": "apps/daemon/src/bootstrap/bot-screen-capacity-approval.json"
 }

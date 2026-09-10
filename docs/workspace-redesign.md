@@ -25,16 +25,17 @@ All Bots default to the same `~/.omarchy-bot/workspace/` under the user's home d
 ```text
 Omarchy user
   ├─ Shared Workspace: work files common to all Bots
-  └─ user-created Bots
-       └─ each Bot
-            ├─ one Agent reference (many Bots may use that Agent)
-            ├─ many Threads → Agent-owned Native Sessions
-            └─ one Bot Screen identity
-                 └─ on-demand Bot Desktop Session → application windows
-                      ↑
-                 Screen Projection from the selected client view
+  ├─ user-created Bots
+  │    └─ each Bot
+  │         ├─ one Agent reference (many Bots may use that Agent)
+  │         ├─ many Threads → Agent-owned Native Sessions
+  │         └─ one Bot Screen identity → routed output/workspace
+  └─ one private Bot Computer
+       ├─ shared Sway, D-Bus, home/XDG and browser profile
+       ├─ serialized input seat
+       └─ Screen Projection from each selected client view
 
-Host Session: the user's original Omarchy desktop, separate from Bot Screens
+Host Session: the user's original Omarchy desktop, separate from the Bot Computer
 ```
 
 | Concern | Owner and boundary |
@@ -43,22 +44,22 @@ Host Session: the user's original Omarchy desktop, separate from Bot Screens
 | Work files and concurrent edits | The user, Agents, and their tools manage their work. The plugin does not add file locks, task locks, Git worktrees, repository management, or file-authorship tracking. |
 | Bot and conversation data | The plugin owns Bot identity, Threads, messages, local session mappings, and explicitly managed media. These are not the Shared Workspace. |
 | Native Session | The Agent owns conversation execution state. It is not a graphical session or a viewer connection. |
-| Bot desktop infrastructure | The plugin owns Screen identity, on-demand session processes, private display endpoints, capture, routed input, and same-Screen human handoff. |
-| Applications | Agents and applications retain native behavior. Browser selection, profile layout, Cookies, logins, and cross-Bot application-state sharing are not responsibilities of this desktop design. |
-| Deletion | Deleting a Bot removes its plugin-owned records and desktop runtime, not shared work files, Agent-owned Native Sessions, or arbitrary application data. |
+| Bot desktop infrastructure | The plugin owns one on-demand Bot Computer, Screen identities, routed outputs/workspaces, private endpoints, capture, global seat scheduling, and human handoff. |
+| Applications | Applications share the Bot Computer profile and graphical session. Agents and applications still own their internal concurrency behavior; the plugin routes windows and preserves state but does not synchronize application data. |
+| Deletion | Deleting a Bot removes its plugin records and targeted Screen runtime/workspace, not shared work files, Agent-owned Native Sessions, or the shared Bot Computer profile. |
 
 `~/.omarchy-bot/memory/` is a future directory intention, not an implemented memory feature or a decision about memory semantics. This revision does not relocate existing databases, managed attachments, avatars, or other product data.
 
 Changes is removed from the accepted interface and its backing product capability, not merely hidden. No review workflow or work-artifact panel replaces it. The Computer Surface remains the desktop observation/control entry; this correction does not add an arbitrary-URL webview or adopt a coding-workspace information architecture.
 
-### Implementation gaps in the 2026-09-05 revision
+### Implementation status
 
 Implementation is tracked by the [Shared Workspace and Bot Desktop Boundary Correction specification](../.scratch/shared-workspace-desktop-boundary/spec.md), including automated, real-runtime, and mandatory user experience acceptance.
 
 - **Shared Workspace default implemented:** implicit Agent sessions and supported application launches use `~/.omarchy-bot/workspace` under the live user home. Explicit Thread cwd values are unchanged. Native `session.resume` still only proves the daemon supplied cwd, not that a backend relocated an existing Native Session.
 - **Changes removed:** the Changes UI, Git summary/detail service, public endpoints, and client methods are gone. Retired `/api/bots/:id/changes` routes return ordinary missing-interface 404s.
-- **Screen startup repaired; production compositor is Sway:** output configuration is retried while the compositor is alive, and projection `releaseInput` / snapshot capture no longer destroy a ready desktop. Public state exposes the failing stage. Computer ADR 0009 is the production stack. Prior top-bar/shortcut breakage was not shown to share the historical Cage startup cause.
-- **Unused-Bot cost recorded; selected-view evidence and human acceptance pending:** unused Bots add no desktop/capture/transport stack. Historical Cage measurements and the bounded Sway/Xvnc experiments are evidence with different workloads, not a current Sway capacity result. The Sway stack still requires matched retained-desktop / one-selected-projection measurements plus top-bar, shortcut, and ordinary host-input acceptance.
+- **Production desktop is one shared Sway Bot Computer:** active Screens receive routed headless outputs/workspaces; application launches use one persistent home/XDG and browser profile; cross-Screen input is serialized against the compositor's shared seat. Projection release and snapshot capture do not destroy background work. Public state exposes the failing stage.
+- **Automated real-runtime conformance passed; human acceptance pending:** two routed Screens, shared application state, Agent control, selected-view projection, browser URL reuse, deletion/reprovision, and host environment isolation passed the private real-Sway scenario. Original top-bar, shortcut, and ordinary host-input acceptance still requires the user's hands-on confirmation.
 
 ### Migration boundary
 
@@ -98,7 +99,7 @@ There is no persistent global TopNav.
 
 ### Future Tauri Bot Client
 
-The current Web frontend will be reused for a Tauri desktop client, not replaced by an independently implemented interface. Conversation UI, Bot selection, Computer Surface behavior, and daemon-facing contracts stay shared; Agents, Native Sessions, Bot Desktop Sessions, and capture/input execution remain on the Omarchy side.
+The current Web frontend will be reused for a Tauri desktop client, not replaced by an independently implemented interface. Conversation UI, Bot selection, Computer Surface behavior, and daemon-facing contracts stay shared; Agents, Native Sessions, the Bot Computer, routed Screens, and capture/input execution remain on the Omarchy side.
 
 [ADR 0010](adr/0010-reuse-web-client-in-tauri.md) records this accepted evolution contract. Preserve the client/execution separation now without adding unused native scaffolding. Tauri packaging and shell-specific integrations are later work; its actual WebView media/input support must be tested then rather than inferred from Chromium tests. This does not change current Omarchy plugin lifecycle ownership, network policy, or application-state ownership.
 
@@ -248,35 +249,34 @@ The app does not depend on Voxtype's synthetic Return because file output bypass
 
 ## 10. Computer
 
-Each Bot owns one Bot Screen identity with independent windows, pixels, focus, pointer, and keyboard state. A running Bot Desktop Session serves that Screen; a Screen Projection only exposes it to a viewer. Neither a new Thread nor another viewer creates another computer or transfers ownership of the Bot's ongoing work.
+Each Bot owns one stable Bot Screen identity. A Screen is a routed headless output and workspace inside one shared Bot Computer; a Screen Projection only exposes it to a viewer. Screens have distinct pixels, windows, projection identity, and controller epochs, but Sway supplies one global focus history and effective input seat.
 
-- Keep input arbitration internal and scoped to each Bot Screen so a Bot and the user cannot interleave actions on that Screen while unrelated Bots continue independently.
+- Keep input arbitration internal. Computer Broker prevents Bot/human interleaving on one Screen; the runtime additionally serializes cross-Screen mutations and focuses the requesting workspace immediately before input.
 - Do not show controller epochs, queues, runtime generations, or engineering diagnostics in normal UI.
 - A Computer glyph is always present in the Conversation Header. It is visually quiet while inactive and gains state only while the Bot is using the computer or needs human input.
 - The glyph toggles a right-side Astryx `LayoutPanel` at every window width with a low-frequency, lossless, read-only Computer Preview and plain-language activity.
-- Expanding the preview opens Web Control. Production uses an on-demand WayVNC RFB Screen Projection through a dedicated view-only WebSocket, separate from the versioned preview/control WebSocket. The browser client is bundled noVNC; SDP/ICE and WebRTC are removed. The HTTP PNG snapshot remains an explicit read-only fallback, never an interactive image stream.
-- Show **Take control** only when human input is relevant.
-- While the user controls the Screen, show **Return to Bot**; re-observe before resuming automation.
-- Permanent deletion removes plugin-owned desktop runtime and session metadata before its Screen identity. It does not authorize erasing Shared Workspace files or taking ownership of application-internal state.
-- Screen coordination does not approve or filter Agent capabilities, and compositor/socket isolation is not an adversarial security boundary.
+- Expanding the preview opens Web Control. Production uses an on-demand, view-only WayVNC RFB Screen Projection through a dedicated WebSocket. The browser client is bundled noVNC; HTTP PNG remains an explicit read-only fallback.
+- Show **Take control** only when human input is relevant. While the user controls a Screen, hold the shared runtime seat until **Return to Bot** and re-observe before resuming automation.
+- Permanent deletion removes plugin-owned Screen runtime/workspace before its Screen identity. It preserves Shared Workspace files, Agent Native Sessions, and the shared Bot Computer profile.
+- Screen coordination does not approve or filter Agent capabilities, and same-UID compositor/socket routing is not an adversarial security boundary.
 
 ### Desktop implementation and host boundary
 
-- Adopt one pure-headless Sway runtime per running Bot Desktop Session, with view-only WayVNC projection, existing Computer Broker-authorized human input, and native Sway IPC window control, as selected in [Computer ADR 0009](contexts/computer-control/adr/0009-adopt-sway-bot-desktops.md). Production provisions Sway for every new Bot Desktop Session. Do not expose a compositor selector or retain dual production runtimes. Provision on the first graphical action or requested desktop view, not simply because a Bot was created.
-- Run only lightweight desktop infrastructure: private runtime, Wayland, Sway IPC, VNC, D-Bus, and application-profile endpoints; headless output; persistent application surface; and explicitly targeted capture/input. There is no per-Bot Omarchy/UWSM login session, shell/bar stack, or host autostart configuration.
-- Bot A and Bot B may operate independently. The Computer Broker coordinates Bot versus human input on the same Screen; it does not serialize unrelated Bots or manage workspace files.
-- A client switching from A to B releases its old projection and input authority and connects to B. A's background work continues under its existing authority rules; switching does not cancel a Turn, destroy A's desktop, or implicitly finish an outstanding human Takeover.
-- Each client projects only its selected Screen. When a Screen has no viewers, stop unused continuous capture and transport work; this does not prohibit screenshots explicitly requested by an Agent, interrupt an unfinished graphical task, or stop its applications. Reopening must show the same live page/window state. A projection disconnect is not a session-destruction policy.
-- Application launch and desktop tools receive the intended Bot display endpoint. Installing a browser per Bot, synchronizing Cookies, choosing shared versus separate browser profiles, and controlling application-internal concurrency are outside this contract.
-- The Host Session's top bar, shortcuts, focus, and physical input remain usable through provisioning, operation, projection switches, failures, and cleanup. Child environments never overwrite global systemd/D-Bus activation state; teardown addresses only plugin-owned child processes or transient application units.
-- Private display routing is operational isolation, not an Agent system-permission sandbox. Preserving native Agent capabilities does not authorize plugin development or runtime management to update the host OS or alter its graphical session.
-- A single shared window/focus/input state cannot satisfy parallel Bot desktop operation. VNC or SSH connections alone do not create independent surfaces; Sway supplies the independent Bot Screen, view-only WayVNC supplies projection, the Computer Broker-authorized path supplies human input, and native Sway IPC supplies truthful window control.
+- Adopt one private pure-headless Sway Bot Computer with view-only WayVNC, Computer Broker-authorized human input, and native Sway IPC, as selected in [Computer ADR 0009](contexts/computer-control/adr/0009-adopt-sway-bot-desktops.md). Provision it on the first graphical action or requested view and attach additional Screens to the same runtime.
+- Give each active Screen a dedicated output and `bot-<surfaceId>` workspace. Filter window observation by workspace and move newly launched windows to the requesting Screen.
+- Use one persistent private home and XDG profile for applications, including the browser. Application processes belong to the Bot Computer, not a Surface worker. This shares Cookies, logins, and ordinary application state without claiming application-internal concurrent mutation is safe.
+- Serialize input across Screens because the compositor has one effective seat. Background applications continue while another Screen owns input; parallel physical input is not promised.
+- A client switching from A to B releases its old projection and input authority and connects to B. A's background work continues; switching does not cancel a Turn, destroy applications, or implicitly finish Takeover.
+- Stop unused viewer-driven capture and transport when a Screen has no viewers. Agent screenshots remain available, and reopening shows the same live routed workspace while the Bot Computer remains active.
+- Keep the Bot Computer private from the Host Session: explicit runtime/Wayland/Sway/D-Bus/home/XDG environment only, no full Omarchy/UWSM login, shell/bar stack, host autostart, or global activation-environment import.
+- Teardown addresses verified private-runtime processes and named transient units. Invalid retained state is discarded without trusting stale PIDs; the persistent shared profile is not removed with one Bot.
+- This routing is operational isolation, not an Agent system-permission sandbox. The Host Session's top bar, shortcuts, focus, and physical input must remain usable.
 
 ### Required host-safety and resource evidence
 
 Separate plugin desktop overhead (compositor, desktop surface, helpers, capture, encoder, and daemon) from Agent/application workloads; report the whole scenario as well, and identify test-harness overhead rather than assigning it to the compositor. The historical four-active-Screen result of about 2 GiB PSS and 4.13 CPU cores is not an accepted normal-use budget or proof that desktop isolation itself requires that cost.
 
-Acceptance must exercise Bots with no graphical use, several retained Bot desktop sessions with only one viewed, repeated client A/B switches, and no viewers while background work continues. Verify release of unused capture/encoding paths without destroying applications; do not claim unmeasured resource savings or introduce idle-kill policies that discard work.
+Acceptance must exercise unused Bots, several routed Screens in one Bot Computer with only one viewed, repeated A/B switches, shared browser state, serialized input, and no viewers while background work continues. Verify release of unused capture/encoding paths without destroying applications.
 
 Host-safety evidence must cover the original top bar, shortcuts, focus, and physical input across desktop start, use, failure, and targeted cleanup. The historical two-Cage smoke and bounded two-Sway experiment check sibling-screen outcomes but do not directly assert host top-bar/shortcut usability or complete target-stack conformance. Safe verification must use private runtime/profile artifacts and targeted child teardown, never host package updates or graphical-session restarts.
 

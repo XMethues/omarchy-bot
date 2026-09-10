@@ -1,4 +1,15 @@
 import type {
+  AuthorizePluginBody,
+  CatalogSkillDetailDto,
+  InstalledSkillDto,
+  McpConnectionDto,
+  PluginAccountDto,
+  PluginStateDto,
+  SaveMcpBody,
+  SkillCatalogDto,
+  SkillCommandDto,
+} from "@omarchy-bot/protocol";
+import type {
   AgentDto,
   AttachmentDto,
   AttachmentDraftTokenDto,
@@ -97,6 +108,65 @@ export class ApiClient {
   }
   recheckAgent(id: AgentDto["id"]): Promise<AgentDto> {
     return this.req(`/api/agents/${id}/recheck`, { method: "POST" });
+  }
+
+  // ----- global plugins -----
+  plugins(): Promise<PluginStateDto> {
+    return this.req("/api/plugins");
+  }
+  configurePlugins(cloudUrl: string | null): Promise<void> {
+    return this.req("/api/plugins/settings", { method: "PUT", body: JSON.stringify({ cloudUrl }) });
+  }
+  saveMcp(id: string | null, body: SaveMcpBody): Promise<McpConnectionDto> {
+    return this.req(`/api/plugins/mcp${id === null ? "" : `/${encodeURIComponent(id)}`}`, {
+      method: id === null ? "POST" : "PUT", body: JSON.stringify(body),
+    });
+  }
+  setMcpEnabled(id: string, enabled: boolean): Promise<void> {
+    return this.req(`/api/plugins/mcp/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify({ enabled }) });
+  }
+  deleteMcp(id: string): Promise<void> {
+    return this.req(`/api/plugins/mcp/${encodeURIComponent(id)}`, { method: "DELETE" });
+  }
+  checkMcp(id: string): Promise<McpConnectionDto> {
+    return this.req(`/api/plugins/mcp/${encodeURIComponent(id)}/check`, { method: "POST", body: "{}" });
+  }
+  searchSkills(query = "", cursor?: string, view = "trending"): Promise<SkillCatalogDto> {
+    const search = new URLSearchParams({ q: query, view });
+    if (cursor !== undefined) search.set("cursor", cursor);
+    return this.req(`/api/plugins/catalog?${search}`);
+  }
+  skillDetail(id: string): Promise<CatalogSkillDetailDto> {
+    return this.req(`/api/plugins/catalog/detail?${new URLSearchParams({ id })}`);
+  }
+  installSkill(id: string): Promise<InstalledSkillDto> {
+    return this.req("/api/plugins/skills", { method: "POST", body: JSON.stringify({ id }) });
+  }
+  updateSkills(): Promise<void> {
+    return this.req("/api/plugins/skills/update", { method: "POST", body: "{}" });
+  }
+  setSkillEnabled(id: string, enabled: boolean): Promise<void> {
+    return this.req(`/api/plugins/skills/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify({ enabled }) });
+  }
+  removeSkill(id: string): Promise<void> {
+    return this.req(`/api/plugins/skills/${encodeURIComponent(id)}`, { method: "DELETE" });
+  }
+  pluginCommands(): Promise<SkillCommandDto[]> {
+    return this.req("/api/plugins/commands");
+  }
+  authorizePlugin(body: AuthorizePluginBody): Promise<{ url: string }> {
+    return this.req("/api/plugins/authorize", { method: "POST", body: JSON.stringify(body) });
+  }
+  labelPluginAccount(id: string, label: string): Promise<void> {
+    return this.req(`/api/plugins/accounts/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify({ label }) });
+  }
+  setPluginService(id: string, serviceId: string, enabled: boolean): Promise<PluginAccountDto> {
+    return this.req(`/api/plugins/accounts/${encodeURIComponent(id)}/services`, {
+      method: "PATCH", body: JSON.stringify({ serviceId, enabled }),
+    });
+  }
+  disconnectPluginAccount(id: string): Promise<void> {
+    return this.req(`/api/plugins/accounts/${encodeURIComponent(id)}`, { method: "DELETE" });
   }
 
   // ----- bots -----

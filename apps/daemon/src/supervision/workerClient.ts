@@ -7,6 +7,9 @@ import {
   type AgentBotMessageToolRequest,
   type AgentComputerToolOutput,
   type AgentComputerToolRequest,
+  isAgentPluginToolRequest,
+  type AgentPluginToolRequest,
+  type AgentPluginToolOutput,
 } from "@omarchy-bot/agent-contract";
 import { stderr } from "@omarchy-bot/agent-contract";
 
@@ -28,6 +31,10 @@ export interface WorkerClientOptions {
     request: AgentBotMessageToolRequest,
     signal: AbortSignal,
   ) => Promise<AgentBotMessageToolOutput>;
+  onPluginRequest?: (
+    request: AgentPluginToolRequest,
+    signal: AbortSignal,
+  ) => Promise<AgentPluginToolOutput>;
 }
 
 interface Pending {
@@ -155,6 +162,18 @@ export class WorkerClient {
       void this.#handleBotMessageRequest(msg);
       return;
     }
+    if (msg?.type === "plugin.request") {
+      if (!isAgentPluginToolRequest(msg)) {
+        if (typeof msg.requestId === "string" && this.alive) this.write({ type: "plugin.result", requestId: msg.requestId, ok: false, error: "invalid plugin tool request" });
+        return;
+      }
+      void this.#handlePluginRequest(msg);
+      return;
+    }
+    if (msg?.type === "plugin.cancel" && typeof msg.requestId === "string") {
+      this.#incoming.get(msg.requestId)?.abort("plugin tool call cancelled");
+      return;
+    }
     if (msg?.type === "computer.cancel" && typeof msg.requestId === "string") {
       this.#incoming.get(msg.requestId)?.abort("tool call cancelled");
       return;
@@ -221,6 +240,25 @@ export class WorkerClient {
       if (this.#incoming.get(request.requestId) === controller) {
         this.#incoming.delete(request.requestId);
       }
+    }
+  }
+
+  async #handlePluginRequest(request: AgentPluginToolRequest): Promise<void> {
+    if (this.#incoming.has(request.requestId)) {
+      if (this.alive) this.write({ type: "plugin.result", requestId: request.requestId, ok: false, error: "duplicate plugin request identity" });
+      return;
+    }
+    const controller = new AbortController();
+    this.#incoming.set(request.requestId, controller);
+    try {
+      if (!this.opts.onPluginRequest) throw new Error(`${this.opts.name} cannot route plugin tools`);
+      const payload = await this.opts.onPluginRequest(request, controller.signal);
+      controller.signal.throwIfAborted();
+      if (this.alive) this.write({ type: "plugin.result", requestId: request.requestId, ok: true, payload });
+    } catch (error) {
+      if (this.alive) this.write({ type: "plugin.result", requestId: request.requestId, ok: false, error: error instanceof Error ? error.message : String(error) });
+    } finally {
+      if (this.#incoming.get(request.requestId) === controller) this.#incoming.delete(request.requestId);
     }
   }
 

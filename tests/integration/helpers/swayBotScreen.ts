@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
@@ -13,38 +13,33 @@ import { writeFakeSwayIpcMode, writeFakeSwayTree } from "./fakeSwayIpc.ts";
 
 const LIVE_UNICODE_TITLE = "未保存 你好";
 
-function liveSwayTree(title: string): unknown {
+function liveSwayTree(title: string, surfaceIds: readonly string[]): unknown {
   return {
     id: 1,
     type: "root",
     name: "root",
-    nodes: [
-      {
-        id: 2,
-        type: "output",
-        name: "HEADLESS-1",
-        nodes: [
-          {
-            id: 3,
-            type: "workspace",
-            name: "1",
-            nodes: [
-              {
-                id: 10,
-                type: "con",
-                name: title,
-                app_id: "firefox",
-                pid: 1001,
-                focused: true,
-                shell: "xdg_shell",
-                rect: { x: 0, y: 0, width: 800, height: 600 },
-              },
-            ],
-            floating_nodes: [],
-          },
-        ],
-      },
-    ],
+    nodes: surfaceIds.map((surfaceId, index) => ({
+      id: 2 + index * 3,
+      type: "output",
+      name: `HEADLESS-${index + 1}`,
+      nodes: [{
+        id: 3 + index * 3,
+        type: "workspace",
+        name: `bot-${surfaceId}`,
+        nodes: [{
+          id: 10 + index,
+          type: "con",
+          name: title,
+          app_id: "firefox",
+          pid: 1001 + index,
+          focused: index === 0,
+          shell: "xdg_shell",
+          rect: { x: index * 8_192, y: 0, width: 800, height: 600 },
+        }],
+        floating_nodes: [],
+      }],
+    })),
+    floating_nodes: [],
   };
 }
 
@@ -160,7 +155,8 @@ export async function createScriptedSwayFixture(options?: {
     exitPath: wayvncExitPath,
   });
   let liveProgress = 0;
-  writeFakeSwayTree(controlDir, liveSwayTree(LIVE_UNICODE_TITLE));
+  const activeSurfaces = new Set<string>();
+  writeFakeSwayTree(controlDir, liveSwayTree(LIVE_UNICODE_TITLE, []));
   writeFakeSwayIpcMode(controlDir, "ok");
   const png = path.join(root, "screen.png");
   const sharp = createRequire(
@@ -177,15 +173,9 @@ export async function createScriptedSwayFixture(options?: {
 
   const helperPath = path.resolve(import.meta.dir, "fakeSwayIpc.ts");
   const sway = executable(bin, "sway", `#!/usr/bin/env bun
-import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { serveFakeSwayIpc } from ${JSON.stringify(helperPath)};
 const runtimeDir = process.env.XDG_RUNTIME_DIR ?? "";
-const failSurfaceFile = ${JSON.stringify(failSurfacePath)};
-if (existsSync(failSurfaceFile)) {
-  const failSurface = readFileSync(failSurfaceFile, "utf8").trim();
-  if (failSurface !== "" && runtimeDir.includes(failSurface)) process.exit(1);
-}
 const wayland = path.join(runtimeDir, ${JSON.stringify(options?.waylandDisplay ?? "wayland-0")});
 const swaySock = process.env.SWAYSOCK ?? path.join(runtimeDir, "sway-ipc.sock");
 Bun.listen({ unix: wayland, socket: { data() {} } });
@@ -262,20 +252,43 @@ for await (const chunk of Bun.stdin.stream()) {
   let actionGate = Promise.withResolvers<void>();
   let actionsStarted = 0;
   let actionWaiters: Array<{ count: number; resolve: () => void }> = [];
+  const updateLiveTree = (): void => {
+    const suffix = liveProgress === 0 ? "" : ` · ${liveProgress}`;
+    writeFakeSwayTree(controlDir, liveSwayTree(`${LIVE_UNICODE_TITLE}${suffix}`, [...activeSurfaces]));
+  };
   const adapter: BotScreenRuntimeAdapter = {
     start: async (provision) => {
       starts.push(provision);
       await Bun.sleep(30);
-      const runtime = await inner.start(provision);
-      const stop = runtime.stop.bind(runtime);
-      runtime.stop = async () => {
-        stops.push({ surfaceId: provision.surfaceId, runtimeGeneration: provision.generation });
-        await stop();
-      };
-      return runtime;
+      if (existsSync(failSurfacePath) && readFileSync(failSurfacePath, "utf8").trim() === provision.surfaceId) {
+        throw new Error(`fake Sway Surface provision failed for ${provision.surfaceId}`);
+      }
+      activeSurfaces.add(provision.surfaceId);
+      updateLiveTree();
+      try {
+        const runtime = await inner.start(provision);
+        const stop = runtime.stop.bind(runtime);
+        runtime.stop = async () => {
+          stops.push({ surfaceId: provision.surfaceId, runtimeGeneration: provision.generation });
+          await stop();
+        };
+        return runtime;
+      } catch (error) {
+        activeSurfaces.delete(provision.surfaceId);
+        updateLiveTree();
+        throw error;
+      }
     },
-    reconcile: (provision) => inner.reconcile(provision),
-    destroy: (surfaceId) => inner.destroy(surfaceId),
+    reconcile: async (provision) => {
+      activeSurfaces.add(provision.surfaceId);
+      updateLiveTree();
+      return inner.reconcile(provision);
+    },
+    destroy: async (surfaceId) => {
+      activeSurfaces.delete(surfaceId);
+      updateLiveTree();
+      await inner.destroy(surfaceId);
+    },
   };
   return {
     adapter,
@@ -287,7 +300,7 @@ for await (const chunk of Bun.stdin.stream()) {
     wayvncBin: wayvnc,
     advanceLiveProgress: () => {
       liveProgress += 1;
-      writeFakeSwayTree(controlDir, liveSwayTree(`${LIVE_UNICODE_TITLE} · ${liveProgress}`));
+      updateLiveTree();
     },
     inputCommands: () => {
       const logPath = path.join(root, "input.log");

@@ -22,7 +22,7 @@ OpenAI's computer-use guide requires a human handoff for selected sensitive step
 
 ### The current Omarchy backend cannot safely imitate Grok's parallel screens
 
-`computer-use-linux` describes desktop input as stateful and explicitly says to avoid concurrent tool calls against the MCP server. It also warns that untargeted typing goes to the compositor-focused window. Target-aware actions reduce mistakes but do not create independent input seats or per-Bot screens. The current package exposes no documented physical-user activity event that omarchy-bot could use for reliable automatic takeover. [computer-use-linux README](https://github.com/agent-sh/computer-use-linux#readme) · local integration instructions: `/home/colin/.pi/agent/npm/node_modules/@agent-sh/computer-use-linux/skills/computer-use-linux/SKILL.md`
+`computer-use-linux` describes desktop input as stateful and explicitly says to avoid concurrent tool calls against the MCP server. It also warns that untargeted typing goes to the compositor-focused window. Target-aware actions reduce mistakes but do not create independent input seats or per-Bot screens. The current package exposes no documented physical-user activity event that omarchy-bot could use for reliable automatic takeover. [computer-use-linux README](https://github.com/agent-sh/computer-use-linux#readme) · local integration instructions: `$HOME/.pi/agent/npm/node_modules/@agent-sh/computer-use-linux/skills/computer-use-linux/SKILL.md`
 
 The current implementation reflects that limitation:
 

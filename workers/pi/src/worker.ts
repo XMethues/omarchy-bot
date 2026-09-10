@@ -10,6 +10,7 @@ import {
   createAgentSession,
   DefaultResourceLoader,
   getAgentDir,
+  loadSkills,
   ModelRuntime,
   SessionManager,
   type AgentSession,
@@ -33,6 +34,8 @@ import {
   type AgentResult,
   type HistoryPayload,
   type ProbePayload,
+  type AgentPluginTurnContext,
+  type AgentPluginToolResult,
   type SessionOpenedPayload,
 } from "@omarchy-bot/agent-contract";
 import { isSurfaceId, type ComputerAction } from "@omarchy-bot/domain";
@@ -41,6 +44,7 @@ import { sdkVersion } from "./sdk-version.ts";
 import { createComputerTool } from "./computer-tool.ts";
 import { createBotMessageTool } from "./bot-message-tool.ts";
 import { thinkingCapabilityForProbe } from "./thinking-capability.ts";
+import { createPluginTools, disposePluginCalls, handlePluginResult } from "./plugin-tools.ts";
 
 const AGENT_ID = "pi";
 
@@ -49,6 +53,7 @@ interface SessionEntry extends SessionRuntime {
   botId: string;
   computer?: AgentComputerTurnContext;
   botMessage?: AgentBotMessageTurnContext;
+  plugins?: AgentPluginTurnContext;
 }
 
 const sessions = new Map<string, SessionEntry>();
@@ -215,6 +220,8 @@ function attachSubscription(entry: SessionEntry): void {
       entry.finished = true;
       delete entry.computer;
       delete entry.botMessage;
+      delete entry.plugins;
+      disposePluginCalls(sessionId);
       if (entry.aborted) emit({ type: "turn.cancelled", sessionId });
       else emit({ type: "turn.completed", sessionId });
     }
@@ -223,7 +230,7 @@ function attachSubscription(entry: SessionEntry): void {
 
 async function openSession(
   requestId: string,
-  options: { botId: string; cwd: string; instructions: string; model?: string },
+  options: { botId: string } & Extract<AgentCommand, { type: "session.open" }>["options"],
   existing?: SessionEntry | undefined,
 ): Promise<void> {
   let newEntry: SessionEntry | undefined;
@@ -236,14 +243,28 @@ async function openSession(
     { request: requestBotMessage },
   );
   const sessionId = `s_${crypto.randomUUID()}`;
+  const pluginTools = createPluginTools(options.plugins, () => newEntry?.plugins);
+  const managedSkills = options.plugins?.skills.length
+    ? loadSkills({ cwd: options.cwd, agentDir: getAgentDir(), includeDefaults: false, skillPaths: options.plugins.skills.map((skill) => skill.filePath) })
+    : undefined;
 
   // Bot Job/Instructions are injected into Pi's native system prompt.
   const loader = new DefaultResourceLoader({
     cwd: options.cwd,
     agentDir: getAgentDir(),
-    ...(options.instructions.trim() !== ""
-      ? { appendSystemPrompt: [`[omarchy-bot] Your Job/Instructions for this Bot:\n\n${options.instructions.trim()}`] }
-      : {}),
+    ...(managedSkills && options.plugins ? {
+      skillsOverride: (base) => {
+        const names = new Map(options.plugins!.skills.map((skill) => [skill.filePath, skill.name]));
+        const skills = managedSkills.skills.map((skill) => ({ ...skill, name: names.get(skill.filePath) ?? skill.name }));
+        if (skills.length !== options.plugins!.skills.length) throw new Error("A managed skill could not be loaded by Pi");
+        if (base.skills.some((skill) => skills.some((managed) => managed.name === skill.name))) throw new Error("A native skill conflicts with a managed skill command");
+        return { skills: [...base.skills, ...skills], diagnostics: [...base.diagnostics, ...managedSkills.diagnostics] };
+      },
+    } : {}),
+    appendSystemPrompt: [
+      ...(options.instructions.trim() ? [`[omarchy-bot] Your Job/Instructions for this Bot:\n\n${options.instructions.trim()}`] : []),
+      ...(options.plugins?.diagnostics.length ? [`[omarchy-bot] Unavailable plugins for this turn; do not claim to have used them:\n${options.plugins.diagnostics.join("\n")}`] : []),
+    ],
   });
   await loader.reload();
 
@@ -263,7 +284,7 @@ async function openSession(
     modelRuntime: rt,
     ...(model !== undefined ? { model } : {}),
     resourceLoader: loader,
-    customTools: [computerTool, botMessageTool],
+    customTools: [computerTool, botMessageTool, ...pluginTools],
   });
 
   const nativeSessionId = session.sessionFile ?? `mem:${sessionId}`;
@@ -291,6 +312,14 @@ async function openSession(
 async function handleMessage(cmd: AgentCommand): Promise<void> {
   try {
     switch (cmd.type) {
+      case "resources.list": {
+        const loader = new DefaultResourceLoader({ cwd: cmd.cwd, agentDir: getAgentDir() });
+        await loader.reload();
+        reply({ requestId: cmd.requestId, ok: true, payload: {
+          skills: loader.getSkills().skills.map((skill) => ({ name: skill.name, description: skill.description, path: skill.filePath })),
+        } });
+        return;
+      }
       case "probe": {
         const sdkOk = true; // reaching here means the SDK imported and ran
         const authed = await hasAuthenticatedModel();
@@ -306,6 +335,7 @@ async function handleMessage(cmd: AgentCommand): Promise<void> {
             steering: true,
             abort: true,
             botMail: true,
+            plugins: true,
             nativeThreadActions: ["resume", "history", "close"],
             thinking,
             attachments: {
@@ -326,6 +356,7 @@ async function handleMessage(cmd: AgentCommand): Promise<void> {
           cwd: cmd.options.cwd,
           instructions: cmd.options.instructions,
           ...(cmd.options.model !== undefined ? { model: cmd.options.model } : {}),
+          ...(cmd.options.plugins !== undefined ? { plugins: cmd.options.plugins } : {}),
         });
         return;
       case "session.resume": {
@@ -338,6 +369,7 @@ async function handleMessage(cmd: AgentCommand): Promise<void> {
           cwd: cmd.options.cwd,
           instructions: cmd.options.instructions,
           ...(cmd.options.model !== undefined ? { model: cmd.options.model } : {}),
+          ...(cmd.options.plugins !== undefined ? { plugins: cmd.options.plugins } : {}),
         }, holder);
         return;
       }
@@ -365,6 +397,9 @@ async function handleMessage(cmd: AgentCommand): Promise<void> {
         ) {
           throw new Error("Bot message binding is required and must match the Agent command");
         }
+        if (cmd.plugins !== undefined && (cmd.plugins.botId !== entry.botId || cmd.plugins.workerSessionId !== cmd.sessionId || cmd.plugins.turnId !== cmd.turnId)) {
+          throw new Error("Plugin tool binding must match the Agent command");
+        }
         const images =
           cmd.message.attachments && cmd.message.attachments.length > 0
             ? await Promise.all(
@@ -389,6 +424,8 @@ async function handleMessage(cmd: AgentCommand): Promise<void> {
         entry.computer = cmd.computer;
         if (cmd.botMessage === undefined) delete entry.botMessage;
         else entry.botMessage = cmd.botMessage;
+        if (cmd.plugins === undefined) delete entry.plugins;
+        else entry.plugins = cmd.plugins;
         entry.running = true;
         entry.finished = false;
         entry.aborted = false;
@@ -399,6 +436,8 @@ async function handleMessage(cmd: AgentCommand): Promise<void> {
             entry.finished = true;
             delete entry.computer;
             delete entry.botMessage;
+            delete entry.plugins;
+            disposePluginCalls(entry.sessionId);
             emit({ type: "error", sessionId: entry.sessionId, message: String(err), retryable: false });
           });
         reply({ requestId: cmd.requestId, ok: true, payload: { accepted: true } });
@@ -438,6 +477,7 @@ async function handleMessage(cmd: AgentCommand): Promise<void> {
       }
       case "session.close": {
         const entry = sessionEntry(cmd.sessionId);
+        disposePluginCalls(cmd.sessionId);
         entry.session.dispose();
         sessions.delete(cmd.sessionId);
         reply({ requestId: cmd.requestId, ok: true, payload: { closed: true } });
@@ -469,12 +509,15 @@ await readJsonl(
         handleComputerResult(msg as AgentComputerToolResult);
       } else if (msg.type === "bot-message.result") {
         handleBotMessageResult(msg as AgentBotMessageToolResult);
+      } else if (msg.type === "plugin.result") {
+        handlePluginResult(msg as AgentPluginToolResult);
       } else {
         void handleMessage(msg as AgentCommand);
       }
     }
   },
   () => {
+    disposePluginCalls();
     for (const pending of computerRequests.values()) {
       pending.reject(new Error("daemon connection closed during computer tool call"));
     }

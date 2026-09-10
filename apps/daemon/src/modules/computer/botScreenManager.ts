@@ -101,6 +101,7 @@ export interface BotScreenRuntimeReadiness {
 
 export type BotScreenRuntimeOutcome =
   | { type: "compositor-exited"; error: Error }
+  | { type: "session-bus-exited"; error: Error }
   | { type: "desktop-exited"; error: Error }
   | { type: "input-helper-exited"; error: Error }
   | { type: "computer-worker-exited"; error: Error };
@@ -698,7 +699,8 @@ export class BotScreenManager {
 
   #outcomeFailure(outcome: BotScreenRuntimeOutcome): Error {
     const component = {
-      "compositor-exited": "Bot Screen compositor",
+      "compositor-exited": "Bot Computer compositor",
+      "session-bus-exited": "Bot Computer session bus",
       "desktop-exited": "Bot Desktop",
       "input-helper-exited": "Bot Screen input helper",
       "computer-worker-exited": "Bot Screen computer worker",

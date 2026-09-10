@@ -42,7 +42,7 @@ OMARCHY_BOT_REAL_CAGE_SMOKE=1 \
 OMARCHY_BOT_CAGE_BIN=/tmp/cage-portable.sh \
 OMARCHY_BOT_WLR_RANDR_BIN=/tmp/wlr-randr-portable.sh \
 OMARCHY_BOT_CAGE_SMOKE_PROFILE=720p \
-PATH=/tmp/compositor-portable/usr/bin:/home/colin/.local/share/mise/installs/bun/latest/bin:/usr/local/sbin:/usr/local/bin:/usr/bin \
+PATH="/tmp/compositor-portable/usr/bin:$HOME/.local/share/mise/installs/bun/latest/bin:/usr/local/sbin:/usr/local/bin:/usr/bin" \
 XDG_RUNTIME_DIR=/run/user/1000 \
 bun test tests/integration/bot-screen-cage.smoke.test.ts
 ```
@@ -59,13 +59,13 @@ Passed all 12 Computer Surface E2E tests.
 OMARCHY_BOT_REAL_SCREEN_LOAD=1 \
 OMARCHY_BOT_CAGE_BIN=/tmp/cage-portable.sh \
 OMARCHY_BOT_WLR_RANDR_BIN=/tmp/wlr-randr-portable.sh \
-OMARCHY_BOT_LOAD_BROWSER_BIN=/home/colin/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome \
+OMARCHY_BOT_LOAD_BROWSER_BIN="$HOME/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome" \
 OMARCHY_BOT_LOAD_MATRIX=1,2,4,8 \
 OMARCHY_BOT_LOAD_FALLBACK=1 \
 OMARCHY_BOT_LOAD_DURATION_MS=15000 \
 OMARCHY_BOT_LOAD_LAN_INTERFACE=eno1 \
-OMARCHY_BOT_LOAD_REPORT=/home/colin/Projects/omarchy-bot/.scratch/bot-screen-media-desktop/capacity-report.json \
-OMARCHY_BOT_LOAD_APPROVAL=/home/colin/Projects/omarchy-bot/apps/daemon/src/bootstrap/bot-screen-capacity-approval.json \
+OMARCHY_BOT_LOAD_REPORT=.scratch/bot-screen-media-desktop/capacity-report.json \
+OMARCHY_BOT_LOAD_APPROVAL=apps/daemon/src/bootstrap/bot-screen-capacity-approval.json \
 bun test tests/integration/bot-screen-capacity.load.test.ts
 ```
 

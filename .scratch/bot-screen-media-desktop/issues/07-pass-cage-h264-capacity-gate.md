@@ -43,7 +43,7 @@ The final reviewed schema-v3 run passed both the release and operational gates. 
 
 The matched 1080p compositor measurement reduced PSS from 116.54 MiB for Hyprland to 45.16 MiB for Cage, a 61.25% reduction. The supported rows are 1, 2, and 4 Screens at 1080p and 8 Screens at the selectable 720p fallback. The 8-Screen 1080p row completed every operational scenario with zero unexplained drops but is unsupported because its displayed rate was only 11.10–12.56 FPS; the 8-Screen 720p fallback displayed 20.26–20.32 FPS and passed.
 
-Provenance: Cage 0.3.1-b7b774a via `/tmp/cage-portable.sh -v`; FFmpeg n9.0.1 via `/usr/bin/ffmpeg -version`; Google Chrome for Testing 151.0.7922.34 via `/home/colin/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome --version`; final web client in headless secure-context mode through `eno1` at the recorded non-loopback LAN endpoint. The report is `.scratch/bot-screen-media-desktop/capacity-report.json`; the schema-v3 approval was written to `apps/daemon/src/bootstrap/bot-screen-capacity-approval.json`.
+Provenance: Cage 0.3.1-b7b774a via `/tmp/cage-portable.sh -v`; FFmpeg n9.0.1 via `/usr/bin/ffmpeg -version`; Google Chrome for Testing 151.0.7922.34 via `$HOME/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome --version`; final web client in headless secure-context mode through `eno1` at the recorded non-loopback LAN endpoint. The report is `.scratch/bot-screen-media-desktop/capacity-report.json`; the schema-v3 approval was written to `apps/daemon/src/bootstrap/bot-screen-capacity-approval.json`. Published evidence redacts host identifiers and LAN addresses; measurements are unchanged.
 
 Reproduce with:
 

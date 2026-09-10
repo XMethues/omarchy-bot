@@ -4,7 +4,7 @@ The end-user context for creating AI teammates, working with them through conver
 
 ## Language
 
-Definitions only. Rules and acceptance live in [the product boundary](../../workspace-redesign.md#shared-workspace-and-plugin-boundary) and [the current implementation specification](../../../.scratch/shared-workspace-desktop-boundary/spec.md). Related terms: [Agent](../agent-integration/CONTEXT.md), [Native Session](../agent-integration/CONTEXT.md), [Host Session](../computer-control/CONTEXT.md), [Bot Screen](../computer-control/CONTEXT.md), [Bot Desktop Session](../computer-control/CONTEXT.md), [Screen Projection](../computer-control/CONTEXT.md).
+Definitions only. Rules and acceptance live in [the product boundary](../../workspace-redesign.md#shared-workspace-and-plugin-boundary) and [the current implementation specification](../../../.scratch/shared-workspace-desktop-boundary/spec.md). Related terms: [Agent](../agent-integration/CONTEXT.md), [Native Session](../agent-integration/CONTEXT.md), [Host Session](../computer-control/CONTEXT.md), [Bot Computer](../computer-control/CONTEXT.md), [Bot Screen](../computer-control/CONTEXT.md), [Screen Projection](../computer-control/CONTEXT.md).
 
 **Bot**:
 A persistent assistant created and named by the user, with its own job instructions, configuration, and identity. Each Bot uses one Agent; multiple Bots may use the same Agent, and Agent inventory is not itself a Bot.

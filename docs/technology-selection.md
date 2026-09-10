@@ -14,7 +14,7 @@ Styling:               Astryx tokens with product-owned layout styles
 Frontend data:         TanStack Router + Query + Virtual where needed
 Desktop integration:   systemd user service + localhost API
 Computer backend:      computer-use-linux behind computer-worker
-Bot Screen runtime:    on-demand pure-headless Sway Bot Desktop Session per Bot
+Bot Screen runtime:    one on-demand pure-headless Sway Bot Computer; output/workspace per Screen
 Screen Projection:     selected-view PNG preview + Broker control and view-only RFB over separate WebSockets
 Voice input:           Voxtype through the localhost daemon
 Persistence:           SQLite + daemon-managed local media
@@ -26,11 +26,11 @@ The daemon owns product state, SQLite, the REST/WebSocket API, process supervisi
 
 Workers start on demand by Agent, not by visible Bot. Several user-created Bots may share one Agent worker/runtime while retaining independent native sessions.
 
-Deployment follows the [Omarchy plugin contract](../README.md#installation), including Omarchy Shell's ownership of daemon lifecycle. Bot Desktop Sessions are separately supervised application processes, not additional host graphical login sessions.
+Deployment follows the [Omarchy plugin contract](../README.md#installation), including Omarchy Shell's ownership of daemon lifecycle. The Bot Computer is a separately supervised application runtime, not an additional host graphical login session.
 
-Bot Screens do not inherit the user's Wayland display. The daemon provisions Sway directly with private runtime directories and headless outputs; no runtime selector or fallback compositor is supported. The HTTP PNG snapshot remains a read-only recovery path and never substitutes an interactive live transport.
+Bot Screens do not inherit the user's Wayland display. The daemon provisions one private Sway runtime with headless outputs, one private D-Bus bus and persistent application profile, and workspace-scoped Screen routing. No runtime selector or fallback compositor is supported. The HTTP PNG snapshot remains a read-only recovery path and never substitutes an interactive live transport.
 
-The [accepted product boundary](workspace-redesign.md#shared-workspace-and-plugin-boundary) separates Shared Workspace files, Agent-owned execution, Bot desktop infrastructure, and client projections. [System ADR 0009](adr/0009-share-work-files-isolate-bot-screens.md) governs on-demand lifetime and resource acceptance; application profile/login policy and work-file locking are not part of the desktop stack. A transport change to VNC or SSH is not a substitute for independent display/input endpoints.
+The [accepted product boundary](workspace-redesign.md#shared-workspace-and-plugin-boundary) separates Shared Workspace files, Agent-owned execution, the shared Bot Computer, routed Bot Screens, and client projections. [System ADR 0009](adr/0009-share-work-files-isolate-bot-screens.md) governs on-demand lifetime, shared application state, serialized input, deletion, and resource acceptance.
 
 ## Agent integration rule
 

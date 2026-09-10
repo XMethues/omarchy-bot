@@ -10,6 +10,7 @@ import {
   type AgentSession,
 } from "@earendil-works/pi-coding-agent";
 import { fauxAssistantMessage, fauxProvider, fauxText } from "@earendil-works/pi-ai/providers/faux";
+import { AGENT_COMPUTER_TOOL } from "@omarchy-bot/agent-contract";
 import { createComputerTool } from "./computer-tool.ts";
 
 test("fresh and resumed Native Sessions receive the computer session map without starting a desktop", async () => {
@@ -50,9 +51,12 @@ test("fresh and resumed Native Sessions receive the computer session map without
         customTools: [tool],
       }));
 
-      if (tool.promptSnippet === undefined) throw new Error("Computer tool has no prompt snippet");
-      expect(session.systemPrompt).toContain(tool.promptSnippet);
-      for (const guideline of tool.promptGuidelines ?? []) {
+      expect(tool.name).toBe(AGENT_COMPUTER_TOOL.name);
+      expect(tool.description).toBe(AGENT_COMPUTER_TOOL.description);
+      expect(tool.promptSnippet).toBe(AGENT_COMPUTER_TOOL.systemPrompt.summary);
+      expect(tool.promptGuidelines).toEqual([...AGENT_COMPUTER_TOOL.systemPrompt.guidelines]);
+      expect(session.systemPrompt).toContain(AGENT_COMPUTER_TOOL.systemPrompt.summary);
+      for (const guideline of AGENT_COMPUTER_TOOL.systemPrompt.guidelines) {
         expect(session.systemPrompt).toContain(guideline);
       }
       if (!resumed) {

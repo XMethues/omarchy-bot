@@ -18,6 +18,8 @@ import { InputDiagnostics } from "../modules/computer/inputDiagnostics.ts";
 import { AvatarService } from "../modules/avatars/avatarService.ts";
 import { DictationService } from "../modules/dictation/dictationService.ts";
 import { AttachmentsService } from "../modules/attachments/attachments.ts";
+import { prepareSharedWorkspace } from "../modules/workspace/sharedWorkspace.ts";
+import { PluginsService } from "../modules/plugins/plugins.ts";
 import { Supervisor } from "../supervision/supervisor.ts";
 import { startHttp, type DaemonServices } from "../api/http.ts";
 import { writeFileSync, renameSync } from "node:fs";
@@ -68,6 +70,8 @@ export async function main(options: MainOptions = {}): Promise<{
         turns.onAgentComputerRequest(agentId, request, computer, signal),
       onAgentBotMessageRequest: (agentId, request) =>
         turns.onAgentBotMessageRequest(agentId, request, mailbox),
+      onAgentPluginRequest: (agentId, request, signal) =>
+        turns.onAgentPluginRequest(agentId, request, signal),
     },
     {
       agents: agentsDir,
@@ -81,6 +85,8 @@ export async function main(options: MainOptions = {}): Promise<{
     runtimeRoot: cfg.botScreenRuntimeDir,
     profileRoot: cfg.botScreenProfileDir,
     computerWorkers: supervisor,
+    capacity: cfg.botScreenCapacity,
+    applicationCwd: prepareSharedWorkspace(cfg.sharedWorkspaceDir),
     runtimeSupply: new PortableSwayRuntimeSupply({ rootDir: cfg.botScreenSwayRuntimeSupplyDir }),
     ...(applicationUnitRuntimeDir === undefined ? {} : { hostRuntimeDir: applicationUnitRuntimeDir }),
     ...(process.env.OMARCHY_BOT_SWAY_BIN === undefined
@@ -127,7 +133,11 @@ export async function main(options: MainOptions = {}): Promise<{
   const attachments = new AttachmentsService(db, cfg.attachmentsDir, agents);
   attachments.gcStaged();
   const avatars = new AvatarService(bots, supervisor, cfg.avatarsDir);
-  const turns: TurnService = new TurnService(db, events, threads, agents, bots, attachments, supervisor, cfg);
+  const plugins = new PluginsService(path.join(cfg.dataDir, "plugins"), cfg.sharedWorkspaceDir, async () => {
+    const worker = await supervisor.agentWorker("pi");
+    return worker.request({ type: "resources.list", cwd: cfg.sharedWorkspaceDir }, 30_000);
+  });
+  const turns: TurnService = new TurnService(db, events, threads, agents, bots, attachments, supervisor, cfg, plugins);
   mailbox = new MailboxService(db, events, threads, agents, turns);
   const computer = new ComputerBroker(
     db,
@@ -177,6 +187,7 @@ export async function main(options: MainOptions = {}): Promise<{
     avatars,
     attachments,
     dictation,
+    plugins,
     computer,
     screens,
     projections,
@@ -212,7 +223,7 @@ export async function main(options: MainOptions = {}): Promise<{
 
   let stopping = false;
   const onInterrupt = (): void => void stop();
-  const onTerminate = (): void => void stop();
+  const onTerminate = (): void => void disconnectForRestart();
   const removeSignalHandlers = (): void => {
     process.off("SIGINT", onInterrupt);
     process.off("SIGTERM", onTerminate);
@@ -228,6 +239,7 @@ export async function main(options: MainOptions = {}): Promise<{
     await projections.shutdown();
     await screens.shutdown();
     await supervisor.stopAll(); // close workers
+    await plugins.shutdown();
     http.stop(); // close listeners
     db.close(); // flush WAL
     console.log("omarchy-bot daemon stopped");
@@ -243,6 +255,7 @@ export async function main(options: MainOptions = {}): Promise<{
     await projections.shutdown();
     screens.detach();
     await supervisor.stopAll();
+    await plugins.shutdown();
     http.stop();
     db.close();
     console.log("omarchy-bot daemon disconnected for restart");
