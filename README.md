@@ -122,6 +122,9 @@ Enable access to source files outside that directory for the Bun workspace
 installation. `apps/site/vercel.json` sets the install command, build command,
 static output directory, and response headers. Deployment requires a signed-in
 Vercel account; the repository does not contain deployment credentials.
+Install and build commands use `bunx bun@1.4.2` so Vercel's preinstalled Bun does
+not need to support the repository's v2 lockfile. Keep the frozen-lockfile check
+enabled; do not regenerate dependency resolutions to work around an older build image.
 The production hostname supplied by Vercel generates canonical and social-image
 URLs; set `SITE_URL` to the final HTTPS origin when using a custom domain.
 Vite previews the public pages only; OAuth and catalog functions run on Vercel.
