@@ -7,7 +7,7 @@ import { ToolListChangedNotificationSchema, type CallToolResult } from "@modelco
 import type { FetchLike } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { redactToolErrorSummary, type AgentPluginSnapshot, type AgentPluginToolDefinition, type AgentPluginToolOutput, type NativePluginResources } from "@omarchy-bot/agent-contract";
 import {
-  PLUGIN_PROVIDERS, PluginProviderId, SaveMcpBody,
+  PLUGIN_PROVIDERS, PluginProviderId, SaveMcpBody, SKILL_CATALOG_PAGE_SIZE, SKILL_SEARCH_LIMIT,
   type AuthorizePluginBody, type CatalogSkillDetailDto, type CatalogSkillDto, type InstalledSkillDto,
   type McpConnectionDto, type PluginAccountDto, type PluginProviderDto, type PluginServiceDefinition, type PluginStateDto,
   type SkillCatalogDto, type SkillCommandDto,
@@ -309,14 +309,21 @@ export class PluginsService {
 
   async catalog(query = "", cursor?: string, view = "trending"): Promise<SkillCatalogDto> {
     const parameters = new URLSearchParams({ q: query, view, ...(cursor === undefined ? {} : { cursor }) });
-    const raw = z.object({ data: z.array(CatalogEntry), pagination: z.object({ page: z.number(), hasMore: z.boolean() }).optional() }).parse(await this.#cloud(this.#cloudUrl(), `catalog?${parameters}`));
+    const raw = z.object({ data: z.array(CatalogEntry), pagination: z.object({ page: z.number().int().nonnegative(), perPage: z.number().int().positive(), total: z.number().int().nonnegative(), hasMore: z.boolean() }).optional() }).parse(await this.#cloud(this.#cloudUrl(), `catalog?${parameters}`));
+    const isSearch = Boolean(query.trim());
+    if (!isSearch && !raw.pagination) throw new HttpError(502, "Catalog pagination is unavailable");
     const skills = raw.data.map((entry): CatalogSkillDto => {
       const { installs, ...fields } = entry;
       const skill: CatalogSkillDto = { ...fields, installUrl: entry.installUrl ?? (entry.sourceType === "github" ? `https://github.com/${entry.source}` : `https://${entry.source}`), description: "", ...(installs === undefined ? {} : { installs }) };
       this.#catalog.set(skill.id, skill);
       return skill;
     });
-    return { skills, ...(raw.pagination?.hasMore ? { nextCursor: String(raw.pagination.page + 1) } : {}) };
+    return {
+      skills,
+      total: isSearch ? skills.length : raw.pagination!.total,
+      pageSize: isSearch ? SKILL_CATALOG_PAGE_SIZE : raw.pagination!.perPage,
+      ...(isSearch ? { searchLimit: SKILL_SEARCH_LIMIT } : raw.pagination!.hasMore ? { nextCursor: String(raw.pagination!.page + 1) } : {}),
+    };
   }
 
   async detail(id: string): Promise<CatalogSkillDetailDto> {

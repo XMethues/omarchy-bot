@@ -79,8 +79,14 @@ export interface CatalogSkillDetailDto extends CatalogSkillDto {
   content: string;
   url: string;
 }
+export const SKILL_CATALOG_PAGE_SIZE = 12;
+export const SKILL_SEARCH_LIMIT = 200;
+
 export interface SkillCatalogDto {
   skills: CatalogSkillDto[];
+  total: number;
+  pageSize: number;
+  searchLimit?: number;
   nextCursor?: string;
 }
 export interface InstalledSkillDto extends CatalogSkillDto {

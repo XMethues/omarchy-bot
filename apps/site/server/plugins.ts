@@ -4,7 +4,7 @@ import { getVercelOidcToken } from "@vercel/oidc";
 import { createRemoteJWKSet, errors as joseErrors, jwtVerify, SignJWT } from "jose";
 import { z } from "zod";
 import { PLUGIN_PROVIDERS } from "../../../packages/protocol/src/pluginProviders.ts";
-import { PluginProviderId } from "../../../packages/protocol/src/plugins.ts";
+import { PluginProviderId, SKILL_CATALOG_PAGE_SIZE, SKILL_SEARCH_LIMIT } from "../../../packages/protocol/src/plugins.ts";
 
 const JSON_HEADERS = { "content-type": "application/json", "cache-control": "no-store", "referrer-policy": "no-referrer" };
 const STATE_AUDIENCE = "omarchy-bot-oauth";
@@ -203,12 +203,12 @@ export async function handlePluginCloudRequest(request: Request): Promise<Respon
         const query = (url.searchParams.get("q") ?? "").trim();
         if (query.length === 1 || query.length > 256) throw new BrokerError(400, "Search needs 2–256 characters.");
         upstream = new URL(query ? "https://skills.sh/api/v1/skills/search" : "https://skills.sh/api/v1/skills");
-        if (query) { upstream.searchParams.set("q", query); upstream.searchParams.set("limit", "50"); }
+        if (query) { upstream.searchParams.set("q", query); upstream.searchParams.set("limit", String(SKILL_SEARCH_LIMIT)); }
         else {
           const page = url.searchParams.get("cursor") ?? "0";
           const view = url.searchParams.get("view") ?? "trending";
           if (!/^\d{1,8}$/.test(page) || !["all-time", "trending", "hot"].includes(view)) throw new BrokerError(400, "Invalid catalog pagination.");
-          upstream.search = new URLSearchParams({ view, page, per_page: "30" }).toString();
+          upstream.search = new URLSearchParams({ view, page, per_page: String(SKILL_CATALOG_PAGE_SIZE) }).toString();
         }
       }
       const response = await fetch(upstream, { headers: { authorization: `Bearer ${token}`, accept: "application/json" }, signal: AbortSignal.timeout(30_000), redirect: "error" });
@@ -222,7 +222,7 @@ export async function handlePluginCloudRequest(request: Request): Promise<Respon
   } catch (error) {
     const invalidRequest = error instanceof z.ZodError || error instanceof joseErrors.JOSEError;
     const status = error instanceof BrokerError ? error.status : invalidRequest ? 400 : 502;
-    const message = error instanceof BrokerError ? error.message : invalidRequest ? "Invalid or expired authorization request." : "Publisher upstream request failed.";
+    const message = status === 503 ? "This service is temporarily unavailable. Please try again later." : error instanceof BrokerError ? error.message : invalidRequest ? "Invalid or expired authorization request." : "Publisher upstream request failed.";
     return new Response(JSON.stringify({ error: message }), { status, headers: JSON_HEADERS });
   }
 }

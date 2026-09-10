@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import * as stylex from "@stylexjs/stylex";
 import { Banner } from "@astryxdesign/core/Banner";
 import { Button } from "@astryxdesign/core/Button";
+import { Card } from "@astryxdesign/core/Card";
 import { Heading } from "@astryxdesign/core/Heading";
 import { Item } from "@astryxdesign/core/Item";
 import { useAppShellMobile } from "@astryxdesign/core/AppShell";
@@ -14,7 +15,7 @@ import { Text } from "@astryxdesign/core/Text";
 import { TextArea } from "@astryxdesign/core/TextArea";
 import { TextInput } from "@astryxdesign/core/TextInput";
 import { VStack } from "@astryxdesign/core/VStack";
-import type { McpConnectionDto, PluginAccountDto, SaveMcpBody } from "@omarchy-bot/protocol";
+import { SKILL_CATALOG_PAGE_SIZE, type InstalledSkillDto, type McpConnectionDto, type PluginAccountDto, type PluginStateDto, type SaveMcpBody } from "@omarchy-bot/protocol";
 import { api, apiErrorMessage } from "../lib/api.ts";
 import { BottomSheetWithReturnFocus } from "./BottomSheetWithReturnFocus.tsx";
 
@@ -26,9 +27,17 @@ const styles = stylex.create({
   code: { whiteSpace: "pre-wrap", overflowWrap: "anywhere", minWidth: 0, fontSize: "0.85rem" },
   link: { color: "var(--color-text-accent)", textDecoration: "underline" },
   document: { maxHeight: "45vh", overflow: "auto", minWidth: 0 },
+  skillGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(min(100%, 260px), 1fr))", gap: "var(--spacing-4)", minWidth: 0 },
+  skillCard: { minWidth: 0, display: "flex", flexDirection: "column" },
+  skillBody: { display: "flex", flexDirection: "column", gap: "var(--spacing-2)", flexGrow: 1, minWidth: 0 },
+  skillActions: { marginTop: "auto", paddingTop: "var(--spacing-3)", display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: "var(--spacing-2)" },
+  skillDescription: { display: "-webkit-box", WebkitLineClamp: 3, WebkitBoxOrient: "vertical", overflow: "hidden" },
+  search: { display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto", gap: "var(--spacing-3)", alignItems: "end" },
+  pager: { display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: "var(--spacing-2)" },
+  skeleton: { height: 14, width: "75%", backgroundColor: "var(--color-border)", borderRadius: "var(--radius-container)", marginBottom: "var(--spacing-3)" },
 });
 
-type Section = "services" | "mcp" | "skills" | "advanced";
+type Section = "services" | "mcp" | "skills";
 
 function McpEditor({ initial, busy, onSave, onCancel }: {
   initial?: McpConnectionDto; busy: boolean; onSave(body: SaveMcpBody): Promise<void>; onCancel(): void;
@@ -99,19 +108,6 @@ function AccountLabel({ account, busy, onSave }: { account: PluginAccountDto; bu
   </form>;
 }
 
-function PublisherSetup({ initial, busy, onSave }: { initial: string; busy: boolean; onSave(url: string | null): void }): JSX.Element {
-  const [url, setUrl] = useState(initial);
-  return <form onSubmit={(event) => { event.preventDefault(); onSave(url.trim() || null); }}>
-    <VStack gap={3}>
-      <Heading level={2}>Advanced publisher settings</Heading>
-      <Text>Omarchy Bot connects to its publisher backend automatically. Change this only to use a self-hosted backend. Business data goes directly between this Omarchy host and the provider. User tokens stay on this host.</Text>
-      <TextInput label="Publisher HTTPS origin" value={url} onChange={setUrl} placeholder="Optional custom publisher origin" width="100%" isDisabled={busy} />
-      <Text color="secondary">Leave empty to restore the default backend. Existing account refresh remains bound to its original publisher. Never enter a client secret here.</Text>
-      <Button label={busy ? "Saving…" : "Save backend"} type="submit" isDisabled={busy} />
-      <Banner status="warning" title="Local client only" description="The daemon control API is not an authenticated remote-access boundary. Do not expose it publicly. Publisher callback support is limited to localhost and private-network client origins." />
-    </VStack>
-  </form>;
-}
 
 export function PluginsDialog({ open, onClose, mobileReturnFocusRef }: {
   open: boolean;
@@ -164,11 +160,6 @@ function PluginsContent(): JSX.Element {
   const [selectedService, setSelectedService] = useState<string>();
   const [editing, setEditing] = useState<McpConnectionDto | "new">();
   const [confirm, setConfirm] = useState<{ kind: "mcp" | "skill" | "account"; id: string; name: string }>();
-  const [searchDraft, setSearchDraft] = useState("");
-  const [search, setSearch] = useState("");
-  const [cursor, setCursor] = useState<string>();
-  const [pages, setPages] = useState<(string | undefined)[]>([]);
-  const [detailId, setDetailId] = useState<string>();
   const [notice, setNotice] = useState("");
   const change = useMutation({
     mutationFn: async (action: () => Promise<unknown>) => {
@@ -182,8 +173,6 @@ function PluginsContent(): JSX.Element {
     setNotice(message);
   };
   const execute = (action: () => Promise<unknown>, message?: string): void => { void run(action, message).catch(() => undefined); };
-  const catalog = useQuery({ queryKey: ["skill-catalog", state.data?.cloudUrl, search, cursor], queryFn: () => api.searchSkills(search, cursor), enabled: section === "skills" && state.isSuccess && detailId === undefined, retry: false });
-  const detail = useQuery({ queryKey: ["skill-detail", state.data?.cloudUrl, detailId], queryFn: () => api.skillDetail(detailId!), enabled: section === "skills" && detailId !== undefined, retry: false });
   const provider = state.data?.providers.find((entry) => entry.services.some((service) => service.id === selectedService));
   const service = provider?.services.find((entry) => entry.id === selectedService);
   const busy = change.isPending;
@@ -208,13 +197,13 @@ function PluginsContent(): JSX.Element {
   const data = state.data;
 
   return <VStack gap={4} {...stylex.props(styles.root)} data-testid="plugins-section">
-    <Text color="secondary">Available to every Bot. Configuration updates start on the next turn, without interrupting current work. Provider revocation is enforced when the provider rejects access, including during current turns.</Text>
+    <Text color="secondary">Plugins are shared across Bots. Changes apply on their next turn.</Text>
     <div {...stylex.props(styles.row)} aria-label="Plugin sections">
-      {(["services", "mcp", "skills", "advanced"] as const).map((id) => <Button key={id} label={id === "mcp" ? "MCP" : id[0]!.toUpperCase() + id.slice(1)} variant={section === id ? "primary" : "secondary"} size="sm" aria-pressed={section === id} onClick={() => setSection(id)} />)}
+      {(["services", "mcp", "skills"] as const).map((id) => <Button key={id} label={id === "mcp" ? "MCP" : id[0]!.toUpperCase() + id.slice(1)} variant={section === id ? "primary" : "secondary"} size="sm" aria-pressed={section === id} onClick={() => setSection(id)} />)}
     </div>
     {change.isError ? <Banner status="error" title="Change not completed" description={apiErrorMessage(change.error, "Plugin operation failed.")} /> : null}
     {busy ? <Text role="status">Applying change…</Text> : notice ? <Text role="status">{notice}</Text> : null}
-    {data.cloudError ? <Banner status="warning" title="Publisher backend unavailable" description={data.cloudError} /> : null}
+    {data.cloudError ? <Banner status="warning" title="Online services are temporarily unavailable" description="Your installed Skills and local connections are unchanged. Please try again later." /> : null}
     {confirm ? <VStack gap={2} {...stylex.props(styles.card)}>
       <Heading level={2}>{confirm.kind === "account" ? "Disconnect" : "Remove"} {confirm.name}?</Heading>
       <Text>{confirm.kind === "account" ? "Remove the locally stored grant. Current turns retain their snapshot until they finish. For immediate revocation, remove the application’s access at the provider. Other accounts are unaffected." : "This stops making it available to new turns. Current turns finish using their existing snapshot."}</Text>
@@ -231,8 +220,7 @@ function PluginsContent(): JSX.Element {
         <Button label="All services" variant="ghost" onClick={() => setSelectedService(undefined)} />
         <Heading level={2}>{service.name}</Heading><Text>{service.description}</Text>
         <Text color="secondary">These accounts belong to the shared {provider.name} account pool. The Agent receives each account’s label and identity; it chooses the account for the task.</Text>
-        <a href={provider.documentationUrl} target="_blank" rel="noopener noreferrer" {...stylex.props(styles.link)}>Provider setup and access requirements</a>
-        {provider.setupReason ? <Banner status="warning" title="Publisher setup required" description={provider.setupReason} /> : null}
+        {provider.setupReason ? <Banner status="warning" title="Connection unavailable" description="This service is not available yet. Please check back later." /> : null}
         {data.accounts.filter((account) => account.providerId === provider.id).map((account) => <VStack key={account.id} gap={2} {...stylex.props(styles.card)}>
           <Heading level={3}>{account.label}</Heading><Text color="secondary">{account.identity}</Text><Text color="secondary">{account.id}</Text>
           <Switch label={`Use for ${service.name}`} value={account.enabledServices.includes(service.id)} isDisabled={busy} onChange={(enabled) => execute(() => api.setPluginService(account.id, service.id, enabled))} />
@@ -247,7 +235,7 @@ function PluginsContent(): JSX.Element {
         <Heading level={2}>Services</Heading>
         <div {...stylex.props(styles.cards)}>{data.providers.flatMap((entry) => entry.services.map((card) => {
           const count = data.accounts.filter((account) => account.providerId === entry.id && account.enabledServices.includes(card.id) && account.status === "connected").length;
-          return <div key={card.id} {...stylex.props(styles.card)}><Item label={card.name} description={`${card.description} ${count ? `${count} enabled account${count === 1 ? "" : "s"}.` : "No enabled accounts."}`} onClick={() => setSelectedService(card.id)} /><Text color="secondary">{entry.mode === "mcp" ? "Official MCP" : "Official API"}{entry.setupReason ? " · Setup required" : ""}</Text></div>;
+          return <div key={card.id} {...stylex.props(styles.card)}><Item label={card.name} description={`${card.description} ${count ? `${count} enabled account${count === 1 ? "" : "s"}.` : "No enabled accounts."}`} onClick={() => setSelectedService(card.id)} /><Text color="secondary">{entry.setupReason ? "Not available yet" : "Ready to connect"}</Text></div>;
         }))}</div>
       </>}
     </VStack> : null}
@@ -265,35 +253,136 @@ function PluginsContent(): JSX.Element {
       </VStack>)}
     </VStack> : null}
 
-    {section === "skills" ? <VStack gap={3}>
-      <Heading level={2}>Skills</Heading><Text color="secondary">Browse the skills.sh catalog. Installation retains the complete source folder, and automatic updates check every six hours. New versions apply to the next turn.</Text>
-      <Heading level={3}>Installed for every Bot</Heading>
-      {data.skills.length ? <Button label="Check updates" variant="secondary" isDisabled={busy} onClick={() => execute(() => api.updateSkills(), "Update check completed. See each skill’s status below.")} /> : <Text color="secondary">No managed skills installed.</Text>}
-      {data.skills.map((skill) => <VStack key={skill.id} gap={2} {...stylex.props(styles.card)}>
-        <Heading level={4}>{skill.name}</Heading><Text>{skill.description}</Text><Text color="secondary">{skill.source}</Text>
-        <Switch label={`Enable ${skill.name}`} value={skill.enabled} isDisabled={busy} onChange={(enabled) => execute(() => api.setSkillEnabled(skill.id, enabled))} />
-        <details><summary>Installed revision</summary><code {...stylex.props(styles.code)}>{skill.revision}</code><Text color="secondary">{skill.lastCheckedAt ? `Checked ${new Date(skill.lastCheckedAt).toLocaleString()}` : `Installed ${new Date(skill.installedAt).toLocaleString()}`}</Text></details>
-        {skill.error ? <Banner status="warning" title="Update unavailable; installed version retained" description={skill.error} /> : null}
-        <Button label="Remove" variant="ghost" size="sm" isDisabled={busy} onClick={() => setConfirm({ kind: "skill", id: skill.id, name: skill.name })} />
-      </VStack>)}
-      <Heading level={3}>Native Agent skills · Read-only</Heading>
-      {data.nativeError ? <Banner status="warning" title="Native resources unavailable" description={data.nativeError} /> : data.nativeSkills.length ? data.nativeSkills.map((skill) => <Item key={skill.path} label={skill.name} description={`${skill.description} · ${skill.agentId}`} />) : <Text color="secondary">No native skills were discovered. Existing native configuration is never edited here.</Text>}
-      <Heading level={3}>skills.sh catalog</Heading>
-      {detailId ? <>
-        <Button label="Back to catalog" variant="ghost" onClick={() => setDetailId(undefined)} />
-        {detail.isPending ? <Text>Loading skill…</Text> : detail.isError ? <Banner status="error" title="Skill detail unavailable" description={apiErrorMessage(detail.error, "Could not load this skill.")} /> : detail.data ? <VStack gap={2}>
-          <Heading level={4}>{detail.data.name}</Heading><Text>{detail.data.description}</Text><a href={detail.data.url} target="_blank" rel="noopener noreferrer" {...stylex.props(styles.link)}>View on skills.sh</a>
-          <Button label={data.skills.some((skill) => skill.id === detailId) ? "Installed" : "Install"} isDisabled={busy || data.skills.some((skill) => skill.id === detailId)} onClick={() => execute(() => api.installSkill(detailId), "Skill installed. Use / in the composer, or let the Agent discover it on the next turn.")} />
-          <Text color="secondary">Review skills before installing. Skill instructions and supporting scripts are third-party content. Installation does not execute those scripts; the Agent may use them when you invoke the skill.</Text>
-          {detail.data.content ? <div {...stylex.props(styles.document)}><Markdown>{detail.data.content}</Markdown></div> : <Text color="secondary">The catalog has no text snapshot. Installation resolves the complete original source; missing or unsafe content is rejected.</Text>}
-        </VStack> : null}
-      </> : <>
-        <form onSubmit={(event) => { event.preventDefault(); setSearch(searchDraft.trim()); setCursor(undefined); setPages([]); }}><VStack gap={2}><TextInput label="Search skills.sh" value={searchDraft} onChange={setSearchDraft} width="100%" placeholder="Search by task or skill name" /><Button label="Search" type="submit" variant="secondary" isDisabled={searchDraft.trim().length === 1} /></VStack></form>
-        {catalog.isPending ? <Text>Loading catalog…</Text> : catalog.isError ? <VStack gap={2}><Banner status="error" title="Catalog unavailable" description={apiErrorMessage(catalog.error, "The official catalog could not be reached.")} /><Button label="Retry catalog" variant="secondary" onClick={() => void catalog.refetch()} /></VStack> : catalog.data?.skills.length ? catalog.data.skills.map((skill) => <Item key={skill.id} label={skill.name} description={`${skill.source}${skill.installs === undefined ? "" : ` · ${skill.installs.toLocaleString()} installs`}`} onClick={() => setDetailId(skill.id)} />) : <Text color="secondary">No matching skills.</Text>}
-        <div {...stylex.props(styles.row)}>{pages.length ? <Button label="Previous" variant="secondary" onClick={() => { setCursor(pages.at(-1)); setPages((current) => current.slice(0, -1)); }} /> : null}{catalog.data?.nextCursor ? <Button label="Next" variant="secondary" onClick={() => { setPages((current) => [...current, cursor]); setCursor(catalog.data!.nextCursor); }} /> : null}</div>
-      </>}
-    </VStack> : null}
+    {section === "skills" ? <SkillsPanel data={data} busy={busy} execute={execute} onRemove={(skill) => setConfirm({ kind: "skill", id: skill.id, name: skill.name })} /> : null}
 
-    {section === "advanced" ? <PublisherSetup key={data.cloudUrl} initial={data.cloudUrl} busy={busy} onSave={(url) => execute(() => api.configurePlugins(url))} /> : null}
+  </VStack>;
+}
+
+function SkillsPanel({ data, busy, execute, onRemove }: {
+  data: PluginStateDto;
+  busy: boolean;
+  execute(action: () => Promise<unknown>, message?: string): void;
+  onRemove(skill: InstalledSkillDto): void;
+}): JSX.Element {
+  const [view, setView] = useState<"discover" | "installed">("discover");
+  const [searchDraft, setSearchDraft] = useState("");
+  const [search, setSearch] = useState("");
+  const [page, setPage] = useState(0);
+  const [detailId, setDetailId] = useState<string>();
+  const cursor = !search && page > 0 ? String(page) : undefined;
+  const catalog = useQuery({
+    queryKey: ["skill-catalog", data.cloudUrl, search, cursor],
+    queryFn: () => api.searchSkills(search, cursor),
+    enabled: view === "discover" && detailId === undefined,
+    retry: false,
+    staleTime: 60_000,
+  });
+  const detail = useQuery({
+    queryKey: ["skill-detail", data.cloudUrl, detailId],
+    queryFn: () => api.skillDetail(detailId!),
+    enabled: view === "discover" && detailId !== undefined,
+    retry: false,
+  });
+  const installedCount = data.skills.length + data.nativeSkills.length;
+  const pageSize = search ? SKILL_CATALOG_PAGE_SIZE : catalog.data?.pageSize ?? SKILL_CATALOG_PAGE_SIZE;
+  const total = catalog.data?.total ?? 0;
+  const pageCount = Math.max(1, Math.ceil(total / pageSize));
+  const visibleSkills = search ? catalog.data?.skills.slice(page * pageSize, (page + 1) * pageSize) : catalog.data?.skills;
+  const canNext = catalog.isSuccess && (search ? page + 1 < pageCount : Boolean(catalog.data.nextCursor));
+  const selectedInstalled = data.skills.find((skill) => skill.id === detailId);
+  const pagination = <nav {...stylex.props(styles.pager)} aria-label="Skills pagination">
+    <Button label="Previous" variant="secondary" size="sm" isDisabled={page === 0 || catalog.isFetching} onClick={() => setPage((current) => current - 1)} />
+    <Text role="status">{catalog.isPending ? "Loading…" : catalog.isError ? "Unavailable" : `Page ${page + 1} of ${pageCount}`}</Text>
+    <Button label="Next" variant="secondary" size="sm" isDisabled={!canNext || catalog.isFetching} onClick={() => setPage((current) => current + 1)} />
+  </nav>;
+
+  return <VStack gap={4} data-testid="skills-panel">
+    <div {...stylex.props(styles.pager)}>
+      <Heading level={2}>Skills</Heading>
+      <div {...stylex.props(styles.row)} aria-label="Skill views">
+        <Button label="Discover" variant={view === "discover" ? "primary" : "secondary"} size="sm" aria-pressed={view === "discover"} onClick={() => setView("discover")} />
+        <Button label={`Installed (${installedCount})`} variant={view === "installed" ? "primary" : "secondary"} size="sm" aria-pressed={view === "installed"} onClick={() => setView("installed")} />
+      </div>
+    </div>
+    {view === "installed" ? <VStack gap={4}>
+      <div {...stylex.props(styles.pager)}>
+        <Heading level={3}>Installed with Omarchy Bot · {data.skills.length}</Heading>
+        {data.skills.length ? <Button label="Check updates" size="sm" variant="secondary" isDisabled={busy} onClick={() => execute(() => api.updateSkills(), "Update check completed. See each skill’s status below.")} /> : null}
+      </div>
+      <Text color="secondary">Shared across Bots. Updates are checked every six hours. Disabled Skills stay installed but are not offered to the Agent.</Text>
+      {data.skills.length ? <div {...stylex.props(styles.skillGrid)} aria-label="Skills installed with Omarchy Bot">
+        {data.skills.map((skill) => <Card key={skill.id} padding={4} xstyle={styles.skillCard} role="article" aria-label={skill.name}>
+          <div {...stylex.props(styles.skillBody)}>
+            <Heading level={4}>{skill.name}</Heading>
+            <Text {...stylex.props(styles.skillDescription)}>{skill.description}</Text>
+            <Text color="secondary">{skill.source}</Text>
+            <Switch label={`Enable ${skill.name}`} value={skill.enabled} isDisabled={busy} onChange={(enabled) => execute(() => api.setSkillEnabled(skill.id, enabled))} />
+            <details><summary>Version and updates</summary><code {...stylex.props(styles.code)}>{skill.revision}</code><Text color="secondary">{skill.lastCheckedAt ? `Checked ${new Date(skill.lastCheckedAt).toLocaleString()}` : `Installed ${new Date(skill.installedAt).toLocaleString()}`}</Text></details>
+            {skill.error ? <Banner status="warning" title="Update unavailable; installed version retained" description={skill.error} /> : null}
+            <div {...stylex.props(styles.skillActions)}><Text color="secondary">{skill.enabled ? "Enabled" : "Disabled"}</Text><Button label="Remove" aria-label={`Remove ${skill.name}`} variant="ghost" size="sm" isDisabled={busy} onClick={() => onRemove(skill)} /></div>
+          </div>
+        </Card>)}
+      </div> : <Card padding={4}><VStack gap={2}>
+        <Text>No Skills installed from the catalog yet.{data.nativeSkills.length ? ` Your ${data.nativeSkills.length} Agent-provided Skills are listed below.` : ""}</Text>
+        <Button label="Discover Skills" variant="secondary" onClick={() => { setView("discover"); setDetailId(undefined); }} />
+      </VStack></Card>}
+      <Heading level={3}>Provided by your Agent · {data.nativeSkills.length}</Heading>
+      <Text color="secondary">Already discovered by the Agent. These Skills are read-only here and do not need to be installed again.</Text>
+      {data.nativeError ? <Banner status="warning" title="Agent Skills could not be refreshed" description="Previously discovered Skills may still be listed. Try again later." /> : null}
+      <div {...stylex.props(styles.skillGrid)} aria-label="Agent-provided Skills">
+        {data.nativeSkills.map((skill) => <Card key={`${skill.agentId}:${skill.path}`} padding={4} variant="muted" xstyle={styles.skillCard} role="article" aria-label={skill.name}>
+          <div {...stylex.props(styles.skillBody)}>
+            <Heading level={4}>{skill.name}</Heading>
+            <Text {...stylex.props(styles.skillDescription)}>{skill.description}</Text>
+            <div {...stylex.props(styles.skillActions)}><Text color="secondary">{skill.agentId === "pi" ? "Pi" : skill.agentId}</Text><Text color="secondary">Read-only</Text></div>
+          </div>
+        </Card>)}
+      </div>
+      {!data.nativeError && !data.nativeSkills.length ? <Text color="secondary">No Agent-provided Skills were discovered.</Text> : null}
+    </VStack> : detailId ? <VStack gap={3}>
+      <Button label="Back to catalog" variant="ghost" onClick={() => setDetailId(undefined)} />
+      {detail.isPending ? <Text role="status">Loading skill…</Text> : detail.isError ? <VStack gap={2}><Banner status="error" title="Skill detail unavailable" description="This Skill could not be loaded. Please try again." /><Button label="Retry" variant="secondary" onClick={() => void detail.refetch()} /></VStack> : detail.data ? <>
+        <Card padding={4}><VStack gap={3}>
+          <Heading level={3}>{detail.data.name}</Heading><Text>{detail.data.description}</Text><Text color="secondary">{detail.data.source}</Text>
+          <div {...stylex.props(styles.pager)}>
+            <a href={detail.data.url} target="_blank" rel="noopener noreferrer" {...stylex.props(styles.link)}>View on skills.sh</a>
+            <Button label={selectedInstalled ? "Installed" : "Install"} isDisabled={busy || Boolean(selectedInstalled)} onClick={() => execute(() => api.installSkill(detailId), "Skill installed. Use / in the composer, or let the Agent discover it on the next turn.")} />
+          </div>
+        </VStack></Card>
+        <Text color="secondary">Review third-party instructions before installing. The complete Skill folder is saved, but its scripts do not run during installation.</Text>
+        {detail.data.content ? <div {...stylex.props(styles.document)}><Markdown>{detail.data.content}</Markdown></div> : <Text color="secondary">No text preview is available. Installation checks the original source.</Text>}
+      </> : null}
+    </VStack> : <VStack gap={3}>
+      <Text color="secondary">Find new capabilities for your Bots in the skills.sh catalog.</Text>
+      <form {...stylex.props(styles.search)} onSubmit={(event) => { event.preventDefault(); setSearch(searchDraft.trim()); setPage(0); }}>
+        <TextInput label="Search skills.sh" value={searchDraft} onChange={setSearchDraft} width="100%" placeholder="Search by task or skill name" />
+        <Button label="Search" type="submit" variant="secondary" isDisabled={searchDraft.trim().length === 1 || searchDraft.trim().length > 256} />
+      </form>
+      {catalog.isSuccess ? <div {...stylex.props(styles.pager)}>
+        <Text color="secondary">{total ? `${page * pageSize + 1}–${Math.min((page + 1) * pageSize, total)} of ${total.toLocaleString()} ${search ? "matches" : "trending Skills"}` : "0 matches"}</Text>
+        {search ? <Button label="Clear search" variant="ghost" size="sm" onClick={() => { setSearch(""); setSearchDraft(""); setPage(0); }} /> : null}
+      </div> : null}
+      {catalog.data?.searchLimit && total >= catalog.data.searchLimit ? <Text color="secondary">Showing the top {catalog.data.searchLimit} matches. Refine your search to narrow the results.</Text> : null}
+      {pagination}
+      {catalog.isPending ? <>
+        <Text role="status">Loading Skills…</Text>
+        <div {...stylex.props(styles.skillGrid)} aria-hidden="true">{Array.from({ length: 6 }, (_, index) => <Card key={index} padding={4} minHeight={150}><div {...stylex.props(styles.skeleton)} /><div {...stylex.props(styles.skeleton)} /></Card>)}</div>
+      </> : catalog.isError ? <VStack gap={2}><Banner status="error" title="Catalog unavailable" description="Skills could not be loaded. Your installed Skills are unchanged." /><Button label="Retry catalog" variant="secondary" onClick={() => void catalog.refetch()} /></VStack> : visibleSkills?.length ? <div {...stylex.props(styles.skillGrid)} aria-label="Skill catalog" data-testid="skill-catalog-grid">
+        {visibleSkills.map((skill) => {
+          const installed = data.skills.find((entry) => entry.id === skill.id);
+          return <Card key={skill.id} padding={4} minHeight={170} xstyle={styles.skillCard} role="article" aria-label={skill.name}>
+            <div {...stylex.props(styles.skillBody)}>
+              <Heading level={3}>{skill.name}</Heading><Text color="secondary">{skill.source}</Text>
+              {skill.description ? <Text {...stylex.props(styles.skillDescription)}>{skill.description}</Text> : null}
+              <div {...stylex.props(styles.skillActions)}>
+                <Text color="secondary">{installed ? installed.enabled ? "Enabled" : "Installed · Disabled" : skill.installs === undefined ? "Available" : `${skill.installs.toLocaleString()} installs`}</Text>
+                <Button label="View skill" aria-label={`View ${skill.name}`} variant="secondary" size="sm" onClick={() => setDetailId(skill.id)} />
+              </div>
+            </div>
+          </Card>;
+        })}
+      </div> : <Card padding={4}><VStack gap={2}><Heading level={3}>No matching Skills</Heading><Text color="secondary">Try another name or describe the task you want your Bot to do.</Text></VStack></Card>}
+      {catalog.isSuccess && Boolean(visibleSkills?.length) ? pagination : null}
+    </VStack>}
   </VStack>;
 }

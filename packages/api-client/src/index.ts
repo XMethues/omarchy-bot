@@ -114,9 +114,6 @@ export class ApiClient {
   plugins(): Promise<PluginStateDto> {
     return this.req("/api/plugins");
   }
-  configurePlugins(cloudUrl: string | null): Promise<void> {
-    return this.req("/api/plugins/settings", { method: "PUT", body: JSON.stringify({ cloudUrl }) });
-  }
   saveMcp(id: string | null, body: SaveMcpBody): Promise<McpConnectionDto> {
     return this.req(`/api/plugins/mcp${id === null ? "" : `/${encodeURIComponent(id)}`}`, {
       method: id === null ? "POST" : "PUT", body: JSON.stringify(body),

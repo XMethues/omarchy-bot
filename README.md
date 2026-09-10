@@ -149,6 +149,10 @@ a running call.
   alongside native Skills; type `/` in the composer to select one.
   If an entry no longer identifies a Skill in its source repository, installation
   fails rather than guessing a replacement.
+  **Discover** shows a paginated card catalog; **Installed** separates Skills
+  installed with Omarchy Bot (including disabled ones) from read-only Agent Skills.
+  Browsing uses server-side pages of 12. Search retrieves up to 200 matches once
+  and pages the cached results locally, with an explicit limit notice.
 - **Services:** separate service cards share a provider account pool, support
   multiple accounts, and request the supported provider group at first consent.
   Google Drive, Gmail, and Calendar are separate cards, as are Microsoft mail,
@@ -167,12 +171,13 @@ The composer uses Astryx's native slash-trigger menu. The pinned
 when that input is a combobox; Bun applies it during installation, and runtime
 archives include the patch. Reassess it when upgrading Astryx.
 
-#### Publisher deployment
+#### Publisher deployment (maintainers)
 
 Clients use `https://omarchy-bot-site-ymlq.vercel.app` automatically. Both new
 installations and existing configurations without an override use this default.
-To self-host, deploy `apps/site` to a stable HTTPS origin and enter that origin in
-**Plugins → Advanced**. Leave it empty and save to restore the default.
+The Bot Client does not expose publisher configuration. For self-hosted
+installations, operators can use the daemon's `PUT /api/plugins/settings`
+endpoint with an HTTPS `cloudUrl`; `null` restores the default.
 
 The Skills catalog uses Vercel OIDC and does not require service OAuth secrets.
 For service authorization, configure the publisher's server-side environment:
