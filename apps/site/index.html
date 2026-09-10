@@ -34,10 +34,25 @@
     />
     <link rel="stylesheet" href="/src/style.css" />
     <script>
+      document.documentElement.dataset.theme = "matte-black";
       try {
-        const theme = localStorage.getItem("omarchy-site-theme");
-        if (theme === "light" || theme === "dark")
-          document.documentElement.dataset.theme = theme;
+        const stored = localStorage.getItem("omarchy-site-theme");
+        const theme =
+          stored === "light"
+            ? "white"
+            : stored === "dark"
+              ? "matte-black"
+              : stored;
+        if (theme) {
+          document.documentElement.dataset.theme =
+            theme === "system"
+              ? matchMedia("(prefers-color-scheme: dark)").matches
+                ? "matte-black"
+                : "white"
+              : theme;
+          if (theme !== stored)
+            localStorage.setItem("omarchy-site-theme", theme);
+        }
       } catch {}
     </script>
   </head>
@@ -46,7 +61,13 @@
     <header class="site-header" id="top">
       <div class="container header-inner">
         <a class="wordmark" href="#top" aria-label="Omarchy Bot home"
-          >omarchy <span>bot</span></a
+          ><svg class="nav-mark" viewBox="0 0 1200 1200" aria-hidden="true">
+            <path
+              fill="currentColor"
+              fill-rule="evenodd"
+              d="m1200 1200h-480v-80h400v-1040h-479.996v160h-400v720h720v-720h-80v-80h159.996v880h-400v160h-640v-1200h1200zm-1120-80h480v-80h-400l.004-400h-80.004zm0-560h80.004v-400h400v-80h-480.004z"
+            /></svg
+          ><span>bot</span></a
         >
         <nav class="desktop-nav" aria-label="Main navigation">
           <a href="#workspace">The workspace</a>
@@ -57,9 +78,7 @@
           <label class="theme-control"
             ><span class="sr-only">Color theme</span
             ><select id="theme-select" aria-label="Color theme">
-              <option value="system">System</option>
-              <option value="light">Light</option>
-              <option value="dark">Dark</option>
+              <option value="matte-black">Matte Black</option>
             </select></label
           >
           <a
@@ -67,6 +86,7 @@
             href="https://github.com/XMethues/omarchy-bot"
             >GitHub <span aria-hidden="true">↗</span></a
           >
+          <a class="button primary nav-install" href="#install">Install</a>
           <button
             class="menu-toggle"
             id="menu-toggle"
@@ -91,22 +111,61 @@
     </header>
 
     <main id="main">
-      <section class="hero container" aria-labelledby="hero-title">
-        <div class="hero-copy">
-          <div class="pixel-wordmark" aria-hidden="true"></div>
-          <h1 id="hero-title">Your own AI teammates. Built for Omarchy.</h1>
-          <p class="hero-description">
-            Give your agents a name, a shared workspace, and a desktop you can
-            see.
-          </p>
-          <div class="hero-actions">
-            <a class="button primary" href="#install"
-              >Install on Omarchy <span aria-hidden="true">↗</span></a
-            ><a class="button secondary" href="#workspace"
-              >See the workspace <span aria-hidden="true">↓</span></a
-            >
+      <section class="hero" aria-labelledby="hero-title">
+        <canvas id="hero-field" aria-hidden="true"></canvas>
+        <div class="hero-content">
+          <a class="hero-announcement" data-hero-quiet href="#extensions"
+            >Omarchy Bot. Your agents, on your desktop
+            <span aria-hidden="true">→</span></a
+          >
+          <div
+            class="pixel-wordmark"
+            data-hero-wordmark
+            aria-hidden="true"
+          ></div>
+          <div class="hero-copy" data-hero-quiet>
+            <h1 id="hero-title">Your own AI teammates. Built for Omarchy.</h1>
+            <p class="hero-description">
+              Give your agents a name, a shared workspace, and a desktop you can
+              see.
+            </p>
+            <div class="hero-actions">
+              <a class="button primary" href="#install"
+                >Install on Omarchy <span aria-hidden="true">↗</span></a
+              ><a class="button secondary" href="#preview"
+                >See the workspace <span aria-hidden="true">↓</span></a
+              >
+            </div>
           </div>
         </div>
+        <aside class="theme-hint" id="theme-hint" data-hero-quiet hidden>
+          <button id="theme-hint-open" type="button">
+            Change the theme<span>Press T, or choose a theme above.</span>
+          </button>
+          <button
+            id="theme-hint-dismiss"
+            type="button"
+            aria-label="Dismiss theme tip"
+          >
+            ×
+          </button>
+        </aside>
+        <button
+          class="motion-toggle"
+          id="motion-toggle"
+          type="button"
+          aria-pressed="false"
+          hidden
+        >
+          Pause pixels
+        </button>
+      </section>
+
+      <section
+        class="section container product-preview"
+        id="preview"
+        aria-label="The Omarchy Bot workspace"
+      >
         <figure class="hero-visual">
           <a
             class="screenshot-link"
@@ -120,7 +179,7 @@
               src="/images/workspace.webp"
               width="1440"
               height="960"
-              fetchpriority="high"
+              loading="lazy"
               alt="Omarchy Bot showing a teammate sidebar and a conversation in a sample workspace"
             />
           </a>
@@ -442,6 +501,7 @@
           ><a href="https://github.com/XMethues/omarchy-bot/blob/main/LICENSE"
             >MIT license ↗</a
           >
+          <a href="/UPSTREAM-NOTICE.txt">Website credits</a>
         </nav>
       </div>
     </footer>

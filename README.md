@@ -108,10 +108,17 @@ Open **<http://127.0.0.1:7322>**. The daemon listens on `127.0.0.1:7321`; Vite p
 ### Official website
 
 The public product site lives in `apps/site`, separate from the local Bot Client.
-It remains a Vite + TypeScript frontend with native CSS. Its Omarchy-inspired
-presentation uses JetBrains Mono and Geist, a product-specific pixel wordmark,
-square controls, and Nord-based light/dark colors. Fonts and their licenses are
-self-hosted in `apps/site/public/fonts`.
+It remains a Vite + TypeScript frontend with native CSS. The full-viewport pixel
+field, original 81-by-19 wordmark, and 22 named palettes are adapted from
+[the Omarchy website](https://github.com/omacom/omarchy-site/tree/47711270650b9c78c7bfa996cdd0b6050c79566f),
+with Matte Black as the default. The Canvas renderer shares the wordmark's grid,
+supports pointer glow and click stamps, pauses when offscreen or hidden, and
+honors reduced motion and an explicit pause control. Product screenshots remain
+below the first screen. Radio and etch-effect integrations are not included.
+Upstream-derived portions are attributed separately in
+[`apps/site/public/UPSTREAM-NOTICE.txt`](apps/site/public/UPSTREAM-NOTICE.txt)
+and are not relicensed under this project's MIT license. JetBrains Mono and
+Geist are self-hosted with their font licenses in `apps/site/public/fonts`.
 
 The public pages make no daemon connections or model calls. Product screenshots
 use illustrative data. The same Vercel project includes server-side plugin OAuth
