@@ -100,7 +100,7 @@ export interface NativeSkillDto {
 }
 export interface PluginStateDto {
   revision: number;
-  cloudUrl: string | null;
+  cloudUrl: string;
   cloudError?: string;
   providers: PluginProviderDto[];
   accounts: PluginAccountDto[];

@@ -110,7 +110,8 @@ Open **<http://127.0.0.1:7322>**. The daemon listens on `127.0.0.1:7321`; Vite p
 The public product site lives in `apps/site`, separate from the local Bot Client.
 The public pages make no daemon connections or model calls. Product screenshots
 use illustrative data. The same Vercel project includes server-side plugin OAuth
-and Skills catalog routes; these require publisher configuration before use.
+and Skills catalog routes. Default Skills access is ready to use; service
+authorization still requires publisher configuration.
 
 ```bash
 bun run site:dev   # http://127.0.0.1:7330
@@ -142,7 +143,8 @@ a running call.
 - **MCP:** stdio subprocesses and remote Streamable HTTP, with legacy SSE fallback.
   Environment variables and HTTP headers are write-only in the Client.
 - **Skills:** search the formal skills.sh catalog, inspect, install, enable, and
-  remove. Enabled Skills update automatically every six hours. Installations
+  remove without configuring a backend. Enabled Skills update automatically every
+  six hours. Installations
   include companion files, not only `SKILL.md`. Pi discovers managed Skills
   alongside native Skills; type `/` in the composer to select one.
 - **Services:** separate service cards share a provider account pool, support
@@ -165,8 +167,13 @@ archives include the patch. Reassess it when upgrading Astryx.
 
 #### Publisher deployment
 
-Deploy `apps/site` to a stable HTTPS origin, then configure that origin in
-**Plugins → Setup**. Set these server-side environment variables in Vercel:
+Clients use `https://omarchy-bot-site-ymlq.vercel.app` automatically. Both new
+installations and existing configurations without an override use this default.
+To self-host, deploy `apps/site` to a stable HTTPS origin and enter that origin in
+**Plugins → Advanced**. Leave it empty and save to restore the default.
+
+The Skills catalog uses Vercel OIDC and does not require service OAuth secrets.
+For service authorization, configure the publisher's server-side environment:
 
 - `PLUGIN_CLOUD_URL` or `SITE_URL`: the deployed HTTPS origin.
 - `OAUTH_STATE_SECRET`: a random secret of at least 32 bytes.

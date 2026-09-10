@@ -197,7 +197,7 @@ export async function handlePluginCloudRequest(request: Request): Promise<Respon
       if (route === "catalog/detail") {
         const id = url.searchParams.get("id") ?? "";
         const parts = id.split("/");
-        if (parts.length < 2 || parts.length > 3 || parts.some((part) => !part || part === "." || part === ".." || !/^[A-Za-z0-9_.-]+$/.test(part))) throw new BrokerError(400, "Invalid skill identity.");
+        if (parts.length < 2 || parts.length > 3 || parts.some((part, index) => !part || part === "." || part === ".." || !(index === parts.length - 1 ? /^[A-Za-z0-9_.:-]+$/ : /^[A-Za-z0-9_.-]+$/).test(part))) throw new BrokerError(400, "Invalid skill identity.");
         upstream = new URL(`https://skills.sh/api/v1/skills/${parts.map(encodeURIComponent).join("/")}`);
       } else {
         const query = (url.searchParams.get("q") ?? "").trim();

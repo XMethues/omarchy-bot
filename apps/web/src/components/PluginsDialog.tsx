@@ -28,7 +28,7 @@ const styles = stylex.create({
   document: { maxHeight: "45vh", overflow: "auto", minWidth: 0 },
 });
 
-type Section = "services" | "mcp" | "skills" | "setup";
+type Section = "services" | "mcp" | "skills" | "advanced";
 
 function McpEditor({ initial, busy, onSave, onCancel }: {
   initial?: McpConnectionDto; busy: boolean; onSave(body: SaveMcpBody): Promise<void>; onCancel(): void;
@@ -99,14 +99,14 @@ function AccountLabel({ account, busy, onSave }: { account: PluginAccountDto; bu
   </form>;
 }
 
-function PublisherSetup({ initial, busy, onSave }: { initial: string | null; busy: boolean; onSave(url: string | null): void }): JSX.Element {
-  const [url, setUrl] = useState(initial ?? "");
+function PublisherSetup({ initial, busy, onSave }: { initial: string; busy: boolean; onSave(url: string | null): void }): JSX.Element {
+  const [url, setUrl] = useState(initial);
   return <form onSubmit={(event) => { event.preventDefault(); onSave(url.trim() || null); }}>
     <VStack gap={3}>
-      <Heading level={2}>Publisher backend</Heading>
-      <Text>The project-owned Vercel backend provides the formal skills.sh catalog and confidential OAuth exchanges. Business data goes directly between this Omarchy host and the provider. User tokens stay on this host.</Text>
-      <TextInput label="Publisher HTTPS origin" value={url} onChange={setUrl} placeholder="Your deployed publisher origin" width="100%" isDisabled={busy} />
-      <Text color="secondary">No public endpoint is assumed. Leave empty to remove the catalog/authorization endpoint. Existing account refresh remains bound to its original publisher. Never enter a client secret here.</Text>
+      <Heading level={2}>Advanced publisher settings</Heading>
+      <Text>Omarchy Bot connects to its publisher backend automatically. Change this only to use a self-hosted backend. Business data goes directly between this Omarchy host and the provider. User tokens stay on this host.</Text>
+      <TextInput label="Publisher HTTPS origin" value={url} onChange={setUrl} placeholder="Optional custom publisher origin" width="100%" isDisabled={busy} />
+      <Text color="secondary">Leave empty to restore the default backend. Existing account refresh remains bound to its original publisher. Never enter a client secret here.</Text>
       <Button label={busy ? "Saving…" : "Save backend"} type="submit" isDisabled={busy} />
       <Banner status="warning" title="Local client only" description="The daemon control API is not an authenticated remote-access boundary. Do not expose it publicly. Publisher callback support is limited to localhost and private-network client origins." />
     </VStack>
@@ -182,7 +182,7 @@ function PluginsContent(): JSX.Element {
     setNotice(message);
   };
   const execute = (action: () => Promise<unknown>, message?: string): void => { void run(action, message).catch(() => undefined); };
-  const catalog = useQuery({ queryKey: ["skill-catalog", state.data?.cloudUrl, search, cursor], queryFn: () => api.searchSkills(search, cursor), enabled: section === "skills" && Boolean(state.data?.cloudUrl) && detailId === undefined, retry: false });
+  const catalog = useQuery({ queryKey: ["skill-catalog", state.data?.cloudUrl, search, cursor], queryFn: () => api.searchSkills(search, cursor), enabled: section === "skills" && state.isSuccess && detailId === undefined, retry: false });
   const detail = useQuery({ queryKey: ["skill-detail", state.data?.cloudUrl, detailId], queryFn: () => api.skillDetail(detailId!), enabled: section === "skills" && detailId !== undefined, retry: false });
   const provider = state.data?.providers.find((entry) => entry.services.some((service) => service.id === selectedService));
   const service = provider?.services.find((entry) => entry.id === selectedService);
@@ -210,7 +210,7 @@ function PluginsContent(): JSX.Element {
   return <VStack gap={4} {...stylex.props(styles.root)} data-testid="plugins-section">
     <Text color="secondary">Available to every Bot. Configuration updates start on the next turn, without interrupting current work. Provider revocation is enforced when the provider rejects access, including during current turns.</Text>
     <div {...stylex.props(styles.row)} aria-label="Plugin sections">
-      {(["services", "mcp", "skills", "setup"] as const).map((id) => <Button key={id} label={id === "mcp" ? "MCP" : id[0]!.toUpperCase() + id.slice(1)} variant={section === id ? "primary" : "secondary"} size="sm" aria-pressed={section === id} onClick={() => setSection(id)} />)}
+      {(["services", "mcp", "skills", "advanced"] as const).map((id) => <Button key={id} label={id === "mcp" ? "MCP" : id[0]!.toUpperCase() + id.slice(1)} variant={section === id ? "primary" : "secondary"} size="sm" aria-pressed={section === id} onClick={() => setSection(id)} />)}
     </div>
     {change.isError ? <Banner status="error" title="Change not completed" description={apiErrorMessage(change.error, "Plugin operation failed.")} /> : null}
     {busy ? <Text role="status">Applying change…</Text> : notice ? <Text role="status">{notice}</Text> : null}
@@ -245,7 +245,6 @@ function PluginsContent(): JSX.Element {
         <Text color="secondary">First consent requests the supported {provider.name} service group. You can disable individual cards afterward. Expanded permissions require reconnecting for consent.</Text>
       </> : <>
         <Heading level={2}>Services</Heading>
-        {!data.cloudUrl ? <Text color="secondary">Configure the publisher backend under Setup to authorize service accounts.</Text> : null}
         <div {...stylex.props(styles.cards)}>{data.providers.flatMap((entry) => entry.services.map((card) => {
           const count = data.accounts.filter((account) => account.providerId === entry.id && account.enabledServices.includes(card.id) && account.status === "connected").length;
           return <div key={card.id} {...stylex.props(styles.card)}><Item label={card.name} description={`${card.description} ${count ? `${count} enabled account${count === 1 ? "" : "s"}.` : "No enabled accounts."}`} onClick={() => setSelectedService(card.id)} /><Text color="secondary">{entry.mode === "mcp" ? "Official MCP" : "Official API"}{entry.setupReason ? " · Setup required" : ""}</Text></div>;
@@ -267,9 +266,9 @@ function PluginsContent(): JSX.Element {
     </VStack> : null}
 
     {section === "skills" ? <VStack gap={3}>
-      <Heading level={2}>Skills</Heading><Text color="secondary">Browse the formal skills.sh catalog through the publisher backend. Installation retains the complete source folder, and automatic updates check every six hours. New versions apply to the next turn.</Text>
+      <Heading level={2}>Skills</Heading><Text color="secondary">Browse the skills.sh catalog. Installation retains the complete source folder, and automatic updates check every six hours. New versions apply to the next turn.</Text>
       <Heading level={3}>Installed for every Bot</Heading>
-      {data.skills.length ? <Button label="Check updates" variant="secondary" isDisabled={busy || !data.cloudUrl} onClick={() => execute(() => api.updateSkills(), "Update check completed. See each skill’s status below.")} /> : <Text color="secondary">No managed skills installed.</Text>}
+      {data.skills.length ? <Button label="Check updates" variant="secondary" isDisabled={busy} onClick={() => execute(() => api.updateSkills(), "Update check completed. See each skill’s status below.")} /> : <Text color="secondary">No managed skills installed.</Text>}
       {data.skills.map((skill) => <VStack key={skill.id} gap={2} {...stylex.props(styles.card)}>
         <Heading level={4}>{skill.name}</Heading><Text>{skill.description}</Text><Text color="secondary">{skill.source}</Text>
         <Switch label={`Enable ${skill.name}`} value={skill.enabled} isDisabled={busy} onChange={(enabled) => execute(() => api.setSkillEnabled(skill.id, enabled))} />
@@ -280,7 +279,7 @@ function PluginsContent(): JSX.Element {
       <Heading level={3}>Native Agent skills · Read-only</Heading>
       {data.nativeError ? <Banner status="warning" title="Native resources unavailable" description={data.nativeError} /> : data.nativeSkills.length ? data.nativeSkills.map((skill) => <Item key={skill.path} label={skill.name} description={`${skill.description} · ${skill.agentId}`} />) : <Text color="secondary">No native skills were discovered. Existing native configuration is never edited here.</Text>}
       <Heading level={3}>skills.sh catalog</Heading>
-      {!data.cloudUrl ? <VStack gap={2}><Text color="secondary">The official API needs a deployed Vercel backend with OIDC enabled. No anonymous catalog fallback is used.</Text><Button label="Open Setup" variant="secondary" onClick={() => setSection("setup")} /></VStack> : detailId ? <>
+      {detailId ? <>
         <Button label="Back to catalog" variant="ghost" onClick={() => setDetailId(undefined)} />
         {detail.isPending ? <Text>Loading skill…</Text> : detail.isError ? <Banner status="error" title="Skill detail unavailable" description={apiErrorMessage(detail.error, "Could not load this skill.")} /> : detail.data ? <VStack gap={2}>
           <Heading level={4}>{detail.data.name}</Heading><Text>{detail.data.description}</Text><a href={detail.data.url} target="_blank" rel="noopener noreferrer" {...stylex.props(styles.link)}>View on skills.sh</a>
@@ -295,6 +294,6 @@ function PluginsContent(): JSX.Element {
       </>}
     </VStack> : null}
 
-    {section === "setup" ? <PublisherSetup key={data.cloudUrl ?? "unset"} initial={data.cloudUrl} busy={busy} onSave={(url) => execute(() => api.configurePlugins(url))} /> : null}
+    {section === "advanced" ? <PublisherSetup key={data.cloudUrl} initial={data.cloudUrl} busy={busy} onSave={(url) => execute(() => api.configurePlugins(url))} /> : null}
   </VStack>;
 }

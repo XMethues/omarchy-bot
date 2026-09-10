@@ -16,6 +16,8 @@ import { HttpError } from "../bots/bots.ts";
 import { connectMcp, type McpConnection } from "./mcp.ts";
 import { materializeSkill, skillFrontmatter } from "./skillInstaller.ts";
 
+const DEFAULT_PUBLISHER_ORIGIN = "https://omarchy-bot-site-ymlq.vercel.app";
+
 const Grant = z.object({
   generation: z.string(), accessToken: z.string(), refreshToken: z.string().optional(), expiresAt: z.number().optional(),
   scopes: z.array(z.string()), cloudUrl: z.string().url(), metadata: z.record(z.unknown()).default({}),
@@ -152,8 +154,7 @@ export class PluginsService {
   }
 
   #cloudUrl(): string {
-    if (!this.#state.cloudUrl) throw new HttpError(409, "Configure the publisher HTTPS backend to use the official skill catalog or connect service accounts");
-    return this.#state.cloudUrl;
+    return this.#state.cloudUrl ?? DEFAULT_PUBLISHER_ORIGIN;
   }
 
   configure(cloudUrl: string | null): void {
@@ -171,18 +172,16 @@ export class PluginsService {
   async #providers(): Promise<{ providers: PluginProviderDto[]; error?: string }> {
     if (this.#providerCache && Date.now() - this.#providerCache.at < 30_000) return this.#providerCache;
     let providers: PluginProviderDto[] = Object.values(PLUGIN_PROVIDERS).map(({ id, name, mode, services, documentationUrl }) => ({ id, name, mode, documentationUrl,
-      services: services.map(({ id: serviceId, name: serviceName, description }) => ({ id: serviceId, name: serviceName, description })), setupReason: "Configure the publisher backend before authorizing accounts." }));
+      services: services.map(({ id: serviceId, name: serviceName, description }) => ({ id: serviceId, name: serviceName, description })), setupReason: "Publisher backend is unavailable." }));
     let error: string | undefined;
-    if (this.#state.cloudUrl) {
-      try {
-        const remote = z.array(z.object({ id: PluginProviderId, setupReason: z.string().optional() })).parse(await this.#cloud(this.#state.cloudUrl, "providers"));
-        providers = providers.map((provider) => {
-          const registered = remote.find((item) => item.id === provider.id);
-          const { setupReason: _reason, ...known } = provider;
-          return { ...known, ...(registered === undefined ? { setupReason: "Publisher does not support this provider." } : registered.setupReason ? { setupReason: registered.setupReason } : {}) };
-        });
-      } catch (failure) { error = redactToolErrorSummary(failure instanceof Error ? failure.message : failure); }
-    }
+    try {
+      const remote = z.array(z.object({ id: PluginProviderId, setupReason: z.string().optional() })).parse(await this.#cloud(this.#cloudUrl(), "providers"));
+      providers = providers.map((provider) => {
+        const registered = remote.find((item) => item.id === provider.id);
+        const { setupReason: _reason, ...known } = provider;
+        return { ...known, ...(registered === undefined ? { setupReason: "Publisher does not support this provider." } : registered.setupReason ? { setupReason: registered.setupReason } : {}) };
+      });
+    } catch (failure) { error = redactToolErrorSummary(failure instanceof Error ? failure.message : failure); }
     this.#providerCache = { at: Date.now(), providers, ...(error ? { error } : {}) };
     return this.#providerCache;
   }
@@ -216,7 +215,7 @@ export class PluginsService {
 
   async state(): Promise<PluginStateDto> {
     const [cloud, native] = await Promise.all([this.#providers(), this.#native()]);
-    return { revision: this.#state.revision, cloudUrl: this.#state.cloudUrl, providers: cloud.providers,
+    return { revision: this.#state.revision, cloudUrl: this.#cloudUrl(), providers: cloud.providers,
       accounts: this.#state.accounts.map((account) => this.#accountDto(account)), mcp: this.#state.mcp.map((connection) => this.#mcpDto(connection)), skills: this.#state.skills.map((skill) => this.#skillDto(skill)),
       nativeSkills: native.skills.map((skill) => ({ ...skill, agentId: "pi", readOnly: true })),
       ...(cloud.error ? { cloudError: cloud.error } : {}), ...(this.#nativeCache?.error ? { nativeError: this.#nativeCache.error } : {}) };
