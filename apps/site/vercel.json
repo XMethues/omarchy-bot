@@ -4,6 +4,9 @@
   "installCommand": "cd ../.. && bunx bun@1.4.2 install --frozen-lockfile",
   "buildCommand": "bunx bun@1.4.2 run build",
   "outputDirectory": "dist",
+  "rewrites": [
+    { "source": "/api/plugins/:path*", "destination": "/api/plugins/[...path]" }
+  ],
   "headers": [
     {
       "source": "/(.*)",
