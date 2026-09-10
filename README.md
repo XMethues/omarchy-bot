@@ -147,6 +147,8 @@ a running call.
   six hours. Installations
   include companion files, not only `SKILL.md`. Pi discovers managed Skills
   alongside native Skills; type `/` in the composer to select one.
+  If an entry no longer identifies a Skill in its source repository, installation
+  fails rather than guessing a replacement.
 - **Services:** separate service cards share a provider account pool, support
   multiple accounts, and request the supported provider group at first consent.
   Google Drive, Gmail, and Calendar are separate cards, as are Microsoft mail,

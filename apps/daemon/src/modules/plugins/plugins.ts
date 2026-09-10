@@ -321,12 +321,13 @@ export class PluginsService {
 
   async detail(id: string): Promise<CatalogSkillDetailDto> {
     const raw = z.object({ id: z.string(), source: z.string(), slug: z.string(), installs: z.number().optional(), files: z.array(z.object({ path: z.string(), contents: z.string() })).nullable() }).parse(await this.#cloud(this.#cloudUrl(), `catalog/detail?${new URLSearchParams({ id })}`));
-    if (raw.id !== id || raw.id !== `${raw.source}/${raw.slug}`) throw new HttpError(502, "Catalog returned a mismatched skill identity");
     const content = raw.files?.find((file) => file.path === "SKILL.md")?.contents ?? "";
     const cached = this.#catalog.get(id);
     const sourceType = cached?.sourceType ?? (raw.source.includes("/") ? "github" : "well-known");
     let metadata = { name: cached?.name ?? raw.slug, description: cached?.description ?? "" };
     if (content) metadata = skillFrontmatter(content);
+    // The catalog can use the original name while detail returns a canonical slug.
+    if (raw.id !== `${raw.source}/${raw.slug}` || (raw.id !== id && (!content || id !== `${raw.source}/${metadata.name}`))) throw new HttpError(502, "Catalog returned a mismatched skill identity");
     return { id, ...metadata, source: raw.source, sourceType, installUrl: cached?.installUrl ?? (sourceType === "github" ? `https://github.com/${raw.source}` : `https://${raw.source}`),
       ...(raw.installs === undefined ? {} : { installs: raw.installs }), content, url: `https://skills.sh/${id.split("/").map(encodeURIComponent).join("/")}` };
   }
